@@ -5,7 +5,7 @@ All clients implement the WalletClient interface for easy swapping.
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional, List, Dict
+from typing import Optional
 import bittensor as bt
 
 
@@ -25,8 +25,8 @@ class WalletClient(ABC):
         """
         return self._address
      
-    @abstractmethod
     @property
+    @abstractmethod
     def type(self) -> str:
         """
         Get the wallet type (e.g., 'bittensor', 'talisman', 'address-only')

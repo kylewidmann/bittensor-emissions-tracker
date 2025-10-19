@@ -12,6 +12,8 @@ if __name__ == "__main__":
     parser.add_argument('--mode', choices=['auto', 'manual', 'pending', 'liquidations', 'verify-prices'], default='auto',
                        help='Mode: auto (check emissions), manual (enter manually), pending (show pending), liquidations (process liquidations), verify-prices (review and update prices)')
     parser.add_argument('--lookback', type=int, default=1, help='Days to look back for emissions/liquidations')
+    parser.add_argument('--start-date', type=str, help='Start date for price verification (YYYY-MM-DD)')
+    parser.add_argument('--end-date', type=str, help='End date for price verification (YYYY-MM-DD)')
     args = parser.parse_args()
     
     # Create price client based on configuration
@@ -19,7 +21,7 @@ if __name__ == "__main__":
     price_client = CoinMarketCapClient(settings.cmc_api_key)
     print("Using CoinMarketCap API (5-minute intervals)")
     
-    # Initialize tracker
+    # Initialize tracker with just the price client
     tracker = BittensorEmissionTracker(
         price_client=price_client
     )
@@ -49,4 +51,3 @@ if __name__ == "__main__":
     elif args.mode == 'verify-prices':
         # Verify and update prices for existing emissions
         tracker.verify_and_update_prices(start_date=args.start_date, end_date=args.end_date)
-    

@@ -19,26 +19,21 @@ from substrateinterface import SubstrateInterface
 import bittensor as bt
 
 class BittensorEmissionTracker:
-    def __init__(self, wallet: WalletClient, price_client: PriceClient):
+    def __init__(self, price_client: PriceClient):
         """
         Initialize the tracker with wallet info and Google Sheets credentials
         
         Args:
-            wallet_name: Your bittensor wallet name
-            hotkey_name: Your hotkey name
-            sheet_name: Google Sheets name
-            credentials_path: Path to Google API credentials JSON
-            brokerage_address: Address of your brokerage wallet (for detecting liquidations)
             price_client: PriceClient instance for getting historical prices
         """
         self.config = TrackerSettings()
-        self.wallet = wallet
         self.price_client = price_client
-        self.sheet_name = self.config.tracker_sheet
+        self.sheet_id = self.config.tracker_sheet_id
         self.brokerage_address = self.config.brokerage_ss58
+        self.wallet_address = self.config.wallet_ss58
+        self.contract_address = self.config.contract_ss58
         
-        print(f"Initializing tracker for wallet: {self.wallet}")
-        print(f"Tracking address: {self.wallet.address}")
+        print(f"Initializing tracker for wallet: {self.wallet_address}")
         
         # Connect to Bittensor (for blockchain queries only, no wallet needed)
         self.subtensor = bt.subtensor(network="finney")
@@ -56,12 +51,9 @@ class BittensorEmissionTracker:
     def _init_tracking_sheet(self):
         # Main tracking sheet
         try:
-            self.sheet = self.sheets_client.open(self.sheet_name).sheet1
+            self.sheet = self.sheets_client.open_by_key(self.sheet_id).sheet1
         except:
-            # Create new sheet if it doesn't exist
-            spreadsheet = self.sheets_client.create(self.sheet_name)
-            spreadsheet.share('', perm_type='anyone', role='writer')  # Make it accessible
-            self.sheet = spreadsheet.sheet1
+            raise RuntimeError("Sheet not found.  Create the sheet and set the ID for the `TRACKER_SHEET_ID` env variable.")
 
         self._init_headers()
 
@@ -92,9 +84,9 @@ class BittensorEmissionTracker:
     def _init_liquidation_queue_sheet(self):
         # Create or get liquidation queue sheet
         try:
-            self.liquidation_sheet = self.sheets_client.open(self.sheet_name).worksheet('Liquidation Queue')
+            self.liquidation_sheet = self.sheets_client.open_by_key(self.sheet_id).worksheet('Liquidation Queue')
         except:
-            spreadsheet = self.sheets_client.open(self.sheet_name)
+            spreadsheet = self.sheets_client.open_by_key(self.sheet_id)
             self.liquidation_sheet = spreadsheet.add_worksheet(title='Liquidation Queue', rows=100, cols=15)
             self.liquidation_sheet.append_row([
                 'Priority',
@@ -118,9 +110,9 @@ class BittensorEmissionTracker:
     def _init_capital_gains_sheet(self):
         # Create or get capital gains summary sheet
         try:
-            self.gains_sheet = self.sheets_client.open(self.sheet_name).worksheet('Capital Gains Summary')
+            self.gains_sheet = self.sheets_client.open_by_key(self.sheet_id).worksheet('Capital Gains Summary')
         except:
-            spreadsheet = self.sheets_client.open(self.sheet_name)
+            spreadsheet = self.sheets_client.open_by_key(self.sheet_id)
             self.gains_sheet = spreadsheet.add_worksheet(title='Capital Gains Summary', rows=100, cols=10)
             self.gains_sheet.append_row([
                 'Year',
@@ -229,14 +221,11 @@ class BittensorEmissionTracker:
         
         Args:
             lookback_days: How many days back to check
-            contract_address: The subnet smart contract address (optional filter)
             
         Returns:
             list: Emission events (transfers to your wallet)
         """
         try:
-            contract_address = self.config.contract_ss58
-
             # Get current block
             current_block = self.subtensor.get_current_block()
             
@@ -245,7 +234,8 @@ class BittensorEmissionTracker:
             start_block = max(0, current_block - (blocks_per_day * lookback_days))
             
             print(f"Scanning blocks {start_block} to {current_block}")
-            print(f"Wallet address: {self.wallet.address}")
+            print(f"Wallet address: {self.wallet_address}")
+            print(f"Contract address: {self.contract_address}")
             
             # Connect to substrate
             substrate = SubstrateInterface(
@@ -271,7 +261,7 @@ class BittensorEmissionTracker:
                         if params.get('to') == self.wallet_address:
                             # Optionally filter by sender (contract address)
                             from_address = params.get('from')
-                            if contract_address and from_address != contract_address:
+                            if self.contract_address and from_address != self.contract_address:
                                 continue
                             
                             # Get block timestamp
@@ -483,15 +473,16 @@ class BittensorEmissionTracker:
         print(f"\n✓ Processed {len(emissions)} emission(s)")
         print(f"📋 Check 'Liquidation Queue' sheet for manual tasks")
     
-    def get_outgoing_transfers(self, lookback_days=7):
+    def get_tao_transfers_to_brokerage(self, lookback_days=7):
         """
-        Query blockchain for outgoing transfers from your wallet to brokerage
+        Query blockchain for TAO transfers from your wallet to brokerage.
+        These would be from unstaking ALPHA tokens and converting to TAO.
         
         Args:
             lookback_days: How many days back to check
             
         Returns:
-            list: Outgoing transfer events
+            list: TAO transfer events to brokerage
         """
         try:
             from substrateinterface import SubstrateInterface
@@ -501,10 +492,9 @@ class BittensorEmissionTracker:
             blocks_per_day = 7200
             start_block = max(0, current_block - (blocks_per_day * lookback_days))
             
-            print(f"Scanning blocks {start_block} to {current_block} for outgoing transfers")
+            print(f"Scanning blocks {start_block} to {current_block} for TAO transfers to brokerage")
             print(f"From: {self.wallet_address}")
-            if self.brokerage_address:
-                print(f"To: {self.brokerage_address}")
+            print(f"To: {self.brokerage_address}")
             
             # Connect to substrate
             substrate = SubstrateInterface(
@@ -521,18 +511,16 @@ class BittensorEmissionTracker:
                 events = substrate.get_events(block_hash)
                 
                 for event in events:
-                    # Look for Transfer events FROM your wallet
+                    # Look for Transfer events FROM your wallet TO brokerage
                     if event.value['event_id'] == 'Transfer' and event.value['module_id'] == 'Balances':
                         params = event.value['attributes']
                         
                         from_address = params.get('from')
                         to_address = params.get('to')
                         
-                        # Check if transfer is FROM your address
-                        if from_address == self.wallet.address:
-                            # Optionally filter by destination (brokerage address)
-                            if self.brokerage_address and to_address != self.brokerage_address:
-                                continue
+                        # Check if transfer is FROM your address TO brokerage
+                        if (from_address == self.wallet_address and 
+                            to_address == self.brokerage_address):
                             
                             # Get block timestamp
                             block = substrate.get_block(block_hash)
@@ -540,23 +528,344 @@ class BittensorEmissionTracker:
                             
                             # Amount is in RAO (1 TAO = 10^9 RAO)
                             amount_rao = params.get('amount', 0)
-                            amount_alpha = amount_rao / 1e9
+                            amount_tao = amount_rao / 1e9
                             
                             transfers.append({
                                 'block_number': block_num,
                                 'timestamp': timestamp,
                                 'to': to_address,
-                                'amount': amount_alpha,
+                                'amount_tao': amount_tao,
                                 'amount_rao': amount_rao
                             })
                             
-                            print(f"Found outgoing transfer: {amount_alpha:.4f} ALPHA at block {block_num}")
+                            print(f"Found TAO transfer to brokerage: {amount_tao:.4f} TAO at block {block_num}")
             
             return transfers
             
         except Exception as e:
-            print(f"Error querying blockchain for outgoing transfers: {e}")
+            print(f"Error querying blockchain for TAO transfers: {e}")
             return []
+    
+    def check_and_process_liquidations(self, lookback_days=7):
+        """
+        Check for completed liquidations by looking for TAO transfers to brokerage.
+        Match these with pending liquidation queue items.
+        
+        Args:
+            lookback_days: How many days back to check for transfers
+        """
+        print(f"\n{'='*60}")
+        print("CHECKING FOR COMPLETED LIQUIDATIONS")
+        print(f"{'='*60}")
+        
+        # Get TAO transfers to brokerage
+        tao_transfers = self.get_tao_transfers_to_brokerage(lookback_days)
+        
+        if not tao_transfers:
+            print("No TAO transfers to brokerage found")
+            return
+        
+        # Get pending liquidations
+        pending_liquidations = self.get_pending_liquidations_data()
+        
+        if not pending_liquidations:
+            print("No pending liquidations to match")
+            return
+        
+        print(f"\nFound {len(tao_transfers)} TAO transfers and {len(pending_liquidations)} pending liquidations")
+        
+        # Try to match transfers with pending liquidations
+        for transfer in tao_transfers:
+            transfer_date = datetime.fromtimestamp(transfer['timestamp']).strftime('%Y-%m-%d')
+            transfer_amount_tao = transfer['amount_tao']
+            
+            # Get TAO price at time of transfer for USD calculation
+            tao_price = self.get_tao_price(transfer['timestamp'])
+            if not tao_price:
+                print(f"⚠️  Could not get TAO price for transfer on {transfer_date}")
+                continue
+                
+            transfer_amount_usd = transfer_amount_tao * tao_price
+            
+            print(f"\nProcessing transfer: {transfer_amount_tao:.4f} TAO (${transfer_amount_usd:.2f}) on {transfer_date}")
+            
+            # Find matching pending liquidations
+            # Look for liquidations due around the same date and similar USD amount
+            matches = []
+            for row_num, liquidation in pending_liquidations.items():
+                expected_usd = float(liquidation['amount_usd'])
+                date_due = liquidation['date_due']
+                
+                # Check if amounts are reasonably close (within 5% tolerance for price fluctuations)
+                amount_diff_pct = abs(transfer_amount_usd - expected_usd) / expected_usd * 100
+                
+                if amount_diff_pct <= 5.0:  # 5% tolerance
+                    matches.append((row_num, liquidation, amount_diff_pct))
+            
+            if matches:
+                # Sort by closest amount match
+                matches.sort(key=lambda x: x[2])
+                best_match = matches[0]
+                row_num, liquidation, diff_pct = best_match
+                
+                print(f"  ✓ Matched with liquidation row {row_num} ({liquidation['purpose']})")
+                print(f"    Expected: ${liquidation['amount_usd']} vs Actual: ${transfer_amount_usd:.2f} ({diff_pct:.1f}% diff)")
+                
+                # Calculate gains/losses
+                cost_basis = float(liquidation['cost_basis'])
+                alpha_liquidated = float(liquidation['alpha_amount'])
+                actual_price_per_alpha = transfer_amount_usd / alpha_liquidated
+                
+                gain_loss_usd = (actual_price_per_alpha - cost_basis) * alpha_liquidated
+                gain_loss_pct = (actual_price_per_alpha - cost_basis) / cost_basis * 100
+                
+                # Update the liquidation sheet
+                self.mark_liquidation_complete(
+                    row_num, 
+                    transfer_amount_usd, 
+                    transfer_amount_tao, 
+                    actual_price_per_alpha,
+                    gain_loss_usd,
+                    gain_loss_pct,
+                    f"Auto-matched TAO transfer from block {transfer['block_number']}"
+                )
+                
+                print(f"    Gain/Loss: ${gain_loss_usd:.2f} ({gain_loss_pct:.1f}%)")
+                
+                # Remove from pending list to avoid double-matching
+                del pending_liquidations[row_num]
+            else:
+                print(f"  ⚠️  No matching pending liquidation found for this transfer")
+    
+    def get_pending_liquidations(self):
+        """
+        Get a summary of pending liquidations
+        """
+        pending_data = self.get_pending_liquidations_data()
+        
+        if not pending_data:
+            print("No pending liquidations")
+            return
+        
+        print(f"\n{'='*60}")
+        print("PENDING LIQUIDATIONS (Manual Action Required)")
+        print(f"{'='*60}\n")
+        
+        total_usd = 0
+        total_alpha = 0
+        
+        for row_num, liquidation in pending_data.items():
+            priority = liquidation['priority']
+            date_due = liquidation['date_due']
+            amount_usd = float(liquidation['amount_usd'])
+            alpha_amount = float(liquidation['alpha_amount'])
+            purpose = liquidation['purpose']
+            
+            total_usd += amount_usd
+            total_alpha += alpha_amount
+            
+            print(f"[{priority}] {date_due} - {purpose}")
+            print(f"    Amount: {alpha_amount:.4f} ALPHA (${amount_usd:.2f})")
+            print(f"    Row: {row_num}")
+            print()
+        
+        print(f"{'='*60}")
+        print(f"TOTAL PENDING: {total_alpha:.4f} ALPHA (${total_usd:.2f})")
+        print(f"{'='*60}\n")
+        print("💡 Process by unstaking ALPHA, converting to TAO, and sending to brokerage")
+        print("💡 After completed, run with --mode liquidations to auto-match transfers")
+    
+    def get_pending_liquidations_data(self):
+        """
+        Get pending liquidations as a dictionary for processing
+        
+        Returns:
+            dict: {row_number: liquidation_data}
+        """
+        all_values = self.liquidation_sheet.get_all_values()
+        
+        if len(all_values) <= 1:
+            return {}
+        
+        pending_liquidations = {}
+        
+        for i, row in enumerate(all_values[1:], start=2):  # Skip header
+            if len(row) >= 7 and row[6] == 'PENDING':
+                pending_liquidations[i] = {
+                    'priority': row[0],
+                    'date_due': row[1],
+                    'amount_usd': row[2],
+                    'alpha_amount': row[3],
+                    'cost_basis': row[4],
+                    'purpose': row[5],
+                    'status': row[6],
+                    'receipt_date': row[13] if len(row) > 13 else '',
+                    'notes': row[14] if len(row) > 14 else ''
+                }
+        
+        return pending_liquidations
+    
+    def verify_and_update_prices(self, start_date=None, end_date=None):
+        """
+        Review and update TAO prices for existing emissions.
+        Useful for improving accuracy of historical records.
+        
+        Args:
+            start_date: Start date for review (YYYY-MM-DD), defaults to 30 days ago
+            end_date: End date for review (YYYY-MM-DD), defaults to today
+        """
+        print(f"\n{'='*60}")
+        print("VERIFYING AND UPDATING TAO PRICES")
+        print(f"{'='*60}")
+        
+        # Set default date range if not provided
+        if not end_date:
+            end_date = datetime.now().strftime('%Y-%m-%d')
+        if not start_date:
+            start_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+        
+        print(f"Reviewing emissions from {start_date} to {end_date}")
+        
+        # Get all emissions from the main sheet
+        all_values = self.sheet.get_all_values()
+        
+        if len(all_values) <= 1:
+            print("No emissions found in tracking sheet")
+            return
+        
+        headers = all_values[0]
+        emissions_updated = 0
+        
+        for i, row in enumerate(all_values[1:], start=2):  # Skip header, start from row 2
+            if len(row) < 6:  # Need at least date, timestamp, block, alpha, tao_price, total_value
+                continue
+            
+            emission_date = row[0]  # Date column
+            timestamp_str = row[1]  # Timestamp column
+            alpha_tokens_str = row[3]  # ALPHA tokens column
+            current_tao_price_str = row[4]  # Current TAO price column
+            
+            # Parse date to check if it's in our range
+            try:
+                emission_date_obj = datetime.strptime(emission_date.split()[0], '%Y-%m-%d')
+                start_date_obj = datetime.strptime(start_date, '%Y-%m-%d')
+                end_date_obj = datetime.strptime(end_date, '%Y-%m-%d')
+                
+                if not (start_date_obj <= emission_date_obj <= end_date_obj):
+                    continue
+                    
+            except ValueError:
+                print(f"⚠️  Skipping row {i}: Invalid date format '{emission_date}'")
+                continue
+            
+            # Parse values
+            try:
+                timestamp = int(float(timestamp_str))
+                alpha_tokens = float(alpha_tokens_str)
+                current_tao_price = float(current_tao_price_str)
+            except ValueError:
+                print(f"⚠️  Skipping row {i}: Invalid numeric values")
+                continue
+            
+            print(f"\nReviewing emission from {emission_date}:")
+            print(f"  Current TAO price: ${current_tao_price:.2f}")
+            
+            # Get fresh TAO price
+            fresh_tao_price = self.get_tao_price(timestamp)
+            
+            if fresh_tao_price is None:
+                print(f"  ⚠️  Could not fetch fresh price, keeping current")
+                continue
+            
+            print(f"  Fresh TAO price: ${fresh_tao_price:.2f}")
+            
+            # Check if price needs updating (more than 1% difference)
+            price_diff_pct = abs(fresh_tao_price - current_tao_price) / current_tao_price * 100
+            
+            if price_diff_pct > 1.0:  # Update if more than 1% difference
+                print(f"  📝 Updating price (difference: {price_diff_pct:.1f}%)")
+                
+                # Recalculate all USD values
+                alpha_to_tao_rate = self.get_alpha_price_in_tao()
+                alpha_value_in_tao = alpha_tokens * alpha_to_tao_rate
+                new_total_value_usd = alpha_value_in_tao * fresh_tao_price
+                
+                # Recalculate liquidation amounts
+                liquidation = self.calculate_liquidation(new_total_value_usd, alpha_tokens)
+                
+                # Update the row
+                self.sheet.update_cell(i, 5, f"{fresh_tao_price:.2f}")  # TAO Price column
+                self.sheet.update_cell(i, 6, f"{new_total_value_usd:.2f}")  # Total Value column
+                self.sheet.update_cell(i, 7, f"{liquidation['payroll']:.2f}")  # Payroll column
+                self.sheet.update_cell(i, 8, f"{liquidation['tax']:.2f}")  # Tax column
+                self.sheet.update_cell(i, 9, f"{liquidation['total_liquidate_usd']:.2f}")  # Total liquidate column
+                self.sheet.update_cell(i, 10, f"{liquidation['alpha_to_liquidate']:.4f}")  # ALPHA to liquidate
+                self.sheet.update_cell(i, 11, f"{liquidation['keep_usd']:.2f}")  # Keep USD
+                self.sheet.update_cell(i, 12, f"{liquidation['keep_alpha']:.4f}")  # Keep ALPHA
+                
+                print(f"    Old total value: ${current_tao_price * alpha_value_in_tao:.2f}")
+                print(f"    New total value: ${new_total_value_usd:.2f}")
+                
+                emissions_updated += 1
+                
+                # Add a note about the update
+                current_notes = self.sheet.cell(i, 15).value or ""  # Notes column
+                update_note = f"Price updated on {datetime.now().strftime('%Y-%m-%d')}: ${current_tao_price:.2f} -> ${fresh_tao_price:.2f}"
+                new_notes = f"{current_notes}; {update_note}" if current_notes else update_note
+                self.sheet.update_cell(i, 15, new_notes)
+                
+                # Small delay to avoid hitting API rate limits
+                time.sleep(0.5)
+                
+            else:
+                print(f"  ✓ Price is accurate (difference: {price_diff_pct:.1f}%)")
+        
+        print(f"\n{'='*60}")
+        print(f"PRICE VERIFICATION COMPLETE")
+        print(f"Updated {emissions_updated} emission(s)")
+        print(f"{'='*60}")
+    
+    def mark_liquidation_complete(self, row_number, actual_sale_price_usd=None, actual_tao_sold=None, 
+                                 actual_price_per_alpha=None, gain_loss_usd=None, gain_loss_pct=None, notes=""):
+        """
+        Mark a liquidation as complete with detailed transaction info
+        
+        Args:
+            row_number: Row number in liquidation sheet
+            actual_sale_price_usd: Actual USD amount received from sale
+            actual_tao_sold: Actual TAO amount sold
+            actual_price_per_alpha: Actual USD price per ALPHA achieved
+            gain_loss_usd: Capital gain/loss in USD
+            gain_loss_pct: Capital gain/loss percentage
+            notes: Any notes about the liquidation
+        """
+        # Update completion status and date
+        self.liquidation_sheet.update_cell(row_number, 7, 'COMPLETED')  # Status
+        self.liquidation_sheet.update_cell(row_number, 8, datetime.now().strftime('%Y-%m-%d'))  # Date completed
+        
+        # Update actual transaction details
+        if actual_sale_price_usd:
+            self.liquidation_sheet.update_cell(row_number, 9, f"{actual_sale_price_usd:.2f}")  # Actual sale price
+        
+        if actual_tao_sold:
+            self.liquidation_sheet.update_cell(row_number, 10, f"{actual_tao_sold:.4f}")  # TAO amount (for reference)
+        
+        if actual_price_per_alpha:
+            self.liquidation_sheet.update_cell(row_number, 11, f"{actual_price_per_alpha:.4f}")  # Actual price per ALPHA
+        
+        if gain_loss_usd:
+            self.liquidation_sheet.update_cell(row_number, 12, f"{gain_loss_usd:.2f}")  # Capital gain/loss
+        
+        if gain_loss_pct:
+            self.liquidation_sheet.update_cell(row_number, 13, f"{gain_loss_pct:.1f}%")  # Gain/loss percentage
+        
+        # Update notes
+        if notes:
+            existing_notes = self.liquidation_sheet.cell(row_number, 15).value or ""  # Notes column
+            combined_notes = f"{existing_notes}; {notes}" if existing_notes else notes
+            self.liquidation_sheet.update_cell(row_number, 15, combined_notes)
+        
+        print(f"✓ Marked liquidation row {row_number} as completed")
     
     def manual_entry_mode(self):
         """
@@ -593,7 +902,6 @@ class BittensorEmissionTracker:
                 
                 if not manual_tao_price:
                     print("\n⚠️  WARNING: Auto-fetching price may be inaccurate for tax purposes")
-                    print("   CryptoCompare provides hourly prices (better than daily)")
                     print("   For maximum accuracy, check exchange price at exact time\n")
                 
                 # Get block number (optional)
@@ -614,61 +922,3 @@ class BittensorEmissionTracker:
             except KeyboardInterrupt:
                 print("\nExiting manual entry mode...")
                 break
-        """
-        Get a summary of pending liquidations
-        """
-        all_values = self.liquidation_sheet.get_all_values()
-        
-        if len(all_values) <= 1:
-            print("No pending liquidations")
-            return
-        
-        print(f"\n{'='*60}")
-        print("PENDING LIQUIDATIONS (Manual Action Required)")
-        print(f"{'='*60}\n")
-        
-        total_usd = 0
-        total_alpha = 0
-        
-        for i, row in enumerate(all_values[1:], start=2):  # Skip header
-            if len(row) >= 6 and row[5] == 'PENDING':
-                priority = row[0]
-                date_due = row[1]
-                amount_usd = float(row[2]) if row[2] else 0
-                alpha_amount = float(row[3]) if row[3] else 0
-                purpose = row[4]
-                
-                total_usd += amount_usd
-                total_alpha += alpha_amount
-                
-                print(f"[{priority}] {date_due} - {purpose}")
-                print(f"    Amount: {alpha_amount:.4f} ALPHA (${amount_usd:.2f})")
-                print(f"    Row: {i}")
-                print()
-        
-        print(f"{'='*60}")
-        print(f"TOTAL PENDING: {total_alpha:.4f} ALPHA (${total_usd:.2f})")
-        print(f"{'='*60}\n")
-        print("💡 After liquidating via Ledger, update the 'Status' column to 'COMPLETED'")
-    
-    def mark_liquidation_complete(self, row_number, actual_amount=None, notes=""):
-        """
-        Mark a liquidation as complete
-        
-        Args:
-            row_number: Row number in liquidation sheet
-            actual_amount: Actual amount liquidated (if different from planned)
-            notes: Any notes about the liquidation
-        """
-        self.liquidation_sheet.update_cell(row_number, 6, 'COMPLETED')
-        self.liquidation_sheet.update_cell(row_number, 7, datetime.now().strftime('%Y-%m-%d'))
-        
-        if actual_amount:
-            self.liquidation_sheet.update_cell(row_number, 8, str(actual_amount))
-        
-        if notes:
-            existing_notes = self.liquidation_sheet.cell(row_number, 9).value
-            combined_notes = f"{existing_notes}; {notes}" if existing_notes else notes
-            self.liquidation_sheet.update_cell(row_number, 9, combined_notes)
-        
-        print(f"✓ Marked row {row_number} as completed")
