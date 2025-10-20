@@ -159,19 +159,19 @@ class BittensorEmissionTracker:
     def _sort_sheets(self):
 
         try:
-            self.tracking_worksheet.sort((2, 'desc'))
+            self.tracking_worksheet.sort((2, 'des'))
             print("Sorted Tracking sheet by Timestamp descending")
         except Exception as e:
             print(f"Error sorting Tracking sheet: {e}")
 
         try:
-            self.liquidation_worksheet.sort((2, 'desc'))
+            self.liquidation_worksheet.sort((2, 'des'))
             print("Sorted Liquidation sheet by Timestamp descending")
         except Exception as e:
             print(f"Error sorting Liquidation sheet: {e}")
 
         try:
-            self.capital_gains_worksheet.sort((2, 'desc'))
+            self.capital_gains_worksheet.sort((2, 'des'))
             print("Sorted Capital Gains sheet by Timestamp descending")
         except Exception as e:
             print(f"Error sorting Capital Gains sheet: {e}")
