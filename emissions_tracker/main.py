@@ -1,5 +1,6 @@
 import os
-from emissions_tracker.client import CoinMarketCapClient
+from emissions_tracker.clients.price import CoinMarketCapClient
+from emissions_tracker.clients.taostats import TaoStatsAPIClient
 from emissions_tracker.config import TrackerSettings
 from emissions_tracker.tracker import BittensorEmissionTracker
 
@@ -9,8 +10,8 @@ if __name__ == "__main__":
 
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Bittensor Emission Tracker')
-    parser.add_argument('--mode', choices=['auto', 'manual', 'pending', 'liquidations', 'verify-prices'], default='auto',
-                       help='Mode: auto (check emissions), manual (enter manually), pending (show pending), liquidations (process liquidations), verify-prices (review and update prices)')
+    parser.add_argument('--mode', choices=['auto', 'manual', 'pending', 'liquidations'], default='auto',
+                       help='Mode: auto (check emissions), manual (enter manually), pending (show pending), liquidations (process liquidations)')
     parser.add_argument('--lookback', type=int, default=1, help='Days to look back for emissions/liquidations')
     parser.add_argument('--start-date', type=str, help='Start date for price verification (YYYY-MM-DD)')
     parser.add_argument('--end-date', type=str, help='End date for price verification (YYYY-MM-DD)')
@@ -18,12 +19,13 @@ if __name__ == "__main__":
     
     # Create price client based on configuration
     settings = TrackerSettings()
-    price_client = CoinMarketCapClient(settings.cmc_api_key)
     print("Using CoinMarketCap API (5-minute intervals)")
     
     # Initialize tracker with just the price client
+    taostats_client = TaoStatsAPIClient()
     tracker = BittensorEmissionTracker(
-        price_client=price_client
+        price_client=taostats_client,
+        wallet_client=taostats_client
     )
     
     if args.mode == 'auto':
@@ -47,7 +49,3 @@ if __name__ == "__main__":
     elif args.mode == 'liquidations':
         # Check and process liquidations only
         tracker.check_and_process_liquidations(lookback_days=args.lookback)
-    
-    elif args.mode == 'verify-prices':
-        # Verify and update prices for existing emissions
-        tracker.verify_and_update_prices(start_date=args.start_date, end_date=args.end_date)
