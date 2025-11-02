@@ -239,7 +239,7 @@ class BittensorEmissionTracker:
             payroll = fixed_payroll_usd
             # Calculate ~25% tax for new emissions
             tax = self.calculate_tax_liquidation(total_value_usd, alpha_tokens)
-            total_liquidate_usd = payroll + tax
+            total_liquidate_usd = payroll + tax['tax_usd']
             alpha_to_liquidate = total_liquidate_usd / alpha_price_usd if alpha_price_usd > 0 else 0
             keep_usd = total_value_usd - total_liquidate_usd
             keep_alpha = alpha_tokens - alpha_to_liquidate
