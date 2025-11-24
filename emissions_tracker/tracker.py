@@ -548,7 +548,7 @@ class BittensorEmissionTracker:
         tax_alpha = liquidation['tax_alpha']
         total_liquidate_alpha = payroll_alpha + tax_alpha
         keep_alpha = alpha_tokens - total_liquidate_alpha
-        keep_usd = total_value_usd - (liquidation['total_liquidate_usd'] + liquidation['tax_usd'])
+        keep_usd = total_value_usd - (liquidation['total_liquidate_usd'])
         
         # Prepare data for logging
         emission_data = {
@@ -560,7 +560,7 @@ class BittensorEmissionTracker:
             'total_value_usd': total_value_usd,
             'payroll': liquidation['payroll'],
             'tax': liquidation['tax_usd'],
-            'total_liquidate_usd': liquidation['total_liquidate_usd'] + liquidation['tax_usd'],
+            'total_liquidate_usd': liquidation['total_liquidate_usd'],
             'alpha_to_liquidate': total_liquidate_alpha,
             'payroll_alpha': payroll_alpha,
             'tax_alpha': tax_alpha,
