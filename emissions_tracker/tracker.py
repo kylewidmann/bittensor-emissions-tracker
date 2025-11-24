@@ -347,7 +347,7 @@ class BittensorEmissionTracker:
         """
         try:
             end_time = int(time.time())
-            start_time = end_time - (days_back * 86400)
+            start_time = self.last_emission_timestamp if self.last_emission_timestamp else  end_time - (days_back * 86400)
             
             print(f"Fetching emissions to {self.wallet_address} from {datetime.fromtimestamp(start_time)}")
             if self.smart_contract_address:
@@ -403,7 +403,7 @@ class BittensorEmissionTracker:
         """
         try:
             end_time = int(time.time())
-            start_time = end_time - (days_back * 86400)
+            start_time = self.last_transfer_timestamp if self.last_transfer_timestamp else end_time - (days_back * 86400)
             
             print(f"Fetching TAO transfers from {self.wallet_address} to {self.brokerage_address}")
             
