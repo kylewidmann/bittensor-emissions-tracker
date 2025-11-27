@@ -1,26 +1,88 @@
 from pathlib import Path
+from typing import Optional
 from pydantic import Field
 from pydantic_settings import BaseSettings
 
+
 class TrackerSettings(BaseSettings):
+    """Core tracker configuration for wallet addresses and Google Sheets."""
+    
+    # Wallet addresses
+    brokerage_ss58: str = Field(..., alias="BROKER_SS58", description="Kraken deposit address")
+    validator_ss58: str = Field(..., alias="VALIDATOR_SS58", description="Validator hotkey")
+    wallet_ss58: str = Field(..., alias="WALLET_SS58", description="Personal coldkey wallet")
+    smart_contract_ss58: str = Field(..., alias="SMART_CONTRACT_SS58", description="Smart contract address for filtering contract income")
+    
+    # Google Sheets
+    tracker_sheet_id: str = Field(..., alias="TRACKER_SHEET_ID", description="Google Sheet ID for tracking")
+    tracker_google_credentials: str = Field(..., alias="TRACKER_GOOGLE_CREDENTIALS", description="Path to Google service account credentials")
+    
+    # Subnet configuration
+    subnet_id: int = Field(64, alias="SUBNET_ID", description="Bittensor subnet ID")
 
 
-    brokerage_ss58: str = Field(..., alias="BROKER_SS58", description="")
-    validator_ss58: str = Field(..., alias="VALIDATOR_SS58", description="")
-    wallet_ss58: str = Field(..., alias="WALLET_SS58", description="")
-    smart_contract_ss58: str = Field(..., alias="SMART_CONTRACT_SS58", description="")
-    tracker_sheet_id: str = Field(..., alias="TRACKER_SHEET_ID", description="")
-    tracker_google_credentials: str = Field(..., alias="TRACKER_GOOGLE_CREDENTIALS", description="")
+class WaveAccountSettings(BaseSettings):
+    """Configurable Wave account names for journal entries."""
+    
+    # Income accounts
+    contract_income_account: str = Field(
+        "Contractor Income - Alpha",
+        alias="WAVE_CONTRACT_INCOME_ACCOUNT",
+        description="Wave account for smart contract income"
+    )
+    staking_income_account: str = Field(
+        "Staking Income - Alpha", 
+        alias="WAVE_STAKING_INCOME_ACCOUNT",
+        description="Wave account for staking/emissions income"
+    )
+    
+    # Asset accounts
+    alpha_asset_account: str = Field(
+        "Cryptocurrency - Alpha",
+        alias="WAVE_ALPHA_ASSET_ACCOUNT",
+        description="Wave account for ALPHA holdings"
+    )
+    tao_asset_account: str = Field(
+        "Cryptocurrency - TAO",
+        alias="WAVE_TAO_ASSET_ACCOUNT",
+        description="Wave account for TAO holdings"
+    )
+    
+    # Gain/Loss accounts
+    short_term_gain_account: str = Field(
+        "Short-term Capital Gains",
+        alias="WAVE_SHORT_TERM_GAIN_ACCOUNT",
+        description="Wave account for short-term gains"
+    )
+    short_term_loss_account: str = Field(
+        "Short-term Capital Losses",
+        alias="WAVE_SHORT_TERM_LOSS_ACCOUNT",
+        description="Wave account for short-term losses"
+    )
+    long_term_gain_account: str = Field(
+        "Long-term Capital Gains",
+        alias="WAVE_LONG_TERM_GAIN_ACCOUNT",
+        description="Wave account for long-term gains"
+    )
+    long_term_loss_account: str = Field(
+        "Long-term Capital Losses",
+        alias="WAVE_LONG_TERM_LOSS_ACCOUNT",
+        description="Wave account for long-term losses"
+    )
 
-    # 493.15
-    fixed_payroll_usd: float = Field(..., alias="FIXED_PAYROLL_USD", description="")
-    tax_percentage: float = Field(0.25, alias="TAX_PERCENTAGE", description="")
-
-    subnet_id: int = Field(64, alias="SUBNET_ID", description="")
 
 class TaoStatsSettings(BaseSettings):
-    api_key: str = Field(None,  alias="TAOSTATS_API_KEY", description="")
-    base_url: str = Field("https://api.taostats.io/api", alias="TAOSTATS_BASE_URL", description="")
+    """TaoStats API configuration."""
+    
+    api_key: str = Field(None, alias="TAOSTATS_API_KEY", description="TaoStats API key")
+    base_url: str = Field(
+        "https://api.taostats.io/api",
+        alias="TAOSTATS_BASE_URL",
+        description="TaoStats API base URL"
+    )
+
 
 class CoinMarketCapSettings(BaseSettings):
-    cmc_api_key: str = Field(..., alias="COINMARKETCAP_API_KEY", description="")    
+    """CoinMarketCap API configuration (optional fallback)."""
+    
+    cmc_api_key: Optional[str] = Field(None, alias="COINMARKETCAP_API_KEY", description="CoinMarketCap API key")

@@ -1,50 +1,107 @@
-
-"""
-Wallet clients for accessing Bittensor addresses.
-All clients implement the WalletClient interface for easy swapping.
-"""
-
 from abc import ABC, abstractmethod
+from typing import List, Dict, Any, Optional
 
 
 class WalletClientInterface(ABC):
-    """Interface for wallet-related data queries (transfers, emissions)."""
+    """Abstract interface for wallet/blockchain data clients."""
+    
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """Return the name of the client for logging purposes."""
+        pass
     
     @abstractmethod
-    def get_transfers(self, account_address: str, start_time: int, end_time: int, 
-                     sender: str = None, receiver: str = None) -> list:
+    def get_transfers(
+        self,
+        account_address: str,
+        start_time: int,
+        end_time: int,
+        sender: Optional[str] = None,
+        receiver: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         """
-        Fetch transfers involving an account, filtered by sender/receiver and time.
+        Fetch TAO transfers for an account.
         
         Args:
             account_address: SS58 address to query
-            start_time: Unix timestamp for start of range
-            end_time: Unix timestamp for end of range
-            sender: Optional sender address filter
-            receiver: Optional receiver address filter
+            start_time: Unix timestamp start
+            end_time: Unix timestamp end
+            sender: Optional sender filter
+            receiver: Optional receiver filter
             
         Returns:
-            list: Transfer events with keys: timestamp, from, to, amount, unit (tao/alpha), 
-                  block_number, tao_price_usd (optional)
+            List of transfer dicts with keys:
+                - timestamp: int
+                - from: str (SS58)
+                - to: str (SS58)
+                - amount: float (TAO)
+                - block_number: int
+                - transaction_hash: str
+                - tao_price_usd: Optional[float]
         """
         pass
-
+    
     @abstractmethod
-    def get_delegations(self, netuid: int, delegate: str, nominator: str, start_time: int, end_time: int) -> list:
+    def get_delegations(
+        self,
+        netuid: int,
+        delegate: str,
+        nominator: str,
+        start_time: int,
+        end_time: int
+    ) -> List[Dict[str, Any]]:
         """
-        Fetch delegation/stake transfers.
+        Fetch delegation events (DELEGATE/UNDELEGATE).
         
+        Args:
+            netuid: Subnet ID
+            delegate: Validator hotkey SS58
+            nominator: Coldkey SS58
+            start_time: Unix timestamp start
+            end_time: Unix timestamp end
+            
         Returns:
-            list: Delegation events with timestamp, action, amount, alpha, usd, etc.
+            List of delegation dicts with keys:
+                - timestamp: int
+                - action: str ('DELEGATE' or 'UNDELEGATE')
+                - alpha: float (ALPHA amount)
+                - amount: float (TAO amount in RAO, divide by 1e9)
+                - usd: float (USD value at time)
+                - alpha_price_in_usd: float
+                - alpha_price_in_tao: float
+                - block_number: int
+                - extrinsic_id: str
+                - is_transfer: Optional[bool]
+                - transfer_address: Optional[str] (SS58)
+                - fee: float
         """
         pass
-
+    
     @abstractmethod
-    def get_stake_balance_history(self, netuid: int, hotkey: str, coldkey: str, start_time: int, end_time: int) -> list:
+    def get_stake_balance_history(
+        self,
+        netuid: int,
+        hotkey: str,
+        coldkey: str,
+        start_time: int,
+        end_time: int
+    ) -> List[Dict[str, Any]]:
         """
-        Fetch historical stake balances for alpha tracking.
+        Fetch historical stake balance snapshots.
         
+        Args:
+            netuid: Subnet ID
+            hotkey: Validator hotkey SS58
+            coldkey: Coldkey SS58
+            start_time: Unix timestamp start
+            end_time: Unix timestamp end
+            
         Returns:
-            list: Balance snapshots with timestamp, balance (alpha), balance_as_tao
+            List of balance dicts with keys:
+                - timestamp: int
+                - block_number: int
+                - alpha_balance: int (in RAO, divide by 1e9)
+                - tao_equivalent: int (in RAO)
         """
         pass

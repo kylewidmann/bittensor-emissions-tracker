@@ -1,679 +1,1224 @@
-import requests
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime, timedelta, timezone
 import time
-import os
-import json
-import bittensor as bt
-from abc import ABC, abstractmethod
+from typing import List, Dict, Any, Optional, Tuple
 
-# Import price client
 from emissions_tracker.clients.price import PriceClient
 from emissions_tracker.clients.wallet import WalletClientInterface
-from emissions_tracker.config import TrackerSettings
-from emissions_tracker.exceptions import PriceNotAvailableError
+from emissions_tracker.config import TrackerSettings, WaveAccountSettings
+from emissions_tracker.exceptions import PriceNotAvailableError, InsufficientLotsError
+from emissions_tracker.models import (
+    AlphaLot, TaoLot, AlphaSale, TaoTransfer, JournalEntry,
+    LotConsumption, SourceType, LotStatus, GainType
+)
 
-# ... (WalletClientInterface and TaostatsAPIClient unchanged from version 7d14030a-99cd-4b2b-9c4f-e32ad9840be9)
 
 class BittensorEmissionTracker:
+    """
+    Tracks Bittensor ALPHA/TAO transactions for tax accounting purposes.
+    
+    Implements:
+    - ALPHA income tracking (Contract + Staking emissions)
+    - FIFO lot consumption for disposals
+    - Capital gains calculation for ALPHA → TAO and TAO → Kraken
+    - Monthly Wave journal entry generation
+    """
+    
+    # Sheet names
+    INCOME_SHEET = "Income"
+    SALES_SHEET = "Sales"  
+    TRANSFERS_SHEET = "Transfers"
+    JOURNAL_SHEET = "Journal Entries"
+    TAO_LOTS_SHEET = "TAO Lots"  # Internal tracking sheet
+    
     def __init__(self, price_client: PriceClient, wallet_client: WalletClientInterface):
-        """
-        Initialize the tracker with wallet info and Google Sheets credentials
-        
-        Args:
-            price_client: PriceClient instance for getting historical prices
-            wallet_client: WalletClientInterface for fetching transfers/emissions
-        """
         self.config = TrackerSettings()
+        self.wave_config = WaveAccountSettings()
         self.price_client = price_client
         self.wallet_client = wallet_client
-        self.sheet_id = self.config.tracker_sheet_id
-        self.brokerage_address = self.config.brokerage_ss58
+        
+        # Wallet addresses
         self.wallet_address = self.config.wallet_ss58
         self.validator_address = self.config.validator_ss58
-        self.smart_contract_address = self.config.smart_contract_ss58  # Optional
-        self.subnet_id = self.config.subnet_id  # e.g., 64 for Chutes
+        self.brokerage_address = self.config.brokerage_ss58
+        self.smart_contract_address = self.config.smart_contract_ss58
+        self.subnet_id = self.config.subnet_id
         
-        print(f"Initializing tracker for wallet: {self.wallet_address}, validator: {self.validator_address}")
-        
-        # Connect to Bittensor (for price queries)
-        self.subtensor = bt.subtensor(network="finney")
+        print(f"Initializing tracker:")
+        print(f"  Wallet: {self.wallet_address}")
+        print(f"  Validator: {self.validator_address}")
+        print(f"  Brokerage (Kraken): {self.brokerage_address}")
+        print(f"  Smart Contract: {self.smart_contract_address}")
         
         # Connect to Google Sheets
-        scope = ['https://spreadsheets.google.com/feeds',
-                 'https://www.googleapis.com/auth/drive']
-        creds = ServiceAccountCredentials.from_json_keyfile_name(self.config.tracker_google_credentials, scope)
+        scope = [
+            'https://spreadsheets.google.com/feeds',
+            'https://www.googleapis.com/auth/drive'
+        ]
+        creds = ServiceAccountCredentials.from_json_keyfile_name(
+            self.config.tracker_google_credentials, scope
+        )
         self.sheets_client = gspread.authorize(creds)
+        self.sheet = self.sheets_client.open_by_key(self.config.tracker_sheet_id)
         
-        self._init_tracking_sheet()
-        self._init_liquidation_queue_sheet()
-        self._init_capital_gains_sheet()
+        # Initialize sheets
+        self._init_sheets()
         
-        self._load_last_timestamp()
+        # Load state
+        self._load_state()
+        
+        # Counters for ID generation
+        self._load_counters()
 
-    def _load_last_timestamp(self):
-        try:
-            # Emissions (Tracking sheet)
-            records = self.tracking_worksheet.get_all_records()
-            self.last_emission_timestamp = max(record['Timestamp'] for record in records) if records else 0
-            print(f"Loaded last emission timestamp: {self.last_emission_timestamp}")
-        except Exception as e:
-            print(f"Error loading Tracking sheet timestamp: {e}")
-            self.last_emission_timestamp = 0
+    def _init_sheets(self):
+        """Initialize all tracking sheets with headers."""
+        sheet_configs = [
+            (self.INCOME_SHEET, AlphaLot.sheet_headers()),
+            (self.SALES_SHEET, AlphaSale.sheet_headers()),
+            (self.TAO_LOTS_SHEET, TaoLot.sheet_headers()),
+            (self.TRANSFERS_SHEET, TaoTransfer.sheet_headers()),
+            (self.JOURNAL_SHEET, JournalEntry.sheet_headers()),
+        ]
         
-        try:
-            # Transfers (Liquidation Queue sheet)
-            records = self.liquidation_worksheet.get_all_records()
-            self.last_transfer_timestamp = max(record['Timestamp'] for record in records) if records else 0
-            print(f"Loaded last transfer timestamp: {self.last_transfer_timestamp}")
-        except Exception as e:
-            print(f"Error loading Liquidation Queue timestamp: {e}")
-            self.last_transfer_timestamp = 0
+        for sheet_name, headers in sheet_configs:
+            try:
+                worksheet = self.sheet.worksheet(sheet_name)
+                print(f"  ✓ Found sheet: {sheet_name}")
+            except gspread.exceptions.WorksheetNotFound:
+                worksheet = self.sheet.add_worksheet(title=sheet_name, rows=1000, cols=20)
+                worksheet.append_row(headers)
+                print(f"  ✓ Created sheet: {sheet_name}")
         
-        try:
-            # Balances (Capital Gains sheet)
-            records = self.capital_gains_worksheet.get_all_records()
-            self.last_balance_timestamp = max(record['Timestamp'] for record in records) if records else 0
-            print(f"Loaded last balance timestamp: {self.last_balance_timestamp}")
-        except Exception as e:
-            print(f"Error loading Capital Gains sheet timestamp: {e}")
-            self.last_balance_timestamp = 0
+        # Store worksheet references
+        self.income_sheet = self.sheet.worksheet(self.INCOME_SHEET)
+        self.sales_sheet = self.sheet.worksheet(self.SALES_SHEET)
+        self.tao_lots_sheet = self.sheet.worksheet(self.TAO_LOTS_SHEET)
+        self.transfers_sheet = self.sheet.worksheet(self.TRANSFERS_SHEET)
+        self.journal_sheet = self.sheet.worksheet(self.JOURNAL_SHEET)
 
-    def _load_last_alpha_balance(self):
-        last_balance = 0
+    def _load_state(self):
+        """Load last processed timestamps from sheets."""
+        self.last_income_timestamp = 0  # Overall income watermark (legacy)
+        self.last_contract_income_timestamp = 0
+        self.last_staking_income_timestamp = 0
+        self.last_sale_timestamp = 0
+        self.last_transfer_timestamp = 0
+        
         try:
-            # Balances (Capital Gains sheet)
-            records = self.capital_gains_worksheet.get_all_records()
+            records = self.income_sheet.get_all_records()
             if records:
-                records = sorted(records, key=lambda r: r['Timestamp'], reverse=True)
-                last_balance = records[0]['Alpha Tokens'] * 1e9
-            print(f"Loaded last balance timestamp: {self.last_balance_timestamp}")
+                contract_ts = [r['Timestamp'] for r in records if r['Source Type'] == SourceType.CONTRACT.value]
+                staking_ts = [r['Timestamp'] for r in records if r['Source Type'] == SourceType.STAKING.value]
+                
+                if contract_ts:
+                    self.last_contract_income_timestamp = max(contract_ts)
+                if staking_ts:
+                    self.last_staking_income_timestamp = max(staking_ts)
+                
+                # Maintain legacy aggregate for reference
+                self.last_income_timestamp = max(contract_ts + staking_ts) if (contract_ts or staking_ts) else 0
+                
+                print(f"  Last contract income timestamp: {self.last_contract_income_timestamp}")
+                print(f"  Last staking income timestamp:   {self.last_staking_income_timestamp}")
         except Exception as e:
-            print(f"Error loading Capital Gains sheet timestamp: {e}")
+            print(f"  Warning: Could not load income state: {e}")
         
-        return last_balance
-
-    def _save_last_timestamp(self, emission_timestamp: int = None, transfer_timestamp: int = None, balance_timestamp: int = None):
         try:
-            if emission_timestamp:
-                self.last_emission_timestamp = emission_timestamp
-                print(f"Updated last emission timestamp: {emission_timestamp}")
-            if transfer_timestamp:
-                self.last_transfer_timestamp = transfer_timestamp
-                print(f"Updated last transfer timestamp: {transfer_timestamp}")
-            if balance_timestamp:
-                self.last_balance_timestamp = balance_timestamp
-                print(f"Updated last balance timestamp: {balance_timestamp}")
+            records = self.sales_sheet.get_all_records()
+            if records:
+                self.last_sale_timestamp = max(r['Timestamp'] for r in records)
+                print(f"  Last sale timestamp: {self.last_sale_timestamp}")
         except Exception as e:
-            print(f"Error updating timestamps: {e}")
-
-    def _init_tracking_sheet(self):
-        """Initialize main tracking sheet."""
+            print(f"  Warning: Could not load sales state: {e}")
+        
         try:
-            self.sheet = self.sheets_client.open_by_key(self.sheet_id)
-            try:
-                self.tracking_worksheet = self.sheet.worksheet("Tracking")
-            except gspread.exceptions.WorksheetNotFound:
-                self.tracking_worksheet = self.sheet.add_worksheet(title="Tracking", rows=1000, cols=20)
-                headers = ['Date', 'Timestamp', 'Block Number', 'Alpha Tokens', 'TAO Price (USD)', 
-                           'Total Value (USD)', 'Payroll (USD)', 'Tax (USD)', 'Total Liquidate (USD)', 
-                           'Alpha to Liquidate', 'Payroll Alpha', 'Tax Alpha', 'Keep (USD)', 
-                           'Keep Alpha', 'Status', 'Long Term Date', 'Notes']
-                self.tracking_worksheet.append_row(headers)
+            records = self.transfers_sheet.get_all_records()
+            if records:
+                self.last_transfer_timestamp = max(r['Timestamp'] for r in records)
+                print(f"  Last transfer timestamp: {self.last_transfer_timestamp}")
         except Exception as e:
-            print(f"Error initializing tracking sheet: {e}")
-            raise
+            print(f"  Warning: Could not load transfers state: {e}")
 
-    def _init_liquidation_queue_sheet(self):
-        """Initialize liquidation queue sheet."""
+    def _load_counters(self):
+        """Load ID counters from existing data."""
         try:
-            self.sheet = self.sheets_client.open_by_key(self.sheet_id)
-            try:
-                self.liquidation_worksheet = self.sheet.worksheet("Liquidation Queue")
-            except gspread.exceptions.WorksheetNotFound:
-                self.liquidation_worksheet = self.sheet.add_worksheet(title="Liquidation Queue", rows=1000, cols=20)
-                headers = ['Date', 'Timestamp', 'Block Number', 'Alpha to Liquidate', 
-                           'Payroll Alpha', 'Tax Alpha', 'Total Liquidate (USD)', 
-                           'Payroll (USD)', 'Tax (USD)', 'Status']
-                self.liquidation_worksheet.append_row(headers)
-        except Exception as e:
-            print(f"Error initializing liquidation queue sheet: {e}")
-            raise
-
-    def _init_capital_gains_sheet(self):
-        """Initialize capital gains sheet for alpha hold periods."""
+            records = self.income_sheet.get_all_records()
+            if records:
+                max_id = max(int(r['Lot ID'].split('-')[1]) for r in records if r['Lot ID'])
+                self.alpha_lot_counter = max_id + 1
+            else:
+                self.alpha_lot_counter = 1
+        except:
+            self.alpha_lot_counter = 1
+        
         try:
-            self.sheet = self.sheets_client.open_by_key(self.sheet_id)
-            try:
-                self.capital_gains_worksheet = self.sheet.worksheet("Capital Gains")
-            except gspread.exceptions.WorksheetNotFound:
-                self.capital_gains_worksheet = self.sheet.add_worksheet(title="Capital Gains", rows=1000, cols=20)
-                headers = ['Date', 'Timestamp', 'Block Number', 'Alpha Tokens', 'Alpha Emissions', 'TAO Equivalent', 'USD Value', 
-                           'Long Term Date', 'Status', 'Acquisition Price (USD)', 'Notes']
-                self.capital_gains_worksheet.append_row(headers)
-        except Exception as e:
-            print(f"Error initializing capital gains sheet: {e}")
-            raise
-
-    def _sort_sheets(self):
-
+            records = self.sales_sheet.get_all_records()
+            if records:
+                max_id = max(int(r['Sale ID'].split('-')[1]) for r in records if r['Sale ID'])
+                self.sale_counter = max_id + 1
+            else:
+                self.sale_counter = 1
+        except:
+            self.sale_counter = 1
+        
         try:
-            self.tracking_worksheet.sort((2, 'des'))
-            print("Sorted Tracking sheet by Timestamp descending")
-        except Exception as e:
-            print(f"Error sorting Tracking sheet: {e}")
-
+            records = self.tao_lots_sheet.get_all_records()
+            if records:
+                max_id = max(int(r['TAO Lot ID'].split('-')[1]) for r in records if r['TAO Lot ID'])
+                self.tao_lot_counter = max_id + 1
+            else:
+                self.tao_lot_counter = 1
+        except:
+            self.tao_lot_counter = 1
+        
         try:
-            self.liquidation_worksheet.sort((2, 'des'))
-            print("Sorted Liquidation sheet by Timestamp descending")
-        except Exception as e:
-            print(f"Error sorting Liquidation sheet: {e}")
+            records = self.transfers_sheet.get_all_records()
+            if records:
+                max_id = max(int(r['Transfer ID'].split('-')[1]) for r in records if r['Transfer ID'])
+                self.transfer_counter = max_id + 1
+            else:
+                self.transfer_counter = 1
+        except:
+            self.transfer_counter = 1
+        
+        print(f"  Counters: ALPHA={self.alpha_lot_counter}, SALE={self.sale_counter}, TAO={self.tao_lot_counter}, XFER={self.transfer_counter}")
 
-        try:
-            self.capital_gains_worksheet.sort((2, 'des'))
-            print("Sorted Capital Gains sheet by Timestamp descending")
-        except Exception as e:
-            print(f"Error sorting Capital Gains sheet: {e}")
+    def _next_alpha_lot_id(self) -> str:
+        lot_id = f"ALPHA-{self.alpha_lot_counter:04d}"
+        self.alpha_lot_counter += 1
+        return lot_id
+    
+    def _next_sale_id(self) -> str:
+        sale_id = f"SALE-{self.sale_counter:04d}"
+        self.sale_counter += 1
+        return sale_id
+    
+    def _next_tao_lot_id(self) -> str:
+        lot_id = f"TAO-{self.tao_lot_counter:04d}"
+        self.tao_lot_counter += 1
+        return lot_id
+    
+    def _next_transfer_id(self) -> str:
+        transfer_id = f"XFER-{self.transfer_counter:04d}"
+        self.transfer_counter += 1
+        return transfer_id
 
-    def get_tao_price(self, timestamp: int):
-        """Fetch TAO price at a given timestamp using PriceClient."""
+    def get_tao_price(self, timestamp: int) -> Optional[float]:
+        """Fetch TAO price at a given timestamp."""
         try:
             price = self.price_client.get_price_at_timestamp('TAO', timestamp)
-            print(f"PriceClient: TAO price at {datetime.fromtimestamp(timestamp)}: ${price:.2f}")
             return price
         except PriceNotAvailableError as e:
-            print(f"PriceClient error: {e}")
+            print(f"  Warning: Could not get TAO price: {e}")
             return None
-
-    def get_current_tao_price(self):
-        """Fetch current TAO price using PriceClient."""
-        try:
-            price = self.price_client.get_current_price('TAO')
-            print(f"PriceClient: Current TAO price: ${price:.2f}")
-            return price
-        except PriceNotAvailableError as e:
-            print(f"PriceClient error: {e}")
-            return None
-
-    def get_alpha_price_in_tao(self, with_slippage: bool = False):
-        """Fetch current alpha/TAO price for subnet."""
-        try:
-            dynamic_info = self.subtensor.subtensor(netuid=self.subnet_id)
-            if with_slippage:
-                return dynamic_info.alpha_to_tao(1, slippage=0.05).tao
-            return dynamic_info.alpha_to_tao(1).tao
-        except Exception as e:
-            print(f"Error fetching alpha/TAO price: {e}")
-            return 0.08  # Fallback default
-
-    def calculate_liquidation(self, total_value_usd: float, alpha_tokens: float):
-        """Calculate liquidation amounts for payroll and tax, using a fixed daily payroll amount.
         
-        If total_value_usd is less than the fixed payroll, liquidate all alpha tokens for payroll.
-        Otherwise, cover payroll and apply ~25% tax on emissions if funds remain.
+    # -------------------------------------------------------------------------
+    # ALPHA Lot Management (FIFO)
+    # -------------------------------------------------------------------------
+    
+    def _get_alpha_records_with_rows(self) -> List[Dict[str, Any]]:
+        """Return income sheet records with sheet row numbers included."""
+        records = self.income_sheet.get_all_records()
+        for idx, record in enumerate(records, start=2):  # +1 for header, +1 for 1-indexing
+            record['_row_num'] = idx
+        return records
+    
+    def get_open_alpha_lots(self) -> List[Dict[str, Any]]:
+        """Get all ALPHA lots with remaining balance, sorted by timestamp (FIFO)."""
+        records = self._get_alpha_records_with_rows()
+        open_lots = [
+            r for r in records 
+            if r['Status'] in ('Open', 'Partial') and r['Alpha Remaining'] > 0
+        ]
+        return sorted(open_lots, key=lambda x: x['Timestamp'])
+    
+    def consume_alpha_lots_fifo(self, alpha_needed: float) -> Tuple[List[LotConsumption], float, GainType, List[Dict[str, Any]]]:
+        """
+        Consume ALPHA lots in FIFO order.
         
         Args:
-            total_value_usd: Total USD value of the emission
-            alpha_tokens: Amount of ALPHA tokens received
+            alpha_needed: Amount of ALPHA to consume
             
         Returns:
-            dict: Liquidation details with total_usd, payroll, tax, total_liquidate_usd,
-                alpha_to_liquidate, keep_usd, keep_alpha
+            Tuple of (consumed lots, total cost basis, gain type)
+            
+        Raises:
+            InsufficientLotsError: If not enough ALPHA available
         """
-        fixed_payroll_usd = self.config.fixed_payroll_usd  # e.g., 100.0 USD/day
+        open_lots = self.get_open_alpha_lots()
+        total_available = sum(lot['Alpha Remaining'] for lot in open_lots)
         
-        # Calculate price per alpha
-        alpha_price_usd = total_value_usd / alpha_tokens if alpha_tokens > 0 else 0
+        if total_available < alpha_needed:
+            raise InsufficientLotsError(
+                f"Need {alpha_needed:.4f} ALPHA but only {total_available:.4f} available"
+            )
         
-        if total_value_usd < fixed_payroll_usd:
-            # Insufficient funds: liquidate all alpha for payroll
-            payroll = total_value_usd
-            tax = 0
-            total_liquidate_usd = payroll
-            alpha_to_liquidate = alpha_tokens
-            keep_usd = 0
-            keep_alpha = 0
-        else:
-            # Sufficient funds: cover payroll, then tax
-            payroll = fixed_payroll_usd
-            # Calculate ~25% tax for new emissions
-            tax = self.calculate_tax_liquidation(total_value_usd, alpha_tokens)
-            total_liquidate_usd = payroll + tax['tax_usd']
-            alpha_to_liquidate = total_liquidate_usd / alpha_price_usd if alpha_price_usd > 0 else 0
-            keep_usd = total_value_usd - total_liquidate_usd
-            keep_alpha = alpha_tokens - alpha_to_liquidate
+        consumed = []
+        total_basis = 0.0
+        remaining_need = alpha_needed
+        earliest_acquisition = None
+        now = int(time.time())
+        one_year_ago = now - (365 * 24 * 60 * 60)
+        all_long_term = True
+        lot_updates = []
         
-        return {
-            'total_usd': total_value_usd,
-            'payroll': payroll,
-            'tax_usd': tax['tax_usd'] if tax else 0,
-            'tax_alpha': tax['tax_alpha'] if tax else 0,
-            'total_liquidate_usd': total_liquidate_usd,
-            'alpha_to_liquidate': alpha_to_liquidate,
-            'keep_usd': keep_usd,
-            'keep_alpha': keep_alpha
+        for lot in open_lots:
+            if remaining_need <= 0:
+                break
+            
+            lot_id = lot['Lot ID']
+            available = lot['Alpha Remaining']
+            original_qty = lot['Alpha Quantity']
+            original_basis = lot['USD FMV']
+            acquisition_ts = lot['Timestamp']
+            
+            # Track earliest acquisition for gain type determination
+            if earliest_acquisition is None or acquisition_ts < earliest_acquisition:
+                earliest_acquisition = acquisition_ts
+            
+            # Check if this lot is long-term
+            if acquisition_ts > one_year_ago:
+                all_long_term = False
+            
+            # Calculate consumption
+            to_consume = min(available, remaining_need)
+            basis_consumed = (to_consume / original_qty) * original_basis
+            
+            consumed.append(LotConsumption(
+                lot_id=lot_id,
+                alpha_consumed=to_consume,
+                cost_basis_consumed=basis_consumed,
+                acquisition_timestamp=acquisition_ts
+            ))
+            
+            total_basis += basis_consumed
+            remaining_need -= to_consume
+            
+            new_remaining = available - to_consume
+            new_status = LotStatus.CLOSED.value if new_remaining == 0 else LotStatus.PARTIAL.value
+            lot_updates.append({
+                "lot_id": lot_id,
+                "row_num": lot["_row_num"],
+                "remaining": new_remaining,
+                "status": new_status
+            })
+        
+        gain_type = GainType.LONG_TERM if all_long_term else GainType.SHORT_TERM
+        return consumed, total_basis, gain_type, lot_updates
+    
+    def _batch_update_alpha_lots(self, updates: List[Dict[str, Any]]):
+        """Batch update ALPHA lot remaining amounts/status to reduce write calls."""
+        if not updates:
+            return
+        
+        data = []
+        for upd in updates:
+            row = upd["row_num"]
+            data.append({
+                "range": f"{self.INCOME_SHEET}!I{row}:I{row}",  # Alpha Remaining
+                "values": [[upd["remaining"]]]
+            })
+            data.append({
+                "range": f"{self.INCOME_SHEET}!N{row}:N{row}",  # Status
+                "values": [[upd["status"]]]
+            })
+        
+        body = {
+            "valueInputOption": "RAW",
+            "data": data
         }
-
-    def calculate_tax_liquidation(self, total_value_usd: float, alpha_tokens: float):
-        """Calculate ~25% tax liquidation for new alpha emissions."""
-        tax_percentage = self.config.tax_percentage  # ~25% for immediate tax liability
-        tax = total_value_usd * tax_percentage
-        alpha_price_usd = total_value_usd / alpha_tokens if alpha_tokens > 0 else 0
-        tax_alpha = tax / alpha_price_usd if alpha_price_usd > 0 else 0
         
-        return {
-            'tax_usd': tax,
-            'tax_alpha': tax_alpha
-        }
-
-    def add_to_liquidation_queue(self, emission_data: dict):
-        """Add emission to liquidation queue sheet."""
-        try:
-            row = [
-                emission_data['date'],
-                emission_data['timestamp'],
-                emission_data.get('block_number', ''),
-                emission_data['alpha_to_liquidate'],
-                emission_data['payroll_alpha'],
-                emission_data['tax_alpha'],
-                emission_data['total_liquidate_usd'],
-                emission_data['payroll'],
-                emission_data['tax'],
-                emission_data['status']
-            ]
-            self.liquidation_worksheet.append_row(row)
-            print(f"Added to liquidation queue: {emission_data['date']}")
-        except Exception as e:
-            print(f"Error adding to liquidation queue: {e}")
-
-    def log_emission(self, emission_data: dict):
-        """Log emission to tracking sheet."""
-        try:
-            row = [
-                emission_data['date'],
-                emission_data['timestamp'],
-                emission_data.get('block_number', ''),
-                emission_data['alpha_tokens'],
-                emission_data['tao_price'],
-                emission_data['total_value_usd'],
-                emission_data['payroll'],
-                emission_data['tax'],
-                emission_data['total_liquidate_usd'],
-                emission_data['alpha_to_liquidate'],
-                emission_data['payroll_alpha'],
-                emission_data['tax_alpha'],
-                emission_data['keep_usd'],
-                emission_data['keep_alpha'],
-                emission_data['status'],
-                emission_data['long_term_date'],
-                emission_data['notes']
-            ]
-            self.tracking_worksheet.append_row(row)
-            print(f"Logged emission: {emission_data['date']}")
-        except Exception as e:
-            print(f"Error logging emission: {e}")
-
-    def log_capital_gains(self, balance_data: dict):
-        """Log alpha balance for capital gains tracking."""
-        try:
-            row = [
-                datetime.fromtimestamp(balance_data['timestamp']).strftime('%Y-%m-%d %H:%M:%S'),
-                balance_data['timestamp'],
-                balance_data['block_number'],
-                balance_data['alpha_balance'],
-                balance_data['incremental_alpha'],
-                balance_data['tao_equivalent'],
-                balance_data['usd_value'],
-                datetime.fromtimestamp(balance_data['timestamp'] + 365*24*60*60).strftime('%Y-%m-%d'),
-                'Held',
-                balance_data['acquisition_price_usd'],
-                balance_data.get('notes', '')
-            ]
-            self.capital_gains_worksheet.append_row(row)
-            print(f"Logged capital gains balance: {datetime.fromtimestamp(balance_data['timestamp'])}")
-        except Exception as e:
-            print(f"Error logging capital gains: {e}")
-
-    def get_recent_emissions(self, days_back=1):
-        """
-        Fetch recent incoming emissions from validator to wallet.
-        
-        Args:
-            days_back: How many days back to check
-            
-        Returns:
-            list: Emission events (delegations to your wallet)
-        """
-        try:
-            end_time = int(time.time())
-            start_time = self.last_emission_timestamp if self.last_emission_timestamp else  end_time - (days_back * 86400)
-            
-            print(f"Fetching emissions to {self.wallet_address} from {datetime.fromtimestamp(start_time)}")
-            if self.smart_contract_address:
-                print(f"Filtering by contract: {self.smart_contract_address}")
-            
-            emissions = []
-            delegations = self.wallet_client.get_delegations(
-                netuid=self.subnet_id,
-                delegate=self.validator_address,
-                nominator=self.wallet_address,
-                start_time=start_time,
-                end_time=end_time
-            )
-
-            for d in delegations:
-                if (d['timestamp'] > self.last_emission_timestamp and 
-                    d['unit'] == 'alpha' and 
-                    d['action'] == 'DELEGATE' and 
-                    (not self.smart_contract_address or d.get('transfer_address', None) == self.smart_contract_address)):
-                    emissions.append({
-                        'block_number': d['block_number'],
-                        'timestamp': d['timestamp'],
-                        'from': d['from'],
-                        'amount': d['amount'],  # Alpha
-                        'amount_rao': d['amount'] * 1e9,
-                        'tao_price_usd': d['tao_price_usd'],
-                        'tao_equivalent': d['tao_equivalent'],
-                        'usd_value': d['usd']
-                    })
-                    print(f"Found emission: {d['amount']:.4f} ALPHA ({d['tao_equivalent']:.4f} TAO) at {datetime.fromtimestamp(d['timestamp'])}")
-            
-            if emissions:
-                last_ts = max(em['timestamp'] for em in emissions)
-                self._save_last_timestamp(emission_timestamp=last_ts)
-            else:
-                print(f"ℹ️  No new emissions found. Check Taostats: taostats.io/account/{self.wallet_address}/transactions")
-            
-            return emissions
-        except Exception as e:
-            print(f"Error fetching emissions: {e}")
-            print("Falling back to manual entry mode...")
-            return []
-
-    def get_tao_transfers_to_brokerage(self, days_back=7):
-        """
-        Fetch outgoing TAO transfers from wallet to brokerage.
-        
-        Args:
-            days_back: How many days back to check
-            
-        Returns:
-            list: TAO transfer events to brokerage
-        """
-        try:
-            end_time = int(time.time())
-            start_time = self.last_transfer_timestamp if self.last_transfer_timestamp else end_time - (days_back * 86400)
-            
-            print(f"Fetching TAO transfers from {self.wallet_address} to {self.brokerage_address}")
-            
-            transfers = []
-            api_transfers = self.wallet_client.get_transfers(
-                account_address=self.wallet_address,
-                start_time=start_time,
-                end_time=end_time,
-                receiver=self.brokerage_address
-            )
-            
-            for t in api_transfers:
-                if t['timestamp'] > self.last_transfer_timestamp and t['unit'] == 'tao':
-                    tao_price_usd = t['tao_price_usd'] or self.get_tao_price(t['timestamp'])
-                    transfers.append({
-                        'block_number': t['block_number'],
-                        'timestamp': t['timestamp'],
-                        'to': t['to'],
-                        'amount_tao': t['amount'],
-                        'amount_rao': t['amount'] * 1e9,
-                        'tao_price_usd': tao_price_usd
-                    })
-                    print(f"Found TAO transfer: {t['amount']:.4f} TAO at ${tao_price_usd:.2f}/TAO on {datetime.fromtimestamp(t['timestamp'])}")
-
-            if transfers:
-                last_ts = max(tr['timestamp'] for tr in transfers)
-                self._save_last_timestamp(transfer_timestamp=last_ts)
-            else:
-                print(f"ℹ️  No TAO transfers found. Check Taostats: taostats.io/account/{self.brokerage_address}/transactions")
-            
-            return transfers
-        except Exception as e:
-            print(f"Error fetching TAO transfers: {e}")
-            return []
-
-    def get_remaining_alpha(self, days_back=365):
-        """
-        Fetch historical stake balances for capital gains tracking, logging incremental alpha.
-        
-        Args:
-            days_back: How many days back to check (default: 365 for 1 year)
-            
-        Returns:
-            list: Balance snapshots with timestamp, incremental_alpha, tao_equivalent, usd_value
-        """
-        try:
-            end_time = int(time.time())
-            start_time = self.last_balance_timestamp if self.last_balance_timestamp > 0 else end_time - (days_back * 86400)
-            
-            print(f"Fetching stake balance history for {self.wallet_address} from {datetime.fromtimestamp(start_time, tz=timezone.utc)}")
-            
-            balances = self.wallet_client.get_stake_balance_history(
-                netuid=self.subnet_id,
-                hotkey=self.validator_address,
-                coldkey=self.wallet_address,
-                start_time=start_time,
-                end_time=end_time
-            )
-            
-
-            balances = sorted(balances, key=lambda b: b['timestamp'])
-            enriched_balances = []
-            previous_balance = self._load_last_alpha_balance()
-            for b in balances:
-                if b['timestamp'] > self.last_balance_timestamp:
-                    alpha_balance = b['alpha_balance'] / 1e9
-                    new_alpha = alpha_balance - previous_balance if previous_balance > 0 else alpha_balance
-                    if new_alpha > 0:  # Only log positive increments (emissions/rewards)
-                        tao_price = self.get_tao_price(b['timestamp'])
-                        usd_value = new_alpha * tao_price * (b['tao_equivalent'] / b['alpha_balance']) if tao_price and b['alpha_balance'] > 0 else None
-                        # This is really just an approximation, but hard to get unless running against substrate every 30 minutes
-                        acquisition_price_usd = usd_value / new_alpha if new_alpha > 0 and usd_value else None
-                        enriched_balances.append({
-                            'timestamp': b['timestamp'],
-                            'block_number': b['block_number'],
-                            'alpha_balance': alpha_balance,
-                            'incremental_alpha': new_alpha,
-                            'tao_equivalent': new_alpha * (b['tao_equivalent'] / b['alpha_balance']) if b['alpha_balance'] > 0 else 0,
-                            'usd_value': usd_value,
-                            'acquisition_price_usd': acquisition_price_usd,
-                            'notes': f'Price source: {self.price_client.name}' if usd_value else 'Price source: Missing'
-                        })
-                        self.log_capital_gains(enriched_balances[-1])
-                    previous_balance = alpha_balance
-            
-            if enriched_balances:
-                last_ts = max(b['timestamp'] for b in enriched_balances)
-                self._save_last_timestamp(balance_timestamp=last_ts)
-                print(f"Found {len(enriched_balances)} new balance snapshots.")
-            else:
-                print("ℹ️  No new balance snapshots found.")
-            
-            return enriched_balances
-        except Exception as e:
-            print(f"Error fetching stake balance history: {e}")
-            return []
-
-    def process_emission(self, alpha_tokens, timestamp, block_number=None, tao_price=None, tao_equivalent=None, usd_value=None):
-        """
-        Process a single emission event, including ~25% tax liquidation.
-        
-        Args:
-            alpha_tokens: Amount of ALPHA tokens received
-            timestamp: Unix timestamp of emission
-            block_number: Optional block number
-            tao_price: Optional TAO price in USD (from API)
-            tao_equivalent: Optional TAO equivalent of alpha
-            usd_value: Optional USD value from API
-        """
-        # Prioritize Taostats API usd_value
-        if usd_value and tao_equivalent:
-            total_value_usd = usd_value
-            tao_price = usd_value / tao_equivalent if tao_equivalent > 0 else self.get_tao_price(timestamp)
-            print(f"Using Taostats API USD value: ${usd_value:.2f}, TAO equivalent: {tao_equivalent:.4f}")
-        else:
-            tao_price = tao_price or self.get_tao_price(timestamp)
-            if tao_price is None:
-                print("Could not fetch TAO price, skipping this emission")
-                print("💡 Tip: Use manual_entry_mode() to enter price manually")
+        # Simple retry to handle transient 429s
+        for attempt in range(3):
+            try:
+                self.sheet.values_batch_update(body)
                 return
-            tao_equivalent = alpha_tokens * self.get_alpha_price_in_tao()
-            total_value_usd = tao_equivalent * tao_price
-            print(f"Using PriceClient for USD value: ${total_value_usd:.2f}")
+            except Exception as e:
+                if attempt == 2:
+                    raise
+                sleep_for = 2 ** attempt
+                print(f"  Warning: batch alpha update failed (attempt {attempt + 1}), retrying in {sleep_for}s: {e}")
+                time.sleep(sleep_for)
+    
+    # -------------------------------------------------------------------------
+    # TAO Lot Management (FIFO)
+    # -------------------------------------------------------------------------
+    
+    def get_open_tao_lots(self) -> List[Dict[str, Any]]:
+        """Get all TAO lots with remaining balance, sorted by timestamp (FIFO)."""
+        records = self.tao_lots_sheet.get_all_records()
+        open_lots = [
+            r for r in records 
+            if r['Status'] in ('Open', 'Partial') and r['TAO Remaining'] > 0
+        ]
+        return sorted(open_lots, key=lambda x: x['Timestamp'])
+    
+    def consume_tao_lots_fifo(self, tao_needed: float) -> Tuple[List[LotConsumption], float, GainType, List[Dict[str, Any]]]:
+        """
+        Consume TAO lots in FIFO order.
         
-        print(f"\nProcessing emission:")
-        print(f"  ALPHA tokens: {alpha_tokens:.4f}")
-        print(f"  TAO price: ${tao_price:.2f}")
-        print(f"  Total value: ${total_value_usd:.2f}")
+        Returns:
+            Tuple of (consumed lots, total cost basis, gain type)
+        """
+        # Attach row numbers to avoid multiple lookups when updating
+        records = self.tao_lots_sheet.get_all_records()
+        open_lots = []
+        for idx, lot in enumerate(records, start=2):
+            if lot['Status'] in ('Open', 'Partial') and lot['TAO Remaining'] > 0:
+                lot['_row_num'] = idx
+                open_lots.append(lot)
+        open_lots = sorted(open_lots, key=lambda x: x['Timestamp'])
+        total_available = sum(lot['TAO Remaining'] for lot in open_lots)
         
-        # Calculate payroll/tax liquidation (existing logic)
-        liquidation = self.calculate_liquidation(total_value_usd, alpha_tokens)
+        if total_available < tao_needed:
+            raise InsufficientLotsError(
+                f"Need {tao_needed:.4f} TAO but only {total_available:.4f} available"
+            )
         
-        # Calculate ~25% tax liquidation for new alpha emissions
-        # tax_liquidation = self.calculate_tax_liquidation(total_value_usd, alpha_tokens)
+        consumed = []
+        total_basis = 0.0
+        remaining_need = tao_needed
+        now = int(time.time())
+        one_year_ago = now - (365 * 24 * 60 * 60)
+        all_long_term = True
+        lot_updates = []
         
-        # Calculate long-term capital gains eligible date (1 year from receipt)
-        long_term_date = datetime.fromtimestamp(timestamp + 365*24*60*60).strftime('%Y-%m-%d')
+        for lot in open_lots:
+            if remaining_need <= 0:
+                break
+            
+            lot_id = lot['TAO Lot ID']
+            available = lot['TAO Remaining']
+            original_qty = lot['TAO Quantity']
+            original_basis = lot['USD Basis']
+            acquisition_ts = lot['Timestamp']
+            
+            if acquisition_ts > one_year_ago:
+                all_long_term = False
+            
+            to_consume = min(available, remaining_need)
+            basis_consumed = (to_consume / original_qty) * original_basis
+            
+            consumed.append(LotConsumption(
+                lot_id=lot_id,
+                alpha_consumed=to_consume,  # Reusing field for TAO amount
+                cost_basis_consumed=basis_consumed,
+                acquisition_timestamp=acquisition_ts
+            ))
+            
+            total_basis += basis_consumed
+            remaining_need -= to_consume
+            
+            new_remaining = available - to_consume
+            new_status = LotStatus.CLOSED.value if new_remaining == 0 else LotStatus.PARTIAL.value
+            lot_updates.append({
+                "lot_id": lot_id,
+                "row_num": lot["_row_num"],
+                "remaining": new_remaining,
+                "status": new_status
+            })
         
-        # Combine liquidation amounts
-        alpha_price_usd = total_value_usd / alpha_tokens if alpha_tokens > 0 else 0
-        payroll_alpha = liquidation['payroll'] / alpha_price_usd if alpha_price_usd > 0 else 0
-        tax_alpha = liquidation['tax_alpha']
-        total_liquidate_alpha = payroll_alpha + tax_alpha
-        keep_alpha = alpha_tokens - total_liquidate_alpha
-        keep_usd = total_value_usd - (liquidation['total_liquidate_usd'])
+        gain_type = GainType.LONG_TERM if all_long_term else GainType.SHORT_TERM
+        return consumed, total_basis, gain_type, lot_updates
+    
+    def _batch_update_tao_lots(self, updates: List[Dict[str, Any]]):
+        """Batch update TAO lot remaining amounts/status to reduce write calls."""
+        if not updates:
+            return
         
-        # Prepare data for logging
-        emission_data = {
-            'date': datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S'),
-            'timestamp': timestamp,
-            'block_number': block_number,
-            'alpha_tokens': alpha_tokens,
-            'tao_price': tao_price,
-            'total_value_usd': total_value_usd,
-            'payroll': liquidation['payroll'],
-            'tax': liquidation['tax_usd'],
-            'total_liquidate_usd': liquidation['total_liquidate_usd'],
-            'alpha_to_liquidate': total_liquidate_alpha,
-            'payroll_alpha': payroll_alpha,
-            'tax_alpha': tax_alpha,
-            'keep_usd': keep_usd,
-            'keep_alpha': keep_alpha,
-            'status': 'Pending Manual Liquidation',
-            'long_term_date': long_term_date,
-            'notes': f'Hold {keep_alpha:.4f} ALPHA until {long_term_date} for long-term capital gains; includes 25% tax liquidation'
+        data = []
+        for upd in updates:
+            row = upd["row_num"]
+            data.append({
+                "range": f"{self.TAO_LOTS_SHEET}!F{row}:F{row}",  # TAO Remaining
+                "values": [[upd["remaining"]]]
+            })
+            data.append({
+                "range": f"{self.TAO_LOTS_SHEET}!K{row}:K{row}",  # Status
+                "values": [[upd["status"]]]
+            })
+        
+        body = {
+            "valueInputOption": "RAW",
+            "data": data
         }
         
-        # Log to main sheet
-        self.log_emission(emission_data)
-        
-        # Add to liquidation queue
-        self.add_to_liquidation_queue(emission_data)
-        
-        print(f"\n📊 Summary:")
-        print(f"  Liquidate: {total_liquidate_alpha:.4f} ALPHA (${emission_data['total_liquidate_usd']:.2f})")
-        print(f"    - Payroll: {payroll_alpha:.4f} ALPHA (${liquidation['payroll']:.2f})")
-        print(f"    - Taxes: {tax_alpha:.4f} ALPHA (${emission_data['tax']:.2f})")
-        print(f"  Keep: {keep_alpha:.4f} ALPHA (${keep_usd:.2f})")
-        print(f"  Hold until: {long_term_date}")
-        
-        return emission_data
+        for attempt in range(3):
+            try:
+                self.sheet.values_batch_update(body)
+                return
+            except Exception as e:
+                if attempt == 2:
+                    raise
+                sleep_for = 2 ** attempt
+                print(f"  Warning: batch TAO lot update failed (attempt {attempt + 1}), retrying in {sleep_for}s: {e}")
+                time.sleep(sleep_for)
+    
+    def _append_with_retry(self, worksheet, row_values: List[Any], label: str):
+        """Append a single row with small retry/backoff to handle rate limiting."""
+        for attempt in range(3):
+            try:
+                worksheet.append_row(row_values)
+                return
+            except Exception as e:
+                if attempt == 2:
+                    raise
+                sleep_for = 2 ** attempt
+                print(f"  Warning: append to {label} failed (attempt {attempt + 1}), retrying in {sleep_for}s: {e}")
+                time.sleep(sleep_for)
+    
+    def _append_rows_with_retry(self, worksheet, rows: List[List[Any]], label: str):
+        """Append multiple rows with retry/backoff to reduce API calls."""
+        if not rows:
+            return
+        for attempt in range(3):
+            try:
+                worksheet.append_rows(rows)
+                return
+            except Exception as e:
+                if attempt == 2:
+                    raise
+                sleep_for = 2 ** attempt
+                print(f"  Warning: append rows to {label} failed (attempt {attempt + 1}), retrying in {sleep_for}s: {e}")
+                time.sleep(sleep_for)
 
-    def run_daily_check(self):
+    def _sort_sheet_by_timestamp(self, worksheet, timestamp_col: int, label: str, range_str: str = "A2:Z"):
+        """Sort a worksheet by a timestamp column (ascending) excluding header row."""
+        for attempt in range(2):
+            try:
+                # gspread expects an iterable of (col, order) pairs; pass a list to be explicit
+                worksheet.sort(range_str, [(timestamp_col, 'asc')])
+                return
+            except Exception as e:
+                if attempt == 1:
+                    print(f"  Warning: could not sort {label} sheet: {e}")
+                    return
+                time.sleep(1)
+            
+        # -------------------------------------------------------------------------
+    # Income Processing (ALPHA Lot Creation)
+    # -------------------------------------------------------------------------
+    
+    def process_contract_income(self, days_back: int = 7) -> List[AlphaLot]:
         """
-        Run daily check for new emissions and capital gains tracking.
+        Process contract income from DELEGATE events with smart contract transfer address.
+        
+        Returns:
+            List of newly created ALPHA lots
         """
         print(f"\n{'='*60}")
-        print(f"Checking for emissions and balances: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print("Processing Contract Income")
         print(f"{'='*60}")
         
-        # Get emissions from last 24 hours
-        emissions = self.get_recent_emissions(days_back=1)
-        
-        if not emissions:
-            print("ℹ️  No new emissions found")
-        else:
-            for emission in emissions:
-                self.process_emission(
-                    alpha_tokens=emission['amount'],
-                    timestamp=emission['timestamp'],
-                    block_number=emission.get('block_number'),
-                    tao_price=emission.get('tao_price_usd'),
-                    tao_equivalent=emission.get('tao_equivalent'),
-                    usd_value=emission.get('usd_value')
-                )
-        
-        # Update capital gains tracking
-        self.get_remaining_alpha(days_back=365)
-
-        self._sort_sheets()
-
-        print(f"\n✓ Processed {len(emissions)} emission(s)")
-        print(f"📋 Check 'Liquidation Queue' and 'Capital Gains' sheets for manual tasks")
-
-    def check_and_process_liquidations(self, lookback_days=7):
-        """Check and process pending liquidations against brokerage transfers."""
-        try:
-            transfers = self.get_tao_transfers_to_brokerage(days_back=lookback_days)
-            if transfers:
-                pending_liquidations = self.get_pending_liquidations()
-                
-                for liquidation in pending_liquidations:
-                    liquidation_timestamp = liquidation['timestamp']
-                    
-                    for transfer in transfers:
-                        transfer_timestamp = transfer['timestamp']
-                        transfer_amount = transfer['amount_tao']
-                        tao_price_usd = transfer['tao_price_usd']
-                        transfer_usd = transfer_amount * tao_price_usd if tao_price_usd else 0
-                        
-                        if abs(transfer_timestamp - liquidation_timestamp) < 86400:  # Within 24 hours
-                            if abs(transfer_usd - liquidation['total_liquidate_usd']) < 0.1 * liquidation['total_liquidate_usd']:
-                                self.mark_liquidation_complete(liquidation)
-                                print(f"Matched liquidation: {liquidation['date']} with transfer: {transfer_amount:.4f} TAO")
-                                break
-        except Exception as e:
-            print(f"Error processing liquidations: {e}")
-
-    def get_pending_liquidations(self):
-        """Fetch pending liquidations from queue."""
-        try:
-            records = self.liquidation_worksheet.get_all_records()
-            return [r for r in records if r['Status'] == 'Pending Manual Liquidation']
-        except Exception as e:
-            print(f"Error fetching pending liquidations: {e}")
-            return []
-
-    def mark_liquidation_complete(self, liquidation: dict):
-        """Mark a liquidation as complete in the queue."""
-        try:
-            records = self.liquidation_worksheet.get_all_records()
-            for i, record in enumerate(records, 2):  # Start at row 2 (after header)
-                if (record['Timestamp'] == liquidation['timestamp'] and
-                    abs(record['Alpha to Liquidate'] - liquidation['alpha_to_liquidate']) < 0.0001):
-                    self.liquidation_worksheet.update_cell(i, 10, 'Completed')
-                    print(f"Marked liquidation complete: {liquidation['date']}")
-                    break
-        except Exception as e:
-            print(f"Error marking liquidation complete: {e}")
-
-    def manual_entry_mode(self):
-        """Manual entry mode for emissions."""
-        print("Entering manual entry mode...")
-        date = input("Enter date (YYYY-MM-DD HH:MM:SS): ")
-        alpha_tokens = float(input("Enter ALPHA tokens received: "))
-        tao_price = float(input("Enter TAO price in USD: "))
-        timestamp = int(datetime.strptime(date, "%Y-%m-%d %H:%M:%S").timestamp())
-        
-        self.process_emission(
-            alpha_tokens=alpha_tokens,
-            timestamp=timestamp,
-            tao_price=tao_price
+        end_time = int(time.time())
+        default_start = end_time - (days_back * 86400)
+        start_time = max(
+            self.last_contract_income_timestamp + 1,
+            default_start
         )
+        
+        print(f"Fetching delegations from {datetime.fromtimestamp(start_time)} to {datetime.fromtimestamp(end_time)}")
+        
+        delegations = self.wallet_client.get_delegations(
+            netuid=self.subnet_id,
+            delegate=self.validator_address,
+            nominator=self.wallet_address,
+            start_time=start_time,
+            end_time=end_time
+        )
+        
+        new_lots = []
+        for d in delegations:
+            # Filter: DELEGATE events from smart contract
+            if (d['action'] == 'DELEGATE' and 
+                d.get('is_transfer') == True and 
+                d.get('transfer_address') == self.smart_contract_address and
+                d['timestamp'] > self.last_contract_income_timestamp):
+                
+                lot = self._create_alpha_lot_from_delegation(d, SourceType.CONTRACT)
+                if lot:
+                    new_lots.append(lot)
+        
+        if new_lots:
+            max_ts = max(lot.timestamp for lot in new_lots)
+            self.last_contract_income_timestamp = max_ts
+            self.last_income_timestamp = max(self.last_contract_income_timestamp, self.last_staking_income_timestamp)
+            # Keep sheet sorted by timestamp (column 3)
+            self._sort_sheet_by_timestamp(self.income_sheet, timestamp_col=3, label="Income", range_str="A2:O")
+            print(f"\n✓ Created {len(new_lots)} contract income lots")
+        else:
+            print("ℹ️  No new contract income found")
+        
+        return new_lots
+    
+    def process_staking_emissions(self, days_back: int = 7) -> List[AlphaLot]:
+        """
+        Process staking emissions by comparing balance history with DELEGATE events.
+        
+        Emissions = Balance increase - DELEGATE inflows
+        
+        Returns:
+            List of newly created ALPHA lots
+        """
+        print(f"\n{'='*60}")
+        print("Processing Staking Emissions")
+        print(f"{'='*60}")
+        
+        end_time = int(time.time())
+        default_start = end_time - (days_back * 86400)
+        if self.last_staking_income_timestamp > 0:
+            start_time = max(self.last_staking_income_timestamp + 1, default_start)
+        else:
+            start_time = default_start
+        
+        # Get balance history
+        balances = self.wallet_client.get_stake_balance_history(
+            netuid=self.subnet_id,
+            hotkey=self.validator_address,
+            coldkey=self.wallet_address,
+            start_time=start_time,
+            end_time=end_time
+        )
+        # Guard against providers returning data outside requested window
+        balances = [
+            b for b in balances
+            if start_time <= b.get('timestamp', 0) <= end_time
+        ]
+        
+        if not balances:
+            print("ℹ️  No balance history found")
+            return []
+        
+        # Get all DELEGATE events in this period (to subtract from balance changes)
+        # Also need to account for UNDELEGATE which reduces balance
+        delegations = self.wallet_client.get_delegations(
+            netuid=self.subnet_id,
+            delegate=self.validator_address,
+            nominator=self.wallet_address,
+            start_time=start_time,
+            end_time=end_time
+        )
+        delegations = [
+            d for d in delegations
+            if start_time <= d.get('timestamp', 0) <= end_time
+        ]
+        
+        # Build list of delegation events with timestamps for windowed lookup
+        delegation_events = []
+        for d in delegations:
+            if d['action'] == 'DELEGATE' and d.get('is_transfer') == True:
+                delegation_events.append({
+                    'timestamp': d['timestamp'],
+                    'alpha': d['alpha'],
+                    'action': 'DELEGATE'
+                })
+            elif d['action'] == 'UNDELEGATE':
+                delegation_events.append({
+                    'timestamp': d['timestamp'],
+                    'alpha': d['alpha'],
+                    'action': 'UNDELEGATE'
+                })
+        
+        delegation_events = sorted(delegation_events, key=lambda x: x['timestamp'])
+        
+        # Preload prices for the full window to minimize API calls (15m granularity)
+        price_points = []
+        try:
+            price_points = self.price_client.get_prices_in_range('TAO', start_time, end_time)
+        except Exception as e:
+            print(f"  Warning: bulk price fetch failed, falling back to per-timestamp lookup: {e}")
+            price_points = []
+        
+        def get_price_for(ts: int) -> Optional[float]:
+            if price_points:
+                closest = min(price_points, key=lambda p: abs(p['timestamp'] - ts))
+                return closest.get('price')
+            return self.get_tao_price(ts)
+        
+        # Calculate emissions as balance increases not explained by DELEGATEs
+        balances = sorted(balances, key=lambda b: b['timestamp'])
+        new_lots = []
+        total_balances = len(balances)
+        pending_rows = []
+        last_progress_log = time.time()
+        
+        for i, balance in enumerate(balances):
+            if balance['timestamp'] <= self.last_staking_income_timestamp:
+                continue
+            
+            if i == 0:
+                # Need previous balance to calculate delta
+                continue
+            
+            prev_balance = balances[i - 1]
+            alpha_now = balance['alpha_balance'] / 1e9
+            alpha_prev = prev_balance['alpha_balance'] / 1e9
+            balance_change = alpha_now - alpha_prev
+            
+            if balance_change == 0:
+                continue
+            
+            # Find all delegation events between prev_balance and this balance timestamps
+            window_start = prev_balance['timestamp']
+            window_end = balance['timestamp']
+            
+            delegate_inflow = 0.0
+            undelegate_outflow = 0.0
+            for event in delegation_events:
+                if window_start < event['timestamp'] <= window_end:
+                    if event['action'] == 'DELEGATE':
+                        delegate_inflow += event['alpha']
+                    elif event['action'] == 'UNDELEGATE':
+                        undelegate_outflow += event['alpha']
+            
+            # Emissions = balance_change - delegate_inflow + undelegate_outflow
+            # (balance went up by balance_change, subtract delegates that contributed,
+            #  add back undelegates since they reduced balance)
+            emissions = balance_change - delegate_inflow + undelegate_outflow
+            
+            if emissions > 0.0001:  # Minimum threshold to avoid noise
+                # Get TAO price for FMV calculation
+                tao_price = get_price_for(balance['timestamp'])
+                if not tao_price:
+                    print(f"  Warning: Could not get price for block {balance['block_number']}, skipping")
+                    continue
+                
+                # Calculate FMV using TAO equivalent ratio
+                tao_ratio = balance['tao_equivalent'] / balance['alpha_balance'] if balance['alpha_balance'] > 0 else 0
+                tao_equivalent = emissions * tao_ratio
+                usd_fmv = tao_equivalent * tao_price
+                usd_per_alpha = usd_fmv / emissions if emissions > 0 else 0
+                
+                lot = AlphaLot(
+                    lot_id=self._next_alpha_lot_id(),
+                    timestamp=balance['timestamp'],
+                    block_number=balance['block_number'],
+                    source_type=SourceType.STAKING,
+                    alpha_quantity=emissions,
+                    alpha_remaining=emissions,
+                    usd_fmv=usd_fmv,
+                    usd_per_alpha=usd_per_alpha,
+                    tao_equivalent=tao_equivalent,
+                    notes=f"Staking emissions (balance delta: {balance_change:.4f}, delegates: {delegate_inflow:.4f}, undelegates: {undelegate_outflow:.4f})"
+                )
+                
+                # Collect for batch append to avoid duplicate writes and rate limits
+                pending_rows.append(lot.to_sheet_row())
+                new_lots.append(lot)
+                print(f"  ✓ Emission: {emissions:.4f} ALPHA (${usd_fmv:.2f}) at block {balance['block_number']}")
+            
+            # Periodic progress indicator to show the loop is advancing
+            if (i % 100 == 0) or (time.time() - last_progress_log > 5):
+                pct = (i + 1) / total_balances * 100 if total_balances else 100
+                ts_readable = datetime.fromtimestamp(balance['timestamp']).strftime('%Y-%m-%d %H:%M:%S')
+                print(f"    Progress: {i + 1}/{total_balances} ({pct:.1f}%) — up to {ts_readable}")
+                last_progress_log = time.time()
+        
+        if new_lots:
+            # Batch append emissions to reduce write calls
+            try:
+                self._append_rows_with_retry(self.income_sheet, pending_rows, label="Income")
+            except Exception as e:
+                print(f"  Error writing emissions to sheet: {e}")
+                raise
+            
+            # Keep sheet sorted by timestamp (column 3)
+            self._sort_sheet_by_timestamp(self.income_sheet, timestamp_col=3, label="Income")
+            
+            max_ts = max(lot.timestamp for lot in new_lots)
+            self.last_staking_income_timestamp = max(self.last_staking_income_timestamp, max_ts)
+            self.last_income_timestamp = max(self.last_contract_income_timestamp, self.last_staking_income_timestamp)
+            print(f"\n✓ Created {len(new_lots)} staking emission lots")
+        else:
+            print("ℹ️  No new staking emissions found")
+        
+        return new_lots
+    
+    def _create_alpha_lot_from_delegation(self, delegation: Dict[str, Any], source_type: SourceType) -> Optional[AlphaLot]:
+        """Create an ALPHA lot from a delegation event."""
+        alpha_amount = delegation['alpha']
+        usd_value = delegation['usd']
+        usd_per_alpha = delegation.get('alpha_price_in_usd') or (usd_value / alpha_amount if alpha_amount > 0 else 0)
+        tao_equivalent = delegation['tao_amount']
+        
+        lot = AlphaLot(
+            lot_id=self._next_alpha_lot_id(),
+            timestamp=delegation['timestamp'],
+            block_number=delegation['block_number'],
+            source_type=source_type,
+            alpha_quantity=alpha_amount,
+            alpha_remaining=alpha_amount,
+            usd_fmv=usd_value,
+            usd_per_alpha=usd_per_alpha,
+            tao_equivalent=tao_equivalent,
+            extrinsic_id=delegation.get('extrinsic_id'),
+            transfer_address=delegation.get('transfer_address'),
+            notes=f"{source_type.value} income"
+        )
+        
+        self.income_sheet.append_row(lot.to_sheet_row())
+        print(f"  ✓ {source_type.value}: {alpha_amount:.4f} ALPHA (${usd_value:.2f}) at {lot.date}")
+        
+        return lot
+    
+    # -------------------------------------------------------------------------
+    # Sales Processing (ALPHA → TAO)
+    # -------------------------------------------------------------------------
+    
+    def process_sales(self, days_back: int = 7) -> List[AlphaSale]:
+        """
+        Process ALPHA → TAO conversions (UNDELEGATE events).
+        
+        Returns:
+            List of newly created sales
+        """
+        print(f"\n{'='*60}")
+        print("Processing ALPHA → TAO Sales")
+        print(f"{'='*60}")
+        
+        end_time = int(time.time())
+        start_time = max(
+            self.last_sale_timestamp + 1,
+            end_time - (days_back * 86400)
+        )
+        
+        delegations = self.wallet_client.get_delegations(
+            netuid=self.subnet_id,
+            delegate=self.validator_address,
+            nominator=self.wallet_address,
+            start_time=start_time,
+            end_time=end_time
+        )
+        
+        new_sales = []
+        for d in delegations:
+            # Filter: UNDELEGATE events (user-initiated unstakes)
+            # is_transfer=null indicates user-initiated (not a transfer to another address)
+            if (d['action'] == 'UNDELEGATE' and 
+                d.get('is_transfer') is None and
+                d['timestamp'] > self.last_sale_timestamp):
+                
+                sale = self._process_undelegate(d)
+                if sale:
+                    new_sales.append(sale)
+        
+        if new_sales:
+            max_ts = max(sale.timestamp for sale in new_sales)
+            self.last_sale_timestamp = max_ts
+            print(f"\n✓ Processed {len(new_sales)} ALPHA sales")
+        else:
+            print("ℹ️  No new UNDELEGATE events found")
+        
+        return new_sales
+    
+    def _process_undelegate(self, delegation: Dict[str, Any]) -> Optional[AlphaSale]:
+        """Process an UNDELEGATE event into a sale."""
+        alpha_disposed = delegation['alpha']
+        tao_received = delegation['tao_amount']
+        
+        # Get TAO price at disposal time
+        tao_price = self.get_tao_price(delegation['timestamp'])
+        if not tao_price:
+            print(f"  Warning: Could not get TAO price for UNDELEGATE at {delegation['timestamp']}")
+            return None
+        
+        usd_proceeds = tao_received * tao_price
+        
+        # Consume ALPHA lots FIFO (collect updates for batch write)
+        try:
+            consumed_lots, cost_basis, gain_type, lot_updates = self.consume_alpha_lots_fifo(alpha_disposed)
+        except InsufficientLotsError as e:
+            print(f"  Error: {e}")
+            return None
+        
+        realized_gain_loss = usd_proceeds - cost_basis
+        
+        # Create TAO lot
+        tao_lot_id = self._next_tao_lot_id()
+        sale_id = self._next_sale_id()
+        
+        tao_lot = TaoLot(
+            lot_id=tao_lot_id,
+            timestamp=delegation['timestamp'],
+            block_number=delegation['block_number'],
+            tao_quantity=tao_received,
+            tao_remaining=tao_received,
+            usd_basis=usd_proceeds,  # Basis is FMV at time of receipt
+            usd_per_tao=tao_price,
+            source_sale_id=sale_id,
+            extrinsic_id=delegation.get('extrinsic_id')
+        )
+        # Create sale record
+        sale = AlphaSale(
+            sale_id=sale_id,
+            timestamp=delegation['timestamp'],
+            block_number=delegation['block_number'],
+            alpha_disposed=alpha_disposed,
+            tao_received=tao_received,
+            tao_price_usd=tao_price,
+            usd_proceeds=usd_proceeds,
+            cost_basis=cost_basis,
+            realized_gain_loss=realized_gain_loss,
+            gain_type=gain_type,
+            consumed_lots=consumed_lots,
+            created_tao_lot_id=tao_lot_id,
+            extrinsic_id=delegation.get('extrinsic_id')
+        )
+        
+        # Apply updates in batches to avoid write limits
+        self._batch_update_alpha_lots(lot_updates)
+        self._append_with_retry(self.tao_lots_sheet, tao_lot.to_sheet_row(), label="TAO Lots")
+        self._append_with_retry(self.sales_sheet, sale.to_sheet_row(), label="Sales")
+        # Sort sheets by timestamp (column 3)
+        self._sort_sheet_by_timestamp(self.income_sheet, timestamp_col=3, label="Income", range_str="A2:O")
+        self._sort_sheet_by_timestamp(self.sales_sheet, timestamp_col=3, label="Sales", range_str="A2:O")
+        self._sort_sheet_by_timestamp(self.tao_lots_sheet, timestamp_col=3, label="TAO Lots", range_str="A2:L")
+        
+        gain_str = "gain" if realized_gain_loss >= 0 else "loss"
+        print(f"  ✓ Sale {sale_id}: {alpha_disposed:.4f} ALPHA → {tao_received:.4f} TAO")
+        print(f"    Proceeds: ${usd_proceeds:.2f}, Basis: ${cost_basis:.2f}, {gain_type.value} {gain_str}: ${abs(realized_gain_loss):.2f}")
+        
+        return sale
+
+    # -------------------------------------------------------------------------
+    # Transfer Processing (TAO → Kraken)
+    # -------------------------------------------------------------------------
+    
+    def process_transfers(self, days_back: int = 7) -> List[TaoTransfer]:
+        """
+        Process TAO → Kraken transfers.
+        
+        Returns:
+            List of newly created transfers
+        """
+        print(f"\n{'='*60}")
+        print("Processing TAO → Kraken Transfers")
+        print(f"{'='*60}")
+        
+        end_time = int(time.time())
+        start_time = max(
+            self.last_transfer_timestamp + 1,
+            end_time - (days_back * 86400)
+        )
+        
+        transfers = self.wallet_client.get_transfers(
+            account_address=self.wallet_address,
+            start_time=start_time,
+            end_time=end_time,
+            sender=self.wallet_address,
+            receiver=self.brokerage_address
+        )
+        
+        # Extra guard: some providers may ignore start/end filters, so enforce locally
+        transfers = [
+            t for t in transfers
+            if start_time <= t.get('timestamp', 0) <= end_time
+        ]
+        
+        new_transfers = []
+        for t in transfers:
+            if t['timestamp'] > self.last_transfer_timestamp:
+                transfer = self._process_tao_transfer(t)
+                if transfer:
+                    new_transfers.append(transfer)
+        
+        if new_transfers:
+            max_ts = max(xfer.timestamp for xfer in new_transfers)
+            self.last_transfer_timestamp = max_ts
+            print(f"\n✓ Processed {len(new_transfers)} TAO transfers to Kraken")
+        else:
+            print("ℹ️  No new TAO transfers to Kraken found")
+        
+        return new_transfers
+    
+    def _process_tao_transfer(self, transfer: Dict[str, Any]) -> Optional[TaoTransfer]:
+        """Process a TAO transfer to Kraken."""
+        tao_amount = transfer['amount']
+        
+        # Get TAO price at transfer time
+        tao_price = self.get_tao_price(transfer['timestamp'])
+        if not tao_price:
+            print(f"  Warning: Could not get TAO price for transfer at {transfer['timestamp']}")
+            return None
+        
+        usd_proceeds = tao_amount * tao_price
+        
+        # Consume TAO lots FIFO (collect updates for batch write)
+        try:
+            consumed_lots, cost_basis, gain_type, lot_updates = self.consume_tao_lots_fifo(tao_amount)
+        except InsufficientLotsError as e:
+            print(f"  Error: {e}")
+            return None
+        
+        realized_gain_loss = usd_proceeds - cost_basis
+        
+        xfer = TaoTransfer(
+            transfer_id=self._next_transfer_id(),
+            timestamp=transfer['timestamp'],
+            block_number=transfer['block_number'],
+            tao_amount=tao_amount,
+            tao_price_usd=tao_price,
+            usd_proceeds=usd_proceeds,
+            cost_basis=cost_basis,
+            realized_gain_loss=realized_gain_loss,
+            gain_type=gain_type,
+            consumed_tao_lots=consumed_lots,
+            transaction_hash=transfer.get('transaction_hash'),
+            extrinsic_id=transfer.get('extrinsic_id')
+        )
+        
+        self._batch_update_tao_lots(lot_updates)
+        self._append_with_retry(self.transfers_sheet, xfer.to_sheet_row(), label="Transfers")
+        self._sort_sheet_by_timestamp(self.tao_lots_sheet, timestamp_col=3, label="TAO Lots", range_str="A2:L")
+        self._sort_sheet_by_timestamp(self.transfers_sheet, timestamp_col=3, label="Transfers", range_str="A2:L")
+        
+        gain_str = "gain" if realized_gain_loss >= 0 else "loss"
+        print(f"  ✓ Transfer {xfer.transfer_id}: {tao_amount:.4f} TAO → Kraken")
+        print(f"    Proceeds: ${usd_proceeds:.2f}, Basis: ${cost_basis:.2f}, {gain_type.value} {gain_str}: ${abs(realized_gain_loss):.2f}")
+        
+        return xfer
+
+    # -------------------------------------------------------------------------
+    # Journal Entry Generation
+    # -------------------------------------------------------------------------
+    
+    def generate_monthly_journal_entries(self, year_month: str = None) -> List[JournalEntry]:
+        """
+        Generate Wave journal entries for a specific month.
+        
+        Args:
+            year_month: Month in YYYY-MM format (defaults to last month)
+            
+        Returns:
+            List of journal entries
+        """
+        if not year_month:
+            last_month = datetime.now().replace(day=1) - timedelta(days=1)
+            year_month = last_month.strftime('%Y-%m')
+        
+        print(f"\n{'='*60}")
+        print(f"Generating Journal Entries for {year_month}")
+        print(f"{'='*60}")
+        
+        # Parse month boundaries
+        year, month = map(int, year_month.split('-'))
+        start_ts = int(datetime(year, month, 1, tzinfo=timezone.utc).timestamp())
+        if month == 12:
+            end_ts = int(datetime(year + 1, 1, 1, tzinfo=timezone.utc).timestamp())
+        else:
+            end_ts = int(datetime(year, month + 1, 1, tzinfo=timezone.utc).timestamp())
+        
+        entries = []
+        
+        # Process Income
+        income_records = self.income_sheet.get_all_records()
+        contract_income = sum(
+            r['USD FMV'] for r in income_records 
+            if start_ts <= r['Timestamp'] < end_ts and r['Source Type'] == 'Contract'
+        )
+        staking_income = sum(
+            r['USD FMV'] for r in income_records 
+            if start_ts <= r['Timestamp'] < end_ts and r['Source Type'] == 'Staking'
+        )
+        
+        if contract_income > 0:
+            # Debit Asset, Credit Income
+            entries.append(JournalEntry(
+                month=year_month,
+                entry_type="Income",
+                account=self.wave_config.alpha_asset_account,
+                debit=contract_income,
+                credit=0,
+                description=f"Contract ALPHA income for {year_month}"
+            ))
+            entries.append(JournalEntry(
+                month=year_month,
+                entry_type="Income",
+                account=self.wave_config.contract_income_account,
+                debit=0,
+                credit=contract_income,
+                description=f"Contract ALPHA income for {year_month}"
+            ))
+        
+        if staking_income > 0:
+            entries.append(JournalEntry(
+                month=year_month,
+                entry_type="Income",
+                account=self.wave_config.alpha_asset_account,
+                debit=staking_income,
+                credit=0,
+                description=f"Staking emissions income for {year_month}"
+            ))
+            entries.append(JournalEntry(
+                month=year_month,
+                entry_type="Income",
+                account=self.wave_config.staking_income_account,
+                debit=0,
+                credit=staking_income,
+                description=f"Staking emissions income for {year_month}"
+            ))
+        
+        # Process Sales (ALPHA → TAO)
+        sales_records = self.sales_sheet.get_all_records()
+        month_sales = [r for r in sales_records if start_ts <= r['Timestamp'] < end_ts]
+        
+        for sale in month_sales:
+            gain_loss = sale['Realized Gain/Loss']
+            gain_type = sale['Gain Type']
+            
+            # Debit TAO asset for proceeds
+            entries.append(JournalEntry(
+                month=year_month,
+                entry_type="Sale",
+                account=self.wave_config.tao_asset_account,
+                debit=sale['USD Proceeds'],
+                credit=0,
+                description=f"TAO received from ALPHA sale {sale['Sale ID']}"
+            ))
+            
+            # Credit ALPHA asset for cost basis
+            entries.append(JournalEntry(
+                month=year_month,
+                entry_type="Sale",
+                account=self.wave_config.alpha_asset_account,
+                debit=0,
+                credit=sale['Cost Basis'],
+                description=f"ALPHA disposed in sale {sale['Sale ID']}"
+            ))
+            
+            # Record gain/loss
+            if gain_loss >= 0:
+                gain_account = (self.wave_config.long_term_gain_account 
+                               if gain_type == 'Long-term' 
+                               else self.wave_config.short_term_gain_account)
+                entries.append(JournalEntry(
+                    month=year_month,
+                    entry_type="Sale",
+                    account=gain_account,
+                    debit=0,
+                    credit=gain_loss,
+                    description=f"{gain_type} gain on sale {sale['Sale ID']}"
+                ))
+            else:
+                loss_account = (self.wave_config.long_term_loss_account 
+                               if gain_type == 'Long-term' 
+                               else self.wave_config.short_term_loss_account)
+                entries.append(JournalEntry(
+                    month=year_month,
+                    entry_type="Sale",
+                    account=loss_account,
+                    debit=abs(gain_loss),
+                    credit=0,
+                    description=f"{gain_type} loss on sale {sale['Sale ID']}"
+                ))
+        
+        # Process Transfers (TAO → Kraken)
+        transfer_records = self.transfers_sheet.get_all_records()
+        month_transfers = [r for r in transfer_records if start_ts <= r['Timestamp'] < end_ts]
+        
+        for xfer in month_transfers:
+            gain_loss = xfer['Realized Gain/Loss']
+            gain_type = xfer['Gain Type']
+            
+            # For transfer to Kraken, we're disposing TAO
+            # The basis leaves our books, proceeds are the new Kraken basis (handled by Koinly)
+            
+            # Credit TAO asset for cost basis (leaving our books)
+            entries.append(JournalEntry(
+                month=year_month,
+                entry_type="Transfer",
+                account=self.wave_config.tao_asset_account,
+                debit=0,
+                credit=xfer['Cost Basis'],
+                description=f"TAO transferred to Kraken {xfer['Transfer ID']}"
+            ))
+            
+            # Record gain/loss from price movement between receiving TAO and sending to Kraken
+            if gain_loss >= 0:
+                gain_account = (self.wave_config.long_term_gain_account 
+                               if gain_type == 'Long-term' 
+                               else self.wave_config.short_term_gain_account)
+                entries.append(JournalEntry(
+                    month=year_month,
+                    entry_type="Transfer",
+                    account=gain_account,
+                    debit=0,
+                    credit=gain_loss,
+                    description=f"{gain_type} gain on transfer {xfer['Transfer ID']}"
+                ))
+                # Balancing entry
+                entries.append(JournalEntry(
+                    month=year_month,
+                    entry_type="Transfer",
+                    account=self.wave_config.tao_asset_account,
+                    debit=gain_loss,
+                    credit=0,
+                    description=f"Proceeds adjustment for transfer {xfer['Transfer ID']}"
+                ))
+            elif gain_loss < 0:
+                loss_account = (self.wave_config.long_term_loss_account 
+                               if gain_type == 'Long-term' 
+                               else self.wave_config.short_term_loss_account)
+                entries.append(JournalEntry(
+                    month=year_month,
+                    entry_type="Transfer",
+                    account=loss_account,
+                    debit=abs(gain_loss),
+                    credit=0,
+                    description=f"{gain_type} loss on transfer {xfer['Transfer ID']}"
+                ))
+                # Balancing entry - no additional debit needed as loss reduces TAO value
+        
+        # Write to sheet
+        for entry in entries:
+            self.journal_sheet.append_row(entry.to_sheet_row())
+        
+        print(f"✓ Generated {len(entries)} journal entries for {year_month}")
+        
+        # Summary
+        total_income = contract_income + staking_income
+        total_sales_proceeds = sum(s['USD Proceeds'] for s in month_sales)
+        total_sales_gain = sum(s['Realized Gain/Loss'] for s in month_sales)
+        total_transfer_gain = sum(t['Realized Gain/Loss'] for t in month_transfers)
+        
+        print(f"\nSummary for {year_month}:")
+        print(f"  Contract Income: ${contract_income:.2f}")
+        print(f"  Staking Income: ${staking_income:.2f}")
+        print(f"  Sales Proceeds: ${total_sales_proceeds:.2f}")
+        print(f"  Sales Gain/Loss: ${total_sales_gain:.2f}")
+        print(f"  Transfer Gain/Loss: ${total_transfer_gain:.2f}")
+        
+        return entries
+
+    # -------------------------------------------------------------------------
+    # Main Entry Points
+    # -------------------------------------------------------------------------
+    
+    def run_daily_check(self, days_back: int = 7):
+        """Run daily check for all transaction types."""
+        print(f"\n{'='*60}")
+        print(f"Daily Check: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"{'='*60}")
+        
+        # Process income
+        contract_lots = self.process_contract_income(days_back)
+        staking_lots = self.process_staking_emissions(days_back)
+        
+        # Process sales
+        sales = self.process_sales(days_back)
+        
+        # Process transfers
+        transfers = self.process_transfers(days_back)
+        
+        print(f"\n{'='*60}")
+        print("Summary")
+        print(f"{'='*60}")
+        print(f"  Contract Income Lots: {len(contract_lots)}")
+        print(f"  Staking Emission Lots: {len(staking_lots)}")
+        print(f"  ALPHA Sales: {len(sales)}")
+        print(f"  TAO Transfers: {len(transfers)}")
+    
+    def run_monthly_summary(self, year_month: str = None):
+        """Generate monthly Wave journal entries."""
+        self.generate_monthly_journal_entries(year_month)

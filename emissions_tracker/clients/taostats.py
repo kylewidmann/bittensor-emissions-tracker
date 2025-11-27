@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 import time
 import traceback
+from typing import List, Dict, Any, Optional
 
 import requests
 import backoff
@@ -10,11 +11,11 @@ from emissions_tracker.clients.wallet import WalletClientInterface
 from emissions_tracker.config import TaoStatsSettings
 from emissions_tracker.exceptions import PriceNotAvailableError
 
+
 class TaoStatsAPIClient(WalletClientInterface, PriceClient):
-    """Client for Taostats API account transactions."""
+    """Client for Taostats API - provides wallet data and price information."""
     
     def __init__(self):
-
         self.config = TaoStatsSettings()
         if not self.config.api_key:
             raise ValueError("TAOSTATS_API_KEY is required. Sign up at https://dash.taostats.io/")
@@ -25,9 +26,11 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
             "Content-Type": "application/json"
         }
         self._last_call_time = None
+        self._price_bucket_cache = {}   # keyed by 15m bucket
+        self._price_window_cache = {}   # keyed by (start, end)
 
     @property
-    def name(self):
+    def name(self) -> str:
         return "TaoStats API"
 
     @backoff.on_exception(
@@ -37,14 +40,19 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
         giveup=lambda e: e.response is None or e.response.status_code != 429,
         factor=6
     )
-    def _fetch_with_pagination(self, url: str, params: dict):
-        """Helper to fetch all pages from an endpoint."""
+    def _fetch_with_pagination(self, url: str, params: dict, per_page: int = 50, context: str = "") -> List[Dict[str, Any]]:
+        """Helper to fetch all pages from an endpoint with throttling and lightweight progress."""
         all_data = []
         page = 1
         while True:
             if self._last_call_time and time.time() - self._last_call_time < 12:
-                time.sleep(12)  # Pace at 12s to stay under 5 req/min
+                sleep_time = 12 - (time.time() - self._last_call_time)
+                time.sleep(sleep_time)  # Pace at 12s to stay under 5 req/min
             params['page'] = page
+            params['per_page'] = per_page
+            if page == 1 or page % 5 == 0:
+                label = context or url
+                print(f"  Fetching {label}, page {page} (per_page={per_page})")
             response = requests.get(url, headers=self.headers, params=params)
             response.raise_for_status()
             data = response.json()
@@ -59,53 +67,43 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
             page += 1
         return all_data
 
-    def get_transfers(self, account_address: str, start_time: int, end_time: int, 
-                     sender: str = None, receiver: str = None) -> list:
-        """
-        Fetch transfers via Taostats API.
-        
-        Args:
-            account_address: SS58 address to query
-            start_time: Unix timestamp start
-            end_time: Unix timestamp end
-            sender: Optional sender filter
-            receiver: Optional receiver filter
-            
-        Returns:
-            list: Transfers with timestamp, from, to, amount, unit, block_number, tao_price_usd, tao_equivalent
-        """
+    def get_transfers(
+        self,
+        account_address: str,
+        start_time: int,
+        end_time: int,
+        sender: Optional[str] = None,
+        receiver: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Fetch TAO transfers via Taostats API."""
         try:
             url = f"{self.base_url}/transfer/v1"
             params = {
                 "address": account_address,
-                "start_timestamp": start_time,
-                "end_timestamp": end_time,
-                "per_page": 50  # Adjust as needed
+                "start_time": start_time,
+                "end_time": end_time
             }
             if sender:
                 params["sender"] = sender
             if receiver:
                 params["receiver"] = receiver
-
-            transfer_data = self._fetch_with_pagination(url, params)
+            
+            transfer_data = self._fetch_with_pagination(url, params, per_page=500, context="transfers")
             
             transfers = []
             for t in transfer_data:
                 timestamp = int(datetime.fromisoformat(t['timestamp'].replace('Z', '+00:00')).timestamp())
-                amount = int(t['amount']) / 1e9  # RAO to TAO/alpha
-                unit = 'tao'  # From your examples, transfers are TAO
-                tao_price_usd = None  # Not in this endpoint; fallback to PriceClient
-                tao_equivalent = amount
+                amount = int(t['amount']) / 1e9  # RAO to TAO
                 
                 transfers.append({
                     'timestamp': timestamp,
                     'from': t['from']['ss58'],
                     'to': t['to']['ss58'],
                     'amount': amount,
-                    'unit': unit,
                     'block_number': t['block_number'],
-                    'tao_price_usd': tao_price_usd,
-                    'tao_equivalent': tao_equivalent
+                    'transaction_hash': t['transaction_hash'],
+                    'extrinsic_id': t['extrinsic_id'],
+                    'tao_price_usd': None  # Will be fetched separately if needed
                 })
             
             return transfers
@@ -113,13 +111,15 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
             print(f"Taostats API error in get_transfers: {e}")
             return []
 
-    def get_delegations(self, netuid: int, delegate: str, nominator: str, start_time: int, end_time: int) -> list:
-        """
-        Fetch delegation/stake transfers via Taostats API.
-        
-        Returns:
-            list: Delegation events with timestamp, action, amount, alpha, usd, etc.
-        """
+    def get_delegations(
+        self,
+        netuid: int,
+        delegate: str,
+        nominator: str,
+        start_time: int,
+        end_time: int
+    ) -> List[Dict[str, Any]]:
+        """Fetch delegation/stake events via Taostats API."""
         try:
             url = f"{self.base_url}/delegation/v1"
             params = {
@@ -127,34 +127,31 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
                 "netuid": netuid,
                 "delegate": delegate,
                 "nominator": nominator,
-                "start_timestamp": start_time,
-                "end_timestamp": end_time,
-                "per_page": 50
+                "start_time": start_time,
+                "end_time": end_time
             }
 
-            delegation_data = self._fetch_with_pagination(url, params)
+            delegation_data = self._fetch_with_pagination(url, params, per_page=500, context="delegations")
             
             delegations = []
             for d in delegation_data:
                 timestamp = int(datetime.fromisoformat(d['timestamp'].replace('Z', '+00:00')).timestamp())
-                amount = float(d['amount']) / 1e9
-                alpha = float(d['alpha'])
-                unit = 'alpha' if alpha > 0 else 'tao'
-                tao_price_usd = float(d['alpha_price_in_usd']) if d['alpha_price_in_usd'] else None
-                tao_equivalent = amount if unit == 'tao' else float(d['amount']) / 1e9  # 'amount' is TAO
+                tao_amount = float(d['amount']) / 1e9  # RAO to TAO
+                alpha_amount = float(d['alpha']) / 1e9  # RAO to ALPHA
                 
                 delegations.append({
                     'timestamp': timestamp,
-                    'from': d['delegate']['ss58'] if d['action'] == 'UNDELEGATE' else d['nominator']['ss58'],
-                    'to': d['nominator']['ss58'] if d['action'] == 'UNDELEGATE' else d['delegate']['ss58'],
-                    'amount': alpha if unit == 'alpha' else amount,
-                    'unit': unit,
-                    'block_number': d['block_number'],
-                    'tao_price_usd': tao_price_usd,
-                    'tao_equivalent': tao_equivalent,
                     'action': d['action'],
+                    'alpha': alpha_amount,
+                    'tao_amount': tao_amount,
                     'usd': float(d['usd']),
-                    "transfer_address": d.get("transfer_address") and d["transfer_address"].get("ss58", None)
+                    'alpha_price_in_usd': float(d['alpha_price_in_usd']) if d.get('alpha_price_in_usd') else None,
+                    'alpha_price_in_tao': float(d['alpha_price_in_tao']) if d.get('alpha_price_in_tao') else None,
+                    'block_number': d['block_number'],
+                    'extrinsic_id': d['extrinsic_id'],
+                    'is_transfer': d.get('is_transfer'),
+                    'transfer_address': d.get('transfer_address', {}).get('ss58') if d.get('transfer_address') else None,
+                    'fee': float(d.get('fee', 0)) / 1e9
                 })
             
             return delegations
@@ -163,38 +160,37 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
             print(traceback.format_exc())
             return []
 
-    def get_stake_balance_history(self, netuid: int, hotkey: str, coldkey: str, start_time: int, end_time: int) -> list:
-        """
-        Fetch historical stake balances for alpha tracking via Taostats API.
-        
-        Returns:
-            list: Balance snapshots with timestamp, alpha_balance, tao_equivalent
-        """
+    def get_stake_balance_history(
+        self,
+        netuid: int,
+        hotkey: str,
+        coldkey: str,
+        start_time: int,
+        end_time: int
+    ) -> List[Dict[str, Any]]:
+        """Fetch historical stake balance snapshots via Taostats API."""
         try:
             url = f"{self.base_url}/dtao/stake_balance/history/v1"
             params = {
                 "netuid": netuid,
                 "hotkey": hotkey,
                 "coldkey": coldkey,
-                "start_timestamp": start_time,
-                "end_timestamp": end_time,
-                "per_page": 50,
-                "order":"timestamp_asc"
+                "start_time": start_time,
+                "end_time": end_time,
+                "order": "timestamp_asc"
             }
 
-            history_data = self._fetch_with_pagination(url, params)
+            history_data = self._fetch_with_pagination(url, params, per_page=500, context="stake_balance_history")
             
             balances = []
             for h in history_data:
                 timestamp = int(datetime.fromisoformat(h['timestamp'].replace('Z', '+00:00')).timestamp())
-                alpha_balance = int(h['balance'])
-                tao_equivalent = int(h['balance_as_tao'])
                 
                 balances.append({
                     'timestamp': timestamp,
                     'block_number': h['block_number'],
-                    'alpha_balance': alpha_balance,
-                    'tao_equivalent': tao_equivalent
+                    'alpha_balance': int(h['balance']),  # Keep in RAO for precision
+                    'tao_equivalent': int(h['balance_as_tao'])  # Keep in RAO
                 })
             
             return balances
@@ -210,26 +206,18 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
         factor=6
     )
     def get_price_at_timestamp(self, symbol: str, timestamp: int) -> float:
-        """
-        Get the price of a cryptocurrency at a specific timestamp using Taostats API.
-        Uses a ±30 minute buffer to handle gaps in price history and selects the closest price.
-        
-        Args:
-            symbol: The cryptocurrency symbol (e.g., 'TAO')
-            timestamp: Unix timestamp
-            
-        Returns:
-            float: Price in USD
-            
-        Raises:
-            PriceNotAvailableError: If price cannot be retrieved within ±30 minutes
-        """
+        """Get the price of TAO at a specific timestamp."""
         try:
             if symbol != 'TAO':
                 raise PriceNotAvailableError(f"Taostats API only supports TAO, got {symbol}")
             
+            # Cache by 15-minute bucket to avoid repeat API calls while keeping throttle
+            bucket = int(timestamp // 900)
+            if bucket in self._price_bucket_cache:
+                return self._price_bucket_cache[bucket]
+            
+            buffer = 1800  # 30 minutes in seconds
             url = f"{self.base_url}/price/history/v1"
-            buffer = 900  # 30 minutes in seconds
             params = {
                 "asset": symbol,
                 "timestamp_start": timestamp - buffer,
@@ -238,8 +226,7 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
                 "per_page": 50
             }
             
-            data = self._fetch_with_pagination(url, params)
-            
+            data = self._fetch_with_pagination(url, params, context="price_at_timestamp")
             
             if data and len(data) > 0:
                 # Find the closest price by timestamp
@@ -249,7 +236,8 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
                 )
                 price = float(closest_price['price'])
                 price_time = datetime.fromisoformat(closest_price['created_at'].replace('Z', '+00:00')).strftime('%Y-%m-%d %H:%M:%S')
-                print(f"✓ Got {symbol} price from Taostats: ${price:.2f} at {price_time} (closest to {datetime.fromtimestamp(timestamp, tz=timezone.utc)})")
+                print(f"✓ Got {symbol} price from Taostats: ${price:.2f} at {price_time}")
+                self._price_bucket_cache[bucket] = price
                 return price
             
             raise PriceNotAvailableError(f"No price data available for {symbol} within ±30 minutes of {datetime.fromtimestamp(timestamp, tz=timezone.utc)}")
@@ -259,24 +247,56 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
         except (KeyError, TypeError, ValueError) as e:
             raise PriceNotAvailableError(f"Unexpected response format: {e}")
 
-    def get_current_price(self, symbol: str) -> float:
-        """
-        Get the current price of a cryptocurrency using Taostats API.
+    @backoff.on_exception(
+        backoff.expo,
+        requests.exceptions.HTTPError,
+        max_tries=3,
+        giveup=lambda e: e.response is None or e.response.status_code != 429,
+        factor=6
+    )
+    def get_prices_in_range(self, symbol: str, start_time: int, end_time: int):
+        """Fetch all prices within a range; used to avoid per-timestamp calls."""
+        if symbol != 'TAO':
+            raise PriceNotAvailableError(f"Taostats API only supports TAO, got {symbol}")
         
-        Args:
-            symbol: The cryptocurrency symbol
-            
-        Returns:
-            float: Current price in USD
-        """
+        cache_key = (start_time, end_time)
+        if cache_key in self._price_window_cache:
+            return self._price_window_cache[cache_key]
+        
+        url = f"{self.base_url}/price/history/v1"
+        prices = []
+        chunk = 2 * 24 * 60 * 60  # 2 days to keep each request small
+        current_start = start_time
+        while current_start <= end_time:
+            current_end = min(current_start + chunk, end_time)
+            params = {
+                "asset": symbol,
+                "timestamp_start": current_start,
+                "timestamp_end": current_end,
+                "order": "timestamp_asc",
+                "per_page": 500
+            }
+            data = self._fetch_with_pagination(url, params, per_page=500, context="price_range")
+            for item in data:
+                ts = int(datetime.fromisoformat(item['created_at'].replace('Z', '+00:00')).timestamp())
+                prices.append({
+                    "timestamp": ts,
+                    "price": float(item['price'])
+                })
+            current_start = current_end + 1
+        
+        prices = sorted(prices, key=lambda x: x['timestamp'])
+        self._price_window_cache[cache_key] = prices
+        return prices
+
+    def get_current_price(self, symbol: str) -> float:
+        """Get the current price of TAO."""
         try:
             if symbol != 'TAO':
                 raise PriceNotAvailableError(f"Taostats API only supports TAO, got {symbol}")
             
             url = f"{self.base_url}/price/latest/v1"
-            params = {
-                "asset": symbol
-            }
+            params = {"asset": symbol}
             
             data = self._fetch_with_pagination(url, params)
             
