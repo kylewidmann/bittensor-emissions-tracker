@@ -19,6 +19,8 @@ class TrackerSettings(BaseSettings):
     
     # Subnet configuration
     subnet_id: int = Field(64, alias="SUBNET_ID", description="Bittensor subnet ID")
+    # Lot consumption strategy: FIFO (default) or HIFO (highest cost basis first)
+    lot_strategy: str = Field("FIFO", alias="LOT_STRATEGY", description="Lot consumption strategy: FIFO or HIFO")
 
 
 class WaveAccountSettings(BaseSettings):

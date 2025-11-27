@@ -231,6 +231,20 @@ class BittensorEmissionTracker:
             r for r in records 
             if r['Status'] in ('Open', 'Partial') and r['Alpha Remaining'] > 0
         ]
+        # Support configurable lot consumption strategies. Default is FIFO (old behavior).
+        strategy = getattr(self.config, 'lot_strategy', 'FIFO')
+        if isinstance(strategy, str) and strategy.upper() == 'HIFO':
+            # Highest cost-basis first: compute USD per ALPHA from sheet fields when available.
+            def _unit_price(l):
+                try:
+                    qty = l.get('Alpha Quantity') or 0
+                    fmv = l.get('USD FMV') or 0
+                    return (fmv / qty) if qty else 0
+                except Exception:
+                    return 0
+            # Sort by unit price desc (highest first), tiebreaker by timestamp asc
+            return sorted(open_lots, key=lambda x: (-_unit_price(x), x['Timestamp']))
+        # FIFO: sort by timestamp ascending
         return sorted(open_lots, key=lambda x: x['Timestamp'])
     
     def consume_alpha_lots_fifo(self, alpha_needed: float) -> Tuple[List[LotConsumption], float, GainType, List[Dict[str, Any]]]:
@@ -368,7 +382,19 @@ class BittensorEmissionTracker:
             if lot['Status'] in ('Open', 'Partial') and lot['TAO Remaining'] > 0:
                 lot['_row_num'] = idx
                 open_lots.append(lot)
-        open_lots = sorted(open_lots, key=lambda x: x['Timestamp'])
+        # Ordering depends on lot strategy: FIFO (by timestamp) or HIFO (by USD basis per TAO desc)
+        strategy = getattr(self.config, 'lot_strategy', 'FIFO')
+        if isinstance(strategy, str) and strategy.upper() == 'HIFO':
+            def _unit_price_tao(l):
+                try:
+                    qty = l.get('TAO Quantity') or 0
+                    basis = l.get('USD Basis') or 0
+                    return (basis / qty) if qty else 0
+                except Exception:
+                    return 0
+            open_lots = sorted(open_lots, key=lambda x: (-_unit_price_tao(x), x['Timestamp']))
+        else:
+            open_lots = sorted(open_lots, key=lambda x: x['Timestamp'])
         total_available = sum(lot['TAO Remaining'] for lot in open_lots)
         
         if total_available < tao_needed:
