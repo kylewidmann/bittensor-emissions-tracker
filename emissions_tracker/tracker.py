@@ -511,18 +511,13 @@ class BittensorEmissionTracker:
 
     def _sort_sheet_by_timestamp(self, worksheet, timestamp_col: int, label: str, range_str: str = "A2:Z"):
         """Sort a worksheet by a timestamp column (ascending) excluding header row."""
-        for attempt in range(2):
-            try:
-                # gspread expects an iterable of (col, order) pairs; pass a list to be explicit
-                worksheet.sort(range_str, [(timestamp_col, 'asc')])
-                return
-            except Exception as e:
-                if attempt == 1:
-                    print(f"  Warning: could not sort {label} sheet: {e}")
-                    return
-                time.sleep(1)
+        try:
+            worksheet.sort((timestamp_col, 'des'))
+        except Exception as e:
+            print(f"  Warning: could not sort {label} sheet: {e}")
+            return
             
-        # -------------------------------------------------------------------------
+    # -------------------------------------------------------------------------
     # Income Processing (ALPHA Lot Creation)
     # -------------------------------------------------------------------------
     
