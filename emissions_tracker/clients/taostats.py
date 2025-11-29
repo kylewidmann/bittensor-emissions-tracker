@@ -264,28 +264,33 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
             return self._price_window_cache[cache_key]
         
         url = f"{self.base_url}/price/history/v1"
+        params = {
+            "asset": symbol,
+            "timestamp_start": start_time,
+            "timestamp_end": end_time,
+            "order": "timestamp_asc",
+            "per_page": 500
+        }
+
+        # Fetch the full window in a single paginated flow; let _fetch_with_pagination
+        # handle paging rather than chunking locally. This avoids overlapping
+        # windows which can produce duplicate or repeated page-1 calls.
+        data = self._fetch_with_pagination(url, params, per_page=500, context="price_range")
+
         prices = []
-        chunk = 2 * 24 * 60 * 60  # 2 days to keep each request small
-        current_start = start_time
-        while current_start <= end_time:
-            current_end = min(current_start + chunk, end_time)
-            params = {
-                "asset": symbol,
-                "timestamp_start": current_start,
-                "timestamp_end": current_end,
-                "order": "timestamp_asc",
-                "per_page": 500
-            }
-            data = self._fetch_with_pagination(url, params, per_page=500, context="price_range")
-            for item in data:
-                ts = int(datetime.fromisoformat(item['created_at'].replace('Z', '+00:00')).timestamp())
-                prices.append({
-                    "timestamp": ts,
-                    "price": float(item['price'])
-                })
-            current_start = current_end + 1
-        
-        prices = sorted(prices, key=lambda x: x['timestamp'])
+        for item in data:
+            ts = int(datetime.fromisoformat(item['created_at'].replace('Z', '+00:00')).timestamp())
+            prices.append({
+                "timestamp": ts,
+                "price": float(item['price'])
+            })
+
+        # Deduplicate by timestamp in case the API returns overlapping entries
+        unique = {}
+        for p in prices:
+            unique[p['timestamp']] = p['price']
+
+        prices = sorted([{"timestamp": ts, "price": unique[ts]} for ts in unique], key=lambda x: x['timestamp'])
         self._price_window_cache[cache_key] = prices
         return prices
 

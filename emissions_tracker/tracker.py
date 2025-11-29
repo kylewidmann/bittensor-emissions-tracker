@@ -184,6 +184,42 @@ class BittensorEmissionTracker:
         
         print(f"  Counters: ALPHA={self.alpha_lot_counter}, SALE={self.sale_counter}, TAO={self.tao_lot_counter}, XFER={self.transfer_counter}")
 
+    # -------------------------------------------------------------------------
+    # Lightweight logging / timing helpers
+    # -------------------------------------------------------------------------
+    def _log(self, msg: str):
+        """Print a timestamped log message."""
+        ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        print(f"{ts}  {msg}")
+
+    def _timed_call(self, label: str, func, *args, **kwargs):
+        """Call func(*args, **kwargs) while logging start/end and elapsed time.
+
+        If the result is a sequence, also log the number of items returned.
+        """
+        start = time.time()
+        self._log(f"Fetching {label} — start")
+        try:
+            result = func(*args, **kwargs)
+        except Exception as e:
+            elapsed = time.time() - start
+            self._log(f"Fetching {label} — failed after {elapsed:.2f}s: {e}")
+            raise
+
+        elapsed = time.time() - start
+        # Try to log length when available
+        try:
+            count = len(result) if result is not None else 0
+        except Exception:
+            count = None
+
+        if count is not None:
+            self._log(f"Fetching {label} — done ({count} items) in {elapsed:.2f}s")
+        else:
+            self._log(f"Fetching {label} — done in {elapsed:.2f}s")
+
+        return result
+
     def _next_alpha_lot_id(self) -> str:
         lot_id = f"ALPHA-{self.alpha_lot_counter:04d}"
         self.alpha_lot_counter += 1
@@ -207,7 +243,7 @@ class BittensorEmissionTracker:
     def get_tao_price(self, timestamp: int) -> Optional[float]:
         """Fetch TAO price at a given timestamp."""
         try:
-            price = self.price_client.get_price_at_timestamp('TAO', timestamp)
+            price = self._timed_call(f"price_at_timestamp {timestamp}", self.price_client.get_price_at_timestamp, 'TAO', timestamp)
             return price
         except PriceNotAvailableError as e:
             print(f"  Warning: Could not get TAO price: {e}")
@@ -540,8 +576,10 @@ class BittensorEmissionTracker:
         )
         
         print(f"Fetching delegations from {datetime.fromtimestamp(start_time)} to {datetime.fromtimestamp(end_time)}")
-        
-        delegations = self.wallet_client.get_delegations(
+
+        delegations = self._timed_call(
+            "delegations (contract)",
+            self.wallet_client.get_delegations,
             netuid=self.subnet_id,
             delegate=self.validator_address,
             nominator=self.wallet_address,
@@ -594,7 +632,9 @@ class BittensorEmissionTracker:
             start_time = default_start
         
         # Get balance history
-        balances = self.wallet_client.get_stake_balance_history(
+        balances = self._timed_call(
+            "stake_balance_history",
+            self.wallet_client.get_stake_balance_history,
             netuid=self.subnet_id,
             hotkey=self.validator_address,
             coldkey=self.wallet_address,
@@ -613,7 +653,9 @@ class BittensorEmissionTracker:
         
         # Get all DELEGATE events in this period (to subtract from balance changes)
         # Also need to account for UNDELEGATE which reduces balance
-        delegations = self.wallet_client.get_delegations(
+        delegations = self._timed_call(
+            "delegations (staking window)",
+            self.wallet_client.get_delegations,
             netuid=self.subnet_id,
             delegate=self.validator_address,
             nominator=self.wallet_address,
@@ -646,7 +688,11 @@ class BittensorEmissionTracker:
         # Preload prices for the full window to minimize API calls (15m granularity)
         price_points = []
         try:
-            price_points = self.price_client.get_prices_in_range('TAO', start_time, end_time)
+            price_points = self._timed_call(
+                "price_range",
+                self.price_client.get_prices_in_range,
+                'TAO', start_time, end_time
+            )
         except Exception as e:
             print(f"  Warning: bulk price fetch failed, falling back to per-timestamp lookup: {e}")
             price_points = []
@@ -666,10 +712,13 @@ class BittensorEmissionTracker:
         
         for i, balance in enumerate(balances):
             if balance['timestamp'] <= self.last_staking_income_timestamp:
+                # Skip already-processed windows
+                self._log(f"Skipping balance at {datetime.fromtimestamp(balance['timestamp'])} because <= last_staking_income_timestamp ({self.last_staking_income_timestamp})")
                 continue
-            
+
             if i == 0:
                 # Need previous balance to calculate delta
+                self._log(f"Skipping first balance point at {datetime.fromtimestamp(balance['timestamp'])} (no previous sample)")
                 continue
             
             prev_balance = balances[i - 1]
@@ -711,6 +760,11 @@ class BittensorEmissionTracker:
                 usd_fmv = tao_equivalent * tao_price
                 usd_per_alpha = usd_fmv / emissions if emissions > 0 else 0
                 
+                # Log computed emission details for debugging/diagnosis
+                self._log(
+                    f"Emission detected — ts={balance['timestamp']} block={balance['block_number']} delta={balance_change:.6f} delegates_in={delegate_inflow:.6f} undelegates_out={undelegate_outflow:.6f} tao_eq={tao_equivalent:.6f} tao_price={tao_price:.4f} usd_fmv={usd_fmv:.2f}"
+                )
+
                 lot = AlphaLot(
                     lot_id=self._next_alpha_lot_id(),
                     timestamp=balance['timestamp'],
@@ -727,7 +781,7 @@ class BittensorEmissionTracker:
                 # Collect for batch append to avoid duplicate writes and rate limits
                 pending_rows.append(lot.to_sheet_row())
                 new_lots.append(lot)
-                print(f"  ✓ Emission: {emissions:.4f} ALPHA (${usd_fmv:.2f}) at block {balance['block_number']}")
+                self._log(f"Prepared emission lot {lot.lot_id} — {emissions:.4f} ALPHA (${usd_fmv:.2f}) at block {balance['block_number']}")
             
             # Periodic progress indicator to show the loop is advancing
             if (i % 100 == 0) or (time.time() - last_progress_log > 5):
@@ -811,6 +865,7 @@ class BittensorEmissionTracker:
             start_time=start_time,
             end_time=end_time
         )
+        
         
         new_sales = []
         for d in delegations:
@@ -923,24 +978,42 @@ class BittensorEmissionTracker:
             end_time - (days_back * 86400)
         )
         
-        transfers = self.wallet_client.get_transfers(
+        # Fetch all outgoing transfers from the wallet in the window so we can
+        # detect fee transfers that accompany a brokerage transfer (same extrinsic).
+        all_transfers = self._timed_call(
+            "transfers",
+            self.wallet_client.get_transfers,
             account_address=self.wallet_address,
             start_time=start_time,
             end_time=end_time,
             sender=self.wallet_address,
-            receiver=self.brokerage_address
+            receiver=None
         )
-        
-        # Extra guard: some providers may ignore start/end filters, so enforce locally
-        transfers = [
-            t for t in transfers
-            if start_time <= t.get('timestamp', 0) <= end_time
-        ]
-        
+
+        # Enforce window locally (some providers ignore filters)
+        all_transfers = [t for t in all_transfers if start_time <= t.get('timestamp', 0) <= end_time]
+
+        # Group transfers by extrinsic_id when available, otherwise by (block_number, timestamp)
+        groups: Dict[Any, List[Dict[str, Any]]] = {}
+        for t in all_transfers:
+            key = t.get('extrinsic_id') or t.get('transaction_hash') or (t.get('block_number'), t.get('timestamp'))
+            groups.setdefault(key, []).append(t)
+
         new_transfers = []
-        for t in transfers:
-            if t['timestamp'] > self.last_transfer_timestamp:
-                transfer = self._process_tao_transfer(t)
+        for key, group in groups.items():
+            # Find if this group contains a transfer to the brokerage address
+            brokerage_amount = sum(g['amount'] for g in group if g.get('to') == self.brokerage_address or g.get('to') == self.brokerage_address)
+            if brokerage_amount <= 0:
+                # Not a brokerage transfer group; skip
+                continue
+
+            # Total outflow from the wallet in this group (brokerage + fees + other outs)
+            total_outflow = sum(g['amount'] for g in group if g.get('from') == self.wallet_address or g.get('from') == self.wallet_address)
+
+            # Prefer timestamp from brokerage transfer record
+            primary = next((g for g in group if g.get('to') == self.brokerage_address), group[0])
+            if primary['timestamp'] > self.last_transfer_timestamp:
+                transfer = self._process_tao_transfer(primary, brokerage_amount=brokerage_amount, total_outflow=total_outflow, related_transfers=group)
                 if transfer:
                     new_transfers.append(transfer)
         
@@ -953,51 +1026,81 @@ class BittensorEmissionTracker:
         
         return new_transfers
     
-    def _process_tao_transfer(self, transfer: Dict[str, Any]) -> Optional[TaoTransfer]:
-        """Process a TAO transfer to Kraken."""
-        tao_amount = transfer['amount']
-        
-        # Get TAO price at transfer time
+    def _process_tao_transfer(
+        self,
+        transfer: Dict[str, Any],
+        brokerage_amount: Optional[float] = None,
+        total_outflow: Optional[float] = None,
+        related_transfers: Optional[List[Dict[str, Any]]] = None
+    ) -> Optional[TaoTransfer]:
+        """Process a TAO transfer to Kraken.
+
+        The Taostats data often shows the brokerage deposit and a separate fee transfer
+        as separate outgoing transfers sharing the same extrinsic. To ensure TAO lots
+        reflect the total TAO leaving the wallet, we consume lots equal to the
+        total_outflow (brokerage + fees) and allocate cost basis proportionally.
+        """
+        # Determine amounts
+        brokerage_amount = brokerage_amount if brokerage_amount is not None else transfer.get('amount')
+        total_outflow = total_outflow if total_outflow is not None else brokerage_amount
+        related_transfers = related_transfers or [transfer]
+
+        # Get TAO price at transfer time (used for proceeds calculation only for brokerage amount)
         tao_price = self.get_tao_price(transfer['timestamp'])
         if not tao_price:
             print(f"  Warning: Could not get TAO price for transfer at {transfer['timestamp']}")
             return None
-        
-        usd_proceeds = tao_amount * tao_price
-        
-        # Consume TAO lots FIFO (collect updates for batch write)
+
+        usd_proceeds = brokerage_amount * tao_price
+
+        # Consume TAO lots for the full outflow (brokerage + fees)
         try:
-            consumed_lots, cost_basis, gain_type, lot_updates = self.consume_tao_lots_fifo(tao_amount)
+            consumed_lots, total_cost_basis, gain_type, lot_updates = self.consume_tao_lots_fifo(total_outflow)
         except InsufficientLotsError as e:
             print(f"  Error: {e}")
             return None
-        
-        realized_gain_loss = usd_proceeds - cost_basis
-        
+
+        # Allocate cost basis proportionally to the brokerage amount vs total outflow
+        cost_basis_for_brokerage = (total_cost_basis * (brokerage_amount / total_outflow)) if total_outflow else 0.0
+        realized_gain_loss = usd_proceeds - cost_basis_for_brokerage
+
+        # Prepare a note summarizing related fee transfers
+        fee_parts = []
+        for g in related_transfers:
+            to_addr = g.get('to')
+            amt = g.get('amount')
+            if to_addr != self.brokerage_address:
+                fee_parts.append(f"{to_addr}:{amt:.4f}")
+        notes = ""
+        if fee_parts:
+            notes = f"Related outflows: {', '.join(fee_parts)}"
+
         xfer = TaoTransfer(
             transfer_id=self._next_transfer_id(),
             timestamp=transfer['timestamp'],
-            block_number=transfer['block_number'],
-            tao_amount=tao_amount,
+            block_number=transfer.get('block_number'),
+            tao_amount=brokerage_amount,
             tao_price_usd=tao_price,
             usd_proceeds=usd_proceeds,
-            cost_basis=cost_basis,
+            cost_basis=cost_basis_for_brokerage,
             realized_gain_loss=realized_gain_loss,
             gain_type=gain_type,
             consumed_tao_lots=consumed_lots,
             transaction_hash=transfer.get('transaction_hash'),
-            extrinsic_id=transfer.get('extrinsic_id')
+            extrinsic_id=transfer.get('extrinsic_id'),
+            notes=notes
         )
-        
+
+        # Apply TAO lot updates (they reflect the total outflow consumption)
         self._batch_update_tao_lots(lot_updates)
         self._append_with_retry(self.transfers_sheet, xfer.to_sheet_row(), label="Transfers")
         self._sort_sheet_by_timestamp(self.tao_lots_sheet, timestamp_col=3, label="TAO Lots", range_str="A2:L")
         self._sort_sheet_by_timestamp(self.transfers_sheet, timestamp_col=3, label="Transfers", range_str="A2:L")
-        
+
         gain_str = "gain" if realized_gain_loss >= 0 else "loss"
-        print(f"  ✓ Transfer {xfer.transfer_id}: {tao_amount:.4f} TAO → Kraken")
-        print(f"    Proceeds: ${usd_proceeds:.2f}, Basis: ${cost_basis:.2f}, {gain_type.value} {gain_str}: ${abs(realized_gain_loss):.2f}")
-        
+        print(f"  ✓ Transfer {xfer.transfer_id}: {brokerage_amount:.4f} TAO → Kraken (total outflow {total_outflow:.4f})")
+        print(f"    Proceeds: ${usd_proceeds:.2f}, Basis: ${cost_basis_for_brokerage:.2f}, {gain_type.value} {gain_str}: ${abs(realized_gain_loss):.2f}")
+
         return xfer
 
     # -------------------------------------------------------------------------
