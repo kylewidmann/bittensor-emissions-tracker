@@ -40,12 +40,12 @@ class WaveAccountSettings(BaseSettings):
     
     # Asset accounts
     alpha_asset_account: str = Field(
-        "Cryptocurrency - Alpha",
+        "Alpha Holdings",
         alias="WAVE_ALPHA_ASSET_ACCOUNT",
         description="Wave account for ALPHA holdings"
     )
     tao_asset_account: str = Field(
-        "Cryptocurrency - TAO",
+        "TAO Holdings",
         alias="WAVE_TAO_ASSET_ACCOUNT",
         description="Wave account for TAO holdings"
     )
@@ -53,6 +53,11 @@ class WaveAccountSettings(BaseSettings):
         "Exchange Clearing - Kraken",
         alias="WAVE_TRANSFER_PROCEEDS_ACCOUNT",
         description="Wave account for USD proceeds when TAO is transferred off-chain"
+    )
+    transfer_fee_account: str = Field(
+        "Blockchain Fees - TAO",
+        alias="WAVE_TRANSFER_FEE_ACCOUNT",
+        description="Wave account for on-chain transfer fees paid in TAO"
     )
     
     # Gain/Loss accounts
@@ -62,7 +67,7 @@ class WaveAccountSettings(BaseSettings):
         description="Wave account for short-term gains"
     )
     short_term_loss_account: str = Field(
-        "Short-term Capital Losses",
+        "Short-term Capital Gains",
         alias="WAVE_SHORT_TERM_LOSS_ACCOUNT",
         description="Wave account for short-term losses"
     )
@@ -72,7 +77,7 @@ class WaveAccountSettings(BaseSettings):
         description="Wave account for long-term gains"
     )
     long_term_loss_account: str = Field(
-        "Long-term Capital Losses",
+        "Long-term Capital Gains",
         alias="WAVE_LONG_TERM_LOSS_ACCOUNT",
         description="Wave account for long-term losses"
     )

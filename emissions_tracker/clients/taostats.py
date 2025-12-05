@@ -147,6 +147,7 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
                     'usd': float(d['usd']),
                     'alpha_price_in_usd': float(d['alpha_price_in_usd']) if d.get('alpha_price_in_usd') else None,
                     'alpha_price_in_tao': float(d['alpha_price_in_tao']) if d.get('alpha_price_in_tao') else None,
+                    'slippage': float(d.get('slippage')) if d.get('slippage') is not None else 0.0,
                     'block_number': d['block_number'],
                     'extrinsic_id': d['extrinsic_id'],
                     'is_transfer': d.get('is_transfer'),

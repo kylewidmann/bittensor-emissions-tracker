@@ -80,6 +80,9 @@ class BittensorEmissionTracker:
         
         # Load state
         self._load_state()
+
+        # If derived sheets were cleared, reopen income lots so they can be reprocessed
+        self._reset_income_lots_if_sales_empty()
         
         # Counters for ID generation
         self._load_counters()
@@ -102,6 +105,7 @@ class BittensorEmissionTracker:
                 worksheet = self.sheet.add_worksheet(title=sheet_name, rows=1000, cols=20)
                 worksheet.append_row(headers)
                 print(f"  ✓ Created sheet: {sheet_name}")
+            self._ensure_sheet_headers(worksheet, headers, sheet_name)
         
         # Store worksheet references
         self.income_sheet = self.sheet.worksheet(self.INCOME_SHEET)
@@ -109,6 +113,20 @@ class BittensorEmissionTracker:
         self.tao_lots_sheet = self.sheet.worksheet(self.TAO_LOTS_SHEET)
         self.transfers_sheet = self.sheet.worksheet(self.TRANSFERS_SHEET)
         self.journal_sheet = self.sheet.worksheet(self.JOURNAL_SHEET)
+
+    def _ensure_sheet_headers(self, worksheet, expected_headers, label: str):
+        """Ensure worksheet header row matches expected schema."""
+        try:
+            current_headers = worksheet.row_values(1)
+            needs_update = (
+                len(current_headers) < len(expected_headers)
+                or current_headers[:len(expected_headers)] != expected_headers
+            )
+            if needs_update:
+                worksheet.update('A1', [expected_headers])
+                print(f"  ✓ Updated {label} headers to latest schema")
+        except Exception as e:
+            print(f"  Warning: Could not verify headers for {label}: {e}")
 
     def _load_state(self):
         """Load last processed timestamps from sheets."""
@@ -152,6 +170,52 @@ class BittensorEmissionTracker:
                 print(f"  Last transfer timestamp: {self.last_transfer_timestamp}")
         except Exception as e:
             print(f"  Warning: Could not load transfers state: {e}")
+
+    def _reset_income_lots_if_sales_empty(self):
+        """Reset ALPHA lot remaining amounts/status if sales sheet is empty."""
+        try:
+            sales_records = self.sales_sheet.get_all_records()
+        except Exception as e:
+            print(f"  Warning: Could not inspect sales sheet for reset: {e}")
+            return
+
+        if sales_records:
+            return  # Nothing to do when sales exist
+
+        try:
+            records = self._get_alpha_records_with_rows()
+        except Exception as e:
+            print(f"  Warning: Could not inspect income sheet for reset: {e}")
+            return
+
+        updates = []
+        for record in records:
+            qty = record.get('Alpha Quantity') or 0.0
+            remaining = record.get('Alpha Remaining') or 0.0
+            status = record.get('Status') or ''
+            if abs(remaining - qty) > 1e-9 or status != LotStatus.OPEN.value:
+                row = record['_row_num']
+                updates.append({
+                    "range": f"{self.INCOME_SHEET}!I{row}:I{row}",
+                    "values": [[qty]]
+                })
+                updates.append({
+                    "range": f"{self.INCOME_SHEET}!N{row}:N{row}",
+                    "values": [[LotStatus.OPEN.value]]
+                })
+
+        if not updates:
+            return
+
+        body = {
+            "valueInputOption": "RAW",
+            "data": updates,
+        }
+        try:
+            self.sheet.values_batch_update(body)
+            print("  ✓ Reset income lots to Open because sales sheet is empty")
+        except Exception as e:
+            print(f"  Warning: Could not reset income lots: {e}")
 
     def _load_counters(self):
         """Load ID counters from existing data."""
@@ -905,14 +969,38 @@ class BittensorEmissionTracker:
         """Process an UNDELEGATE event into a sale."""
         alpha_disposed = delegation['alpha']
         tao_received = delegation['tao_amount']
+        slippage_ratio = delegation.get('slippage') or 0.0
+        alpha_price_in_tao = delegation.get('alpha_price_in_tao')
+        tao_expected_from_price = None
+        if alpha_price_in_tao:
+            tao_expected_from_price = alpha_disposed * alpha_price_in_tao
+        tao_expected_from_slippage = None
+        if tao_received and slippage_ratio and abs(1 - slippage_ratio) > 1e-9:
+            divisor = 1 - slippage_ratio
+            if abs(divisor) > 1e-9:
+                tao_expected_from_slippage = tao_received / divisor
+        tao_expected = None
+        for candidate in (tao_expected_from_slippage, tao_expected_from_price):
+            if candidate is not None:
+                tao_expected = candidate
+                break
+        if tao_expected is None:
+            tao_expected = tao_received
+        tao_slippage = (tao_expected - tao_received) if (tao_expected is not None and tao_received is not None) else 0.0
         
-        # Get TAO price at disposal time
-        tao_price = self.get_tao_price(delegation['timestamp'])
-        if not tao_price:
-            print(f"  Warning: Could not get TAO price for UNDELEGATE at {delegation['timestamp']}")
-            return None
-        
-        usd_proceeds = tao_received * tao_price
+        # Determine USD proceeds / TAO price using Taostats data first
+        usd_proceeds = delegation.get('usd') or 0.0
+        tao_price = 0.0
+        if usd_proceeds and tao_received:
+            tao_price = usd_proceeds / tao_received
+        else:
+            tao_price = self.get_tao_price(delegation['timestamp'])
+            if not tao_price:
+                print(f"  Warning: Could not get TAO price for UNDELEGATE at {delegation['timestamp']}")
+                return None
+            usd_proceeds = tao_received * tao_price
+
+        slippage_usd = tao_slippage * tao_price if tao_price and tao_slippage else 0.0
         
         # Consume ALPHA lots FIFO (collect updates for batch write)
         try:
@@ -950,6 +1038,10 @@ class BittensorEmissionTracker:
             cost_basis=cost_basis,
             realized_gain_loss=realized_gain_loss,
             gain_type=gain_type,
+            tao_expected=tao_expected or 0.0,
+            tao_slippage=tao_slippage,
+            slippage_usd=slippage_usd,
+            slippage_ratio=slippage_ratio,
             consumed_lots=consumed_lots,
             created_tao_lot_id=tao_lot_id,
             extrinsic_id=delegation.get('extrinsic_id')
@@ -966,6 +1058,10 @@ class BittensorEmissionTracker:
         
         gain_str = "gain" if realized_gain_loss >= 0 else "loss"
         print(f"  ✓ Sale {sale_id}: {alpha_disposed:.4f} ALPHA → {tao_received:.4f} TAO")
+        if abs(tao_slippage) > 0.0000001:
+            print(
+                f"    Slippage: {tao_slippage:+.6f} TAO (${slippage_usd:+.2f}) ({slippage_ratio:+.6%})"
+            )
         print(f"    Proceeds: ${usd_proceeds:.2f}, Basis: ${cost_basis:.2f}, {gain_type.value} {gain_str}: ${abs(realized_gain_loss):.2f}")
         
         return sale
@@ -1075,6 +1171,7 @@ class BittensorEmissionTracker:
 
         # Allocate cost basis proportionally to the brokerage amount vs total outflow
         cost_basis_for_brokerage = (total_cost_basis * (brokerage_amount / total_outflow)) if total_outflow else 0.0
+        fee_cost_basis = max(total_cost_basis - cost_basis_for_brokerage, 0.0)
         realized_gain_loss = usd_proceeds - cost_basis_for_brokerage
 
         # Prepare a note summarizing related fee transfers
@@ -1084,9 +1181,12 @@ class BittensorEmissionTracker:
             amt = g.get('amount')
             if to_addr != self.brokerage_address:
                 fee_parts.append(f"{to_addr}:{amt:.4f}")
-        notes = ""
+        notes_segments = []
         if fee_parts:
-            notes = f"Related outflows: {', '.join(fee_parts)}"
+            notes_segments.append(f"Related outflows: {', '.join(fee_parts)}")
+        if fee_cost_basis > 0:
+            notes_segments.append(f"fee_cost_basis={fee_cost_basis:.8f}")
+        notes = " | ".join(notes_segments)
 
         xfer = TaoTransfer(
             transfer_id=self._next_transfer_id(),
@@ -1120,6 +1220,81 @@ class BittensorEmissionTracker:
     # Journal Entry Generation
     # -------------------------------------------------------------------------
 
+    def generate_monthly_journal_entries(self, year_month: Optional[str] = None) -> List[JournalEntry]:
+        """Generate aggregated Wave journal entries for a given month."""
+        if not year_month:
+            last_month = datetime.now(timezone.utc).replace(day=1) - timedelta(days=1)
+            year_month = last_month.strftime('%Y-%m')
+
+        try:
+            period_start = datetime.strptime(year_month, "%Y-%m").replace(tzinfo=timezone.utc)
+        except ValueError as exc:
+            raise ValueError("year_month must be in YYYY-MM format") from exc
+
+        first_day_next_month = (period_start.replace(day=28) + timedelta(days=4)).replace(day=1)
+
+        start_ts = int(period_start.timestamp())
+        end_ts = int(first_day_next_month.timestamp())
+
+        print(f"\n{'='*60}")
+        print(f"Generating journal entries for {year_month}...")
+        print(f"{'='*60}")
+
+        income_records = self.income_sheet.get_all_records()
+        sales_records = self.sales_sheet.get_all_records()
+        transfer_records = self.transfers_sheet.get_all_records()
+
+        entries, summary = _aggregate_monthly_journal_entries(
+            year_month,
+            income_records,
+            sales_records,
+            transfer_records,
+            self.wave_config,
+            start_ts,
+            end_ts,
+        )
+
+        for entry in entries:
+            self.journal_sheet.append_row(entry.to_sheet_row())
+
+        print(f"✓ Generated {len(entries)} aggregated journal entries for {year_month}")
+        print(f"  Contract Income: ${summary['contract_income']:.2f}")
+        print(f"  Staking Income: ${summary['staking_income']:.2f}")
+        print(f"  Sales Proceeds: ${summary['sales_proceeds']:.2f}")
+        print(f"  Sales Gain/Loss: ${summary['sales_gain']:.2f}")
+        print(f"  Sales Slippage (USD): ${summary['sales_slippage']:.2f}")
+        print(f"  Transfer Gain/Loss: ${summary['transfer_gain']:.2f}")
+        print(f"  Transfer Fees (cost basis): ${summary['transfer_fees']:.2f}")
+
+        return entries
+
+    # -------------------------------------------------------------------------
+    # Main Entry Points
+    # -------------------------------------------------------------------------
+
+    def run_daily_check(self, days_back: int = 7):
+        """Run daily check for all transaction types."""
+        print(f"\n{'='*60}")
+        print(f"Daily Check: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"{'='*60}")
+
+        contract_lots = self.process_contract_income(days_back)
+        staking_lots = self.process_staking_emissions(days_back)
+        sales = self.process_sales(days_back)
+        transfers = self.process_transfers(days_back)
+
+        print(f"\n{'='*60}")
+        print("Summary")
+        print(f"{'='*60}")
+        print(f"  Contract Income Lots: {len(contract_lots)}")
+        print(f"  Staking Emission Lots: {len(staking_lots)}")
+        print(f"  ALPHA Sales: {len(sales)}")
+        print(f"  TAO Transfers: {len(transfers)}")
+
+    def run_monthly_summary(self, year_month: str = None):
+        """Generate monthly Wave journal entries."""
+        self.generate_monthly_journal_entries(year_month)
+
 
 def _aggregate_monthly_journal_entries(
     year_month: str,
@@ -1144,7 +1319,9 @@ def _aggregate_monthly_journal_entries(
         "staking_income": 0.0,
         "sales_proceeds": 0.0,
         "sales_gain": 0.0,
+        "sales_slippage": 0.0,
         "transfer_gain": 0.0,
+        "transfer_fees": 0.0,
     }
 
     gain_buckets: Dict[str, Dict[str, Any]] = {
@@ -1186,9 +1363,15 @@ def _aggregate_monthly_journal_entries(
         gain_loss = sale.get("Realized Gain/Loss") or 0.0
         gain_type = sale.get("Gain Type") or "Short-term"
         sale_id = sale.get("Sale ID") or ""
+        slippage_raw = sale.get("Slippage USD")
+        try:
+            slippage_usd = float(slippage_raw) if slippage_raw not in (None, "") else 0.0
+        except (TypeError, ValueError):
+            slippage_usd = 0.0
 
         summary["sales_proceeds"] += proceeds
         summary["sales_gain"] += gain_loss
+        summary["sales_slippage"] += slippage_usd
 
         _add_amount(
             wave_config.tao_asset_account,
@@ -1207,6 +1390,18 @@ def _aggregate_monthly_journal_entries(
         bucket["amount"] += gain_loss
         bucket["notes"].append(f"Sale {sale_id}: ${gain_loss:.2f}")
 
+    def _parse_fee_cost_basis(notes: str) -> float:
+        if not notes:
+            return 0.0
+        for segment in notes.split("|"):
+            token = segment.strip()
+            if token.startswith("fee_cost_basis="):
+                try:
+                    return float(token.split("=", 1)[1])
+                except ValueError:
+                    return 0.0
+        return 0.0
+
     # ------------------------- Transfers (TAO -> Kraken) --------------------
     for xfer in transfer_records:
         ts = xfer.get("Timestamp")
@@ -1217,6 +1412,7 @@ def _aggregate_monthly_journal_entries(
         gain_loss = xfer.get("Realized Gain/Loss") or 0.0
         gain_type = xfer.get("Gain Type") or "Short-term"
         transfer_id = xfer.get("Transfer ID") or ""
+        fee_cost_basis = _parse_fee_cost_basis(xfer.get("Notes") or "")
 
         summary["transfer_gain"] += gain_loss
 
@@ -1232,6 +1428,20 @@ def _aggregate_monthly_journal_entries(
             cost_basis,
             f"Transfer {transfer_id}: Cost basis ${cost_basis:.2f}"
         )
+        if fee_cost_basis:
+            _add_amount(
+                wave_config.tao_asset_account,
+                "credit",
+                fee_cost_basis,
+                f"Transfer {transfer_id}: Fee cost basis ${fee_cost_basis:.2f}"
+            )
+            _add_amount(
+                wave_config.transfer_fee_account,
+                "debit",
+                fee_cost_basis,
+                f"Transfer {transfer_id}: On-chain fees ${fee_cost_basis:.2f}"
+            )
+            summary["transfer_fees"] += fee_cost_basis
 
         bucket = gain_buckets.setdefault(gain_type, {"amount": 0.0, "notes": []})
         bucket["amount"] += gain_loss
@@ -1278,89 +1488,31 @@ def _aggregate_monthly_journal_entries(
             description=description
         ))
 
+    # Final rounding guard: Wave occasionally rejects entries that differ by pennies
+    total_debits = sum(e.debit for e in entries)
+    total_credits = sum(e.credit for e in entries)
+    rounding_diff = round(total_debits - total_credits, 2)
+    if abs(rounding_diff) >= 0.01:
+        # Prefer to nudge the short-term gain account since it already absorbs net P/L
+        target_account = wave_config.short_term_gain_account
+        target_entry = next((e for e in entries if e.account == target_account), None)
+        if target_entry is None:
+            target_entry = JournalEntry(
+                month=year_month,
+                entry_type="Monthly",
+                account=target_account,
+                debit=0.0,
+                credit=0.0,
+                description=f"Aggregated journal for {year_month}: rounding adjustment"
+            )
+            entries.append(target_entry)
+
+        note = f"rounding adjustment {rounding_diff:+.2f}"
+        if rounding_diff > 0:
+            target_entry.credit = round(target_entry.credit + abs(rounding_diff), 2)
+        else:
+            target_entry.debit = round(target_entry.debit + abs(rounding_diff), 2)
+        if note not in target_entry.description:
+            target_entry.description += ("; " if target_entry.description else "") + note
+
     return entries, summary
-    
-    def generate_monthly_journal_entries(self, year_month: str = None) -> List[JournalEntry]:
-        """
-        Generate Wave journal entries for a specific month.
-        
-        Args:
-            year_month: Month in YYYY-MM format (defaults to last month)
-            
-        Returns:
-            List of journal entries
-        """
-        if not year_month:
-            last_month = datetime.now().replace(day=1) - timedelta(days=1)
-            year_month = last_month.strftime('%Y-%m')
-        
-        print(f"\n{'='*60}")
-        income_records = self.income_sheet.get_all_records()
-        sales_records = self.sales_sheet.get_all_records()
-        transfer_records = self.transfers_sheet.get_all_records()
-
-        entries, summary = _aggregate_monthly_journal_entries(
-            year_month,
-            income_records,
-            sales_records,
-            transfer_records,
-            self.wave_config,
-            start_ts,
-            end_ts,
-        )
-
-        for entry in entries:
-            self.journal_sheet.append_row(entry.to_sheet_row())
-
-        print(f"✓ Generated {len(entries)} aggregated journal entries for {year_month}")
-
-        print(f"\nSummary for {year_month}:")
-        print(f"  Contract Income: ${summary['contract_income']:.2f}")
-        print(f"  Staking Income: ${summary['staking_income']:.2f}")
-        print(f"  Sales Proceeds: ${summary['sales_proceeds']:.2f}")
-        print(f"  Sales Gain/Loss: ${summary['sales_gain']:.2f}")
-        print(f"  Transfer Gain/Loss: ${summary['transfer_gain']:.2f}")
-
-        return entries
-        total_transfer_gain = sum(t['Realized Gain/Loss'] for t in month_transfers) if 'month_transfers' in locals() else 0
-
-        print(f"\nSummary for {year_month}:")
-        print(f"  Contract Income: ${total_income:.2f}")
-        print(f"  Staking Income: ${staking_income:.2f}" if 'staking_income' in locals() else "  Staking Income: $0.00")
-        print(f"  Sales Proceeds: ${total_sales_proceeds:.2f}")
-        print(f"  Sales Gain/Loss: ${total_sales_gain:.2f}")
-        print(f"  Transfer Gain/Loss: ${total_transfer_gain:.2f}")
-
-        return entries
-
-    # -------------------------------------------------------------------------
-    # Main Entry Points
-    # -------------------------------------------------------------------------
-    
-    def run_daily_check(self, days_back: int = 7):
-        """Run daily check for all transaction types."""
-        print(f"\n{'='*60}")
-        print(f"Daily Check: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"{'='*60}")
-        
-        # Process income
-        contract_lots = self.process_contract_income(days_back)
-        staking_lots = self.process_staking_emissions(days_back)
-        
-        # Process sales
-        sales = self.process_sales(days_back)
-        
-        # Process transfers
-        transfers = self.process_transfers(days_back)
-        
-        print(f"\n{'='*60}")
-        print("Summary")
-        print(f"{'='*60}")
-        print(f"  Contract Income Lots: {len(contract_lots)}")
-        print(f"  Staking Emission Lots: {len(staking_lots)}")
-        print(f"  ALPHA Sales: {len(sales)}")
-        print(f"  TAO Transfers: {len(transfers)}")
-    
-    def run_monthly_summary(self, year_month: str = None):
-        """Generate monthly Wave journal entries."""
-        self.generate_monthly_journal_entries(year_month)

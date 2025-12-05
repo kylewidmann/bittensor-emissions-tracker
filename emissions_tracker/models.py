@@ -170,6 +170,10 @@ class AlphaSale:
     gain_type: GainType
     consumed_lots: List[LotConsumption]
     created_tao_lot_id: str  # Link to TAO lot created
+    tao_expected: float = 0.0
+    tao_slippage: float = 0.0
+    slippage_usd: float = 0.0
+    slippage_ratio: float = 0.0
     extrinsic_id: Optional[str] = None
     notes: str = ""
     
@@ -198,6 +202,10 @@ class AlphaSale:
             self.cost_basis,
             self.realized_gain_loss,
             self.gain_type.value,
+            self.tao_expected,
+            self.tao_slippage,
+            self.slippage_usd,
+            self.slippage_ratio,
             self.consumed_lots_summary(),
             self.created_tao_lot_id,
             self.extrinsic_id or "",
@@ -209,7 +217,8 @@ class AlphaSale:
         return [
             "Sale ID", "Date", "Timestamp", "Block", "Alpha Disposed",
             "TAO Received", "TAO Price USD", "USD Proceeds", "Cost Basis",
-            "Realized Gain/Loss", "Gain Type", "Consumed Lots", 
+            "Realized Gain/Loss", "Gain Type", "TAO Expected", "TAO Slippage",
+            "Slippage USD", "Slippage Ratio", "Consumed Lots", 
             "Created TAO Lot ID", "Extrinsic ID", "Notes"
         ]
 
