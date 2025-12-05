@@ -49,6 +49,11 @@ class WaveAccountSettings(BaseSettings):
         alias="WAVE_TAO_ASSET_ACCOUNT",
         description="Wave account for TAO holdings"
     )
+    transfer_proceeds_account: str = Field(
+        "Exchange Clearing - Kraken",
+        alias="WAVE_TRANSFER_PROCEEDS_ACCOUNT",
+        description="Wave account for USD proceeds when TAO is transferred off-chain"
+    )
     
     # Gain/Loss accounts
     short_term_gain_account: str = Field(

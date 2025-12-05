@@ -1,8 +1,17 @@
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+try:
+    import gspread
+except ImportError:  # pragma: no cover - optional for unit tests
+    gspread = None
+
+try:
+    from oauth2client.service_account import ServiceAccountCredentials
+except ImportError:  # pragma: no cover - optional for unit tests
+    ServiceAccountCredentials = None
 from datetime import datetime, timedelta, timezone
 import time
 from typing import List, Dict, Any, Optional, Tuple
+from collections import defaultdict
+from collections import defaultdict
 
 from emissions_tracker.clients.price import PriceClient
 from emissions_tracker.clients.wallet import WalletClientInterface
@@ -33,6 +42,10 @@ class BittensorEmissionTracker:
     TAO_LOTS_SHEET = "TAO Lots"  # Internal tracking sheet
     
     def __init__(self, price_client: PriceClient, wallet_client: WalletClientInterface):
+        if gspread is None or ServiceAccountCredentials is None:
+            raise ImportError(
+                "gspread and oauth2client must be installed to instantiate BittensorEmissionTracker"
+            )
         self.config = TrackerSettings()
         self.wave_config = WaveAccountSettings()
         self.price_client = price_client
@@ -1106,6 +1119,166 @@ class BittensorEmissionTracker:
     # -------------------------------------------------------------------------
     # Journal Entry Generation
     # -------------------------------------------------------------------------
+
+
+def _aggregate_monthly_journal_entries(
+    year_month: str,
+    income_records: List[Dict[str, Any]],
+    sales_records: List[Dict[str, Any]],
+    transfer_records: List[Dict[str, Any]],
+    wave_config: WaveAccountSettings,
+    start_ts: int,
+    end_ts: int,
+) -> Tuple[List[JournalEntry], Dict[str, float]]:
+    """Aggregate sheet data into monthly journal entries.
+
+    Returns the list of ``JournalEntry`` rows plus summary metrics for logging.
+    """
+
+    account_totals: Dict[str, Dict[str, Any]] = defaultdict(
+        lambda: {"debit": 0.0, "credit": 0.0, "notes": []}
+    )
+
+    summary = {
+        "contract_income": 0.0,
+        "staking_income": 0.0,
+        "sales_proceeds": 0.0,
+        "sales_gain": 0.0,
+        "transfer_gain": 0.0,
+    }
+
+    gain_buckets: Dict[str, Dict[str, Any]] = {
+        "Short-term": {"amount": 0.0, "notes": []},
+        "Long-term": {"amount": 0.0, "notes": []},
+    }
+
+    def _add_amount(account: str, field: str, amount: float, note: Optional[str] = None):
+        if amount is None or amount == 0:
+            return
+        account_totals[account][field] += amount
+        if note:
+            account_totals[account]["notes"].append(note)
+
+    # ------------------------- Income ---------------------------------------
+    for record in income_records:
+        ts = record.get("Timestamp")
+        if ts is None or ts < start_ts or ts >= end_ts:
+            continue
+        usd_fmv = record.get("USD FMV") or 0.0
+        source_type = record.get("Source Type")
+        note = record.get("Notes") or record.get("Lot ID")
+        if source_type == SourceType.CONTRACT.value:
+            summary["contract_income"] += usd_fmv
+            _add_amount(wave_config.alpha_asset_account, "debit", usd_fmv, f"Contract lot {note}: ${usd_fmv:.2f}")
+            _add_amount(wave_config.contract_income_account, "credit", usd_fmv, f"Contract lot {note}: ${usd_fmv:.2f}")
+        elif source_type == SourceType.STAKING.value:
+            summary["staking_income"] += usd_fmv
+            _add_amount(wave_config.alpha_asset_account, "debit", usd_fmv, f"Staking lot {note}: ${usd_fmv:.2f}")
+            _add_amount(wave_config.staking_income_account, "credit", usd_fmv, f"Staking lot {note}: ${usd_fmv:.2f}")
+
+    # ------------------------- Sales (ALPHA -> TAO) -------------------------
+    for sale in sales_records:
+        ts = sale.get("Timestamp")
+        if ts is None or ts < start_ts or ts >= end_ts:
+            continue
+        proceeds = sale.get("USD Proceeds") or 0.0
+        cost_basis = sale.get("Cost Basis") or 0.0
+        gain_loss = sale.get("Realized Gain/Loss") or 0.0
+        gain_type = sale.get("Gain Type") or "Short-term"
+        sale_id = sale.get("Sale ID") or ""
+
+        summary["sales_proceeds"] += proceeds
+        summary["sales_gain"] += gain_loss
+
+        _add_amount(
+            wave_config.tao_asset_account,
+            "debit",
+            proceeds,
+            f"Sale {sale_id}: TAO proceeds ${proceeds:.2f}"
+        )
+        _add_amount(
+            wave_config.alpha_asset_account,
+            "credit",
+            cost_basis,
+            f"Sale {sale_id}: ALPHA cost basis ${cost_basis:.2f}"
+        )
+
+        bucket = gain_buckets.setdefault(gain_type, {"amount": 0.0, "notes": []})
+        bucket["amount"] += gain_loss
+        bucket["notes"].append(f"Sale {sale_id}: ${gain_loss:.2f}")
+
+    # ------------------------- Transfers (TAO -> Kraken) --------------------
+    for xfer in transfer_records:
+        ts = xfer.get("Timestamp")
+        if ts is None or ts < start_ts or ts >= end_ts:
+            continue
+        proceeds = xfer.get("USD Proceeds") or 0.0
+        cost_basis = xfer.get("Cost Basis") or 0.0
+        gain_loss = xfer.get("Realized Gain/Loss") or 0.0
+        gain_type = xfer.get("Gain Type") or "Short-term"
+        transfer_id = xfer.get("Transfer ID") or ""
+
+        summary["transfer_gain"] += gain_loss
+
+        _add_amount(
+            wave_config.transfer_proceeds_account,
+            "debit",
+            proceeds,
+            f"Transfer {transfer_id}: USD proceeds ${proceeds:.2f}"
+        )
+        _add_amount(
+            wave_config.tao_asset_account,
+            "credit",
+            cost_basis,
+            f"Transfer {transfer_id}: Cost basis ${cost_basis:.2f}"
+        )
+
+        bucket = gain_buckets.setdefault(gain_type, {"amount": 0.0, "notes": []})
+        bucket["amount"] += gain_loss
+        bucket["notes"].append(f"Transfer {transfer_id}: ${gain_loss:.2f}")
+
+    gain_account_map = {
+        "Short-term": wave_config.short_term_gain_account,
+        "Long-term": wave_config.long_term_gain_account,
+    }
+    loss_account_map = {
+        "Short-term": wave_config.short_term_loss_account,
+        "Long-term": wave_config.long_term_loss_account,
+    }
+
+    for gain_type, data in gain_buckets.items():
+        amount = round(data["amount"], 10)
+        if abs(amount) < 0.00001:
+            continue
+        notes = ", ".join(data["notes"][:5])
+        if amount > 0:
+            account = gain_account_map.get(gain_type, wave_config.short_term_gain_account)
+            _add_amount(account, "credit", amount, notes or f"{gain_type} gain total ${amount:.2f}")
+        else:
+            account = loss_account_map.get(gain_type, wave_config.short_term_loss_account)
+            _add_amount(account, "debit", abs(amount), notes or f"{gain_type} loss total ${abs(amount):.2f}")
+
+    entries: List[JournalEntry] = []
+    for account, values in sorted(account_totals.items()):
+        debit = round(values["debit"], 2)
+        credit = round(values["credit"], 2)
+        if abs(debit) < 0.005 and abs(credit) < 0.005:
+            continue
+        description = f"Aggregated journal for {year_month}: "
+        if values["notes"]:
+            description += ", ".join(values["notes"][:5])
+        else:
+            description += account
+        entries.append(JournalEntry(
+            month=year_month,
+            entry_type="Monthly",
+            account=account,
+            debit=debit if debit >= 0.005 else 0.0,
+            credit=credit if credit >= 0.005 else 0.0,
+            description=description
+        ))
+
+    return entries, summary
     
     def generate_monthly_journal_entries(self, year_month: str = None) -> List[JournalEntry]:
         """
@@ -1122,197 +1295,42 @@ class BittensorEmissionTracker:
             year_month = last_month.strftime('%Y-%m')
         
         print(f"\n{'='*60}")
-        print(f"Generating Journal Entries for {year_month}")
-        print(f"{'='*60}")
-        
-        # Parse month boundaries
-        year, month = map(int, year_month.split('-'))
-        start_ts = int(datetime(year, month, 1, tzinfo=timezone.utc).timestamp())
-        if month == 12:
-            end_ts = int(datetime(year + 1, 1, 1, tzinfo=timezone.utc).timestamp())
-        else:
-            end_ts = int(datetime(year, month + 1, 1, tzinfo=timezone.utc).timestamp())
-        
-        entries = []
-        
-        # Process Income
         income_records = self.income_sheet.get_all_records()
-        contract_income = sum(
-            r['USD FMV'] for r in income_records 
-            if start_ts <= r['Timestamp'] < end_ts and r['Source Type'] == 'Contract'
-        )
-        staking_income = sum(
-            r['USD FMV'] for r in income_records 
-            if start_ts <= r['Timestamp'] < end_ts and r['Source Type'] == 'Staking'
-        )
-        
-        if contract_income > 0:
-            # Debit Asset, Credit Income
-            entries.append(JournalEntry(
-                month=year_month,
-                entry_type="Income",
-                account=self.wave_config.alpha_asset_account,
-                debit=contract_income,
-                credit=0,
-                description=f"Contract ALPHA income for {year_month}"
-            ))
-            entries.append(JournalEntry(
-                month=year_month,
-                entry_type="Income",
-                account=self.wave_config.contract_income_account,
-                debit=0,
-                credit=contract_income,
-                description=f"Contract ALPHA income for {year_month}"
-            ))
-        
-        if staking_income > 0:
-            entries.append(JournalEntry(
-                month=year_month,
-                entry_type="Income",
-                account=self.wave_config.alpha_asset_account,
-                debit=staking_income,
-                credit=0,
-                description=f"Staking emissions income for {year_month}"
-            ))
-            entries.append(JournalEntry(
-                month=year_month,
-                entry_type="Income",
-                account=self.wave_config.staking_income_account,
-                debit=0,
-                credit=staking_income,
-                description=f"Staking emissions income for {year_month}"
-            ))
-        
-        # Process Sales (ALPHA → TAO)
         sales_records = self.sales_sheet.get_all_records()
-        month_sales = [r for r in sales_records if start_ts <= r['Timestamp'] < end_ts]
-        
-        for sale in month_sales:
-            gain_loss = sale['Realized Gain/Loss']
-            gain_type = sale['Gain Type']
-            
-            # Debit TAO asset for proceeds
-            entries.append(JournalEntry(
-                month=year_month,
-                entry_type="Sale",
-                account=self.wave_config.tao_asset_account,
-                debit=sale['USD Proceeds'],
-                credit=0,
-                description=f"TAO received from ALPHA sale {sale['Sale ID']}"
-            ))
-            
-            # Credit ALPHA asset for cost basis
-            entries.append(JournalEntry(
-                month=year_month,
-                entry_type="Sale",
-                account=self.wave_config.alpha_asset_account,
-                debit=0,
-                credit=sale['Cost Basis'],
-                description=f"ALPHA disposed in sale {sale['Sale ID']}"
-            ))
-            
-            # Record gain/loss
-            if gain_loss >= 0:
-                gain_account = (self.wave_config.long_term_gain_account 
-                               if gain_type == 'Long-term' 
-                               else self.wave_config.short_term_gain_account)
-                entries.append(JournalEntry(
-                    month=year_month,
-                    entry_type="Sale",
-                    account=gain_account,
-                    debit=0,
-                    credit=gain_loss,
-                    description=f"{gain_type} gain on sale {sale['Sale ID']}"
-                ))
-            else:
-                loss_account = (self.wave_config.long_term_loss_account 
-                               if gain_type == 'Long-term' 
-                               else self.wave_config.short_term_loss_account)
-                entries.append(JournalEntry(
-                    month=year_month,
-                    entry_type="Sale",
-                    account=loss_account,
-                    debit=abs(gain_loss),
-                    credit=0,
-                    description=f"{gain_type} loss on sale {sale['Sale ID']}"
-                ))
-        
-        # Process Transfers (TAO → Kraken)
         transfer_records = self.transfers_sheet.get_all_records()
-        month_transfers = [r for r in transfer_records if start_ts <= r['Timestamp'] < end_ts]
-        
-        for xfer in month_transfers:
-            gain_loss = xfer['Realized Gain/Loss']
-            gain_type = xfer['Gain Type']
-            
-            # For transfer to Kraken, we're disposing TAO
-            # The basis leaves our books, proceeds are the new Kraken basis (handled by Koinly)
-            
-            # Credit TAO asset for cost basis (leaving our books)
-            entries.append(JournalEntry(
-                month=year_month,
-                entry_type="Transfer",
-                account=self.wave_config.tao_asset_account,
-                debit=0,
-                credit=xfer['Cost Basis'],
-                description=f"TAO transferred to Kraken {xfer['Transfer ID']}"
-            ))
-            
-            # Record gain/loss from price movement between receiving TAO and sending to Kraken
-            if gain_loss >= 0:
-                gain_account = (self.wave_config.long_term_gain_account 
-                               if gain_type == 'Long-term' 
-                               else self.wave_config.short_term_gain_account)
-                entries.append(JournalEntry(
-                    month=year_month,
-                    entry_type="Transfer",
-                    account=gain_account,
-                    debit=0,
-                    credit=gain_loss,
-                    description=f"{gain_type} gain on transfer {xfer['Transfer ID']}"
-                ))
-                # Balancing entry
-                entries.append(JournalEntry(
-                    month=year_month,
-                    entry_type="Transfer",
-                    account=self.wave_config.tao_asset_account,
-                    debit=gain_loss,
-                    credit=0,
-                    description=f"Proceeds adjustment for transfer {xfer['Transfer ID']}"
-                ))
-            elif gain_loss < 0:
-                loss_account = (self.wave_config.long_term_loss_account 
-                               if gain_type == 'Long-term' 
-                               else self.wave_config.short_term_loss_account)
-                entries.append(JournalEntry(
-                    month=year_month,
-                    entry_type="Transfer",
-                    account=loss_account,
-                    debit=abs(gain_loss),
-                    credit=0,
-                    description=f"{gain_type} loss on transfer {xfer['Transfer ID']}"
-                ))
-                # Balancing entry - no additional debit needed as loss reduces TAO value
-        
-        # Write to sheet
+
+        entries, summary = _aggregate_monthly_journal_entries(
+            year_month,
+            income_records,
+            sales_records,
+            transfer_records,
+            self.wave_config,
+            start_ts,
+            end_ts,
+        )
+
         for entry in entries:
             self.journal_sheet.append_row(entry.to_sheet_row())
-        
-        print(f"✓ Generated {len(entries)} journal entries for {year_month}")
-        
-        # Summary
-        total_income = contract_income + staking_income
-        total_sales_proceeds = sum(s['USD Proceeds'] for s in month_sales)
-        total_sales_gain = sum(s['Realized Gain/Loss'] for s in month_sales)
-        total_transfer_gain = sum(t['Realized Gain/Loss'] for t in month_transfers)
-        
+
+        print(f"✓ Generated {len(entries)} aggregated journal entries for {year_month}")
+
         print(f"\nSummary for {year_month}:")
-        print(f"  Contract Income: ${contract_income:.2f}")
-        print(f"  Staking Income: ${staking_income:.2f}")
+        print(f"  Contract Income: ${summary['contract_income']:.2f}")
+        print(f"  Staking Income: ${summary['staking_income']:.2f}")
+        print(f"  Sales Proceeds: ${summary['sales_proceeds']:.2f}")
+        print(f"  Sales Gain/Loss: ${summary['sales_gain']:.2f}")
+        print(f"  Transfer Gain/Loss: ${summary['transfer_gain']:.2f}")
+
+        return entries
+        total_transfer_gain = sum(t['Realized Gain/Loss'] for t in month_transfers) if 'month_transfers' in locals() else 0
+
+        print(f"\nSummary for {year_month}:")
+        print(f"  Contract Income: ${total_income:.2f}")
+        print(f"  Staking Income: ${staking_income:.2f}" if 'staking_income' in locals() else "  Staking Income: $0.00")
         print(f"  Sales Proceeds: ${total_sales_proceeds:.2f}")
         print(f"  Sales Gain/Loss: ${total_sales_gain:.2f}")
         print(f"  Transfer Gain/Loss: ${total_transfer_gain:.2f}")
-        
+
         return entries
 
     # -------------------------------------------------------------------------

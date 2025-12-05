@@ -1,0 +1,134 @@
+import math
+import unittest
+
+from emissions_tracker.config import WaveAccountSettings
+from emissions_tracker.tracker import _aggregate_monthly_journal_entries
+
+
+class JournalAggregationTests(unittest.TestCase):
+    def test_aggregate_monthly_journal_entries_balances_double_entry(self):
+        year_month = "2025-11"
+        start_ts = 0
+        end_ts = 200
+        wave = WaveAccountSettings()
+
+        income_records = [
+            {"Timestamp": 10, "Source Type": "Contract", "USD FMV": 100.0, "Lot ID": "ALPHA-1"},
+            {"Timestamp": 20, "Source Type": "Staking", "USD FMV": 50.0, "Lot ID": "ALPHA-2"},
+            {"Timestamp": 500, "Source Type": "Contract", "USD FMV": 999.0, "Lot ID": "OUTSIDE"},
+        ]
+
+        sales_records = [
+            {
+                "Timestamp": 50,
+                "Sale ID": "SALE-1",
+                "USD Proceeds": 200.0,
+                "Cost Basis": 150.0,
+                "Realized Gain/Loss": 50.0,
+                "Gain Type": "Short-term",
+            },
+            {
+                "Timestamp": 60,
+                "Sale ID": "SALE-2",
+                "USD Proceeds": 100.0,
+                "Cost Basis": 130.0,
+                "Realized Gain/Loss": -30.0,
+                "Gain Type": "Short-term",
+            },
+            {
+                "Timestamp": 400,
+                "Sale ID": "SALE-OUT",
+                "USD Proceeds": 500.0,
+                "Cost Basis": 400.0,
+                "Realized Gain/Loss": 100.0,
+                "Gain Type": "Short-term",
+            },
+        ]
+
+        transfer_records = [
+            {
+                "Timestamp": 70,
+                "Transfer ID": "XFER-1",
+                "USD Proceeds": 90.0,
+                "Cost Basis": 70.0,
+                "Realized Gain/Loss": 20.0,
+                "Gain Type": "Short-term",
+            },
+            {
+                "Timestamp": 80,
+                "Transfer ID": "XFER-2",
+                "USD Proceeds": 80.0,
+                "Cost Basis": 100.0,
+                "Realized Gain/Loss": -20.0,
+                "Gain Type": "Short-term",
+            },
+            {
+                "Timestamp": 90,
+                "Transfer ID": "XFER-3",
+                "USD Proceeds": 200.0,
+                "Cost Basis": 180.0,
+                "Realized Gain/Loss": 20.0,
+                "Gain Type": "Long-term",
+            },
+            {
+                "Timestamp": 95,
+                "Transfer ID": "XFER-4",
+                "USD Proceeds": 60.0,
+                "Cost Basis": 90.0,
+                "Realized Gain/Loss": -30.0,
+                "Gain Type": "Long-term",
+            },
+            {
+                "Timestamp": 500,
+                "Transfer ID": "XFER-OUT",
+                "USD Proceeds": 999.0,
+                "Cost Basis": 999.0,
+                "Realized Gain/Loss": 0.0,
+                "Gain Type": "Short-term",
+            },
+        ]
+
+        entries, summary = _aggregate_monthly_journal_entries(
+            year_month,
+            income_records,
+            sales_records,
+            transfer_records,
+            wave,
+            start_ts,
+            end_ts,
+        )
+
+        totals = {}
+        total_debits = 0.0
+        total_credits = 0.0
+        for entry in entries:
+            totals.setdefault(entry.account, {"debit": 0.0, "credit": 0.0})
+            totals[entry.account]["debit"] += entry.debit or 0.0
+            totals[entry.account]["credit"] += entry.credit or 0.0
+            total_debits += entry.debit or 0.0
+            total_credits += entry.credit or 0.0
+
+        self.assertTrue(math.isclose(total_debits, total_credits, rel_tol=1e-9))
+
+        self.assertTrue(math.isclose(totals[wave.alpha_asset_account]["debit"], 150.0))
+        self.assertTrue(math.isclose(totals[wave.alpha_asset_account]["credit"], 280.0))
+
+        self.assertTrue(math.isclose(totals[wave.tao_asset_account]["debit"], 300.0))
+        self.assertTrue(math.isclose(totals[wave.tao_asset_account]["credit"], 440.0))
+
+        self.assertTrue(math.isclose(totals[wave.transfer_proceeds_account]["debit"], 430.0))
+
+        self.assertNotIn(wave.short_term_loss_account, totals)
+        self.assertTrue(math.isclose(totals[wave.short_term_gain_account]["credit"], 20.0))
+        self.assertTrue(math.isclose(totals[wave.long_term_loss_account]["debit"], 10.0))
+        self.assertNotIn(wave.long_term_gain_account, totals)
+
+        self.assertEqual(summary["contract_income"], 100.0)
+        self.assertEqual(summary["staking_income"], 50.0)
+        self.assertEqual(summary["sales_proceeds"], 300.0)
+        self.assertEqual(summary["sales_gain"], 20.0)
+        self.assertEqual(summary["transfer_gain"], -10.0)
+
+
+if __name__ == "__main__":
+    unittest.main()
