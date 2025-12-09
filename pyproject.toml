@@ -25,6 +25,9 @@ black = "^24.3.0"
 isort = "^5.13.2"
 mypy = "^1.9.0"
 
+[tool.poetry.scripts]
+track-emissions = "emissions_tracker.main:run"
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"

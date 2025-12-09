@@ -16,7 +16,7 @@ from emissions_tracker.clients.taostats import TaoStatsAPIClient
 from emissions_tracker.tracker import BittensorEmissionTracker
 
 
-def main():
+def run():
     parser = argparse.ArgumentParser(
         description='Bittensor ALPHA/TAO Subledger Tracker',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -113,6 +113,5 @@ Examples:
     
     print("\n✓ Done!")
 
-
 if __name__ == "__main__":
-    main()
+    run()
