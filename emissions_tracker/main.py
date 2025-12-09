@@ -58,8 +58,9 @@ Examples:
     parser.add_argument(
         '--lookback',
         type=int,
-        default=7,
-        help='Days to look back for transactions (default: 7)'
+        default=None,
+        help=('Days to look back for transactions. When omitted, the tracker '
+              'continues from the last processed timestamp; required for first-time runs.')
     )
     
     parser.add_argument(
@@ -87,16 +88,25 @@ Examples:
         tracker.run_daily_check(days_back=args.lookback)
         
     elif args.mode == 'income':
-        print(f"\nProcessing income for last {args.lookback} days...")
+        income_window = (
+            f"last {args.lookback} days" if args.lookback is not None else "the period since your last run"
+        )
+        print(f"\nProcessing income for {income_window}...")
         tracker.process_contract_income(days_back=args.lookback)
         tracker.process_staking_emissions(days_back=args.lookback)
         
     elif args.mode == 'sales':
-        print(f"\nProcessing sales for last {args.lookback} days...")
+        sales_window = (
+            f"last {args.lookback} days" if args.lookback is not None else "the period since your last run"
+        )
+        print(f"\nProcessing sales for {sales_window}...")
         tracker.process_sales(days_back=args.lookback)
         
     elif args.mode == 'transfers':
-        print(f"\nProcessing transfers for last {args.lookback} days...")
+        transfer_window = (
+            f"last {args.lookback} days" if args.lookback is not None else "the period since your last run"
+        )
+        print(f"\nProcessing transfers for {transfer_window}...")
         tracker.process_transfers(days_back=args.lookback)
         
     elif args.mode == 'journal':

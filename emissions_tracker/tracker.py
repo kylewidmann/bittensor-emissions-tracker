@@ -22,6 +22,7 @@ from emissions_tracker.models import (
     LotConsumption, SourceType, LotStatus, GainType
 )
 
+SECONDS_PER_DAY = 86400
 
 class BittensorEmissionTracker:
     """
@@ -296,6 +297,30 @@ class BittensorEmissionTracker:
             self._log(f"Fetching {label} — done in {elapsed:.2f}s")
 
         return result
+
+    @staticmethod
+    def _resolve_time_window(
+        label: str,
+        last_timestamp: int,
+        lookback_days: Optional[int],
+        now: Optional[int] = None,
+    ) -> Tuple[int, int]:
+        """Determine the (start_time, end_time) timestamps for a processing window."""
+
+        end_time = now if now is not None else int(time.time())
+
+        if lookback_days is not None:
+            if lookback_days <= 0:
+                raise ValueError(f"lookback for {label} must be positive, got {lookback_days}")
+            start_time = end_time - (lookback_days * SECONDS_PER_DAY)
+            return start_time, end_time
+
+        if last_timestamp > 0:
+            return last_timestamp + 1, end_time
+
+        raise ValueError(
+            f"No previous {label} timestamp found; please rerun with --lookback <days> to seed the tracker."
+        )
 
     def _next_alpha_lot_id(self) -> str:
         lot_id = f"ALPHA-{self.alpha_lot_counter:04d}"
@@ -634,7 +659,7 @@ class BittensorEmissionTracker:
     # Income Processing (ALPHA Lot Creation)
     # -------------------------------------------------------------------------
     
-    def process_contract_income(self, days_back: int = 7) -> List[AlphaLot]:
+    def process_contract_income(self, lookback_days: Optional[int] = None) -> List[AlphaLot]:
         """
         Process contract income from DELEGATE events with smart contract transfer address.
         
@@ -645,11 +670,10 @@ class BittensorEmissionTracker:
         print("Processing Contract Income")
         print(f"{'='*60}")
         
-        end_time = int(time.time())
-        default_start = end_time - (days_back * 86400)
-        start_time = max(
-            self.last_contract_income_timestamp + 1,
-            default_start
+        start_time, end_time = self._resolve_time_window(
+            "contract income",
+            self.last_contract_income_timestamp,
+            lookback_days
         )
         
         print(f"Fetching delegations from {datetime.fromtimestamp(start_time)} to {datetime.fromtimestamp(end_time)}")
@@ -688,7 +712,7 @@ class BittensorEmissionTracker:
         
         return new_lots
     
-    def process_staking_emissions(self, days_back: int = 7) -> List[AlphaLot]:
+    def process_staking_emissions(self, lookback_days: Optional[int] = None) -> List[AlphaLot]:
         """
         Process staking emissions by comparing balance history with DELEGATE events.
         
@@ -701,12 +725,11 @@ class BittensorEmissionTracker:
         print("Processing Staking Emissions")
         print(f"{'='*60}")
         
-        end_time = int(time.time())
-        default_start = end_time - (days_back * 86400)
-        if self.last_staking_income_timestamp > 0:
-            start_time = max(self.last_staking_income_timestamp + 1, default_start)
-        else:
-            start_time = default_start
+        start_time, end_time = self._resolve_time_window(
+            "staking emissions",
+            self.last_staking_income_timestamp,
+            lookback_days
+        )
         
         # Get balance history
         balances = self._timed_call(
@@ -918,7 +941,7 @@ class BittensorEmissionTracker:
     # Sales Processing (ALPHA → TAO)
     # -------------------------------------------------------------------------
     
-    def process_sales(self, days_back: int = 7) -> List[AlphaSale]:
+    def process_sales(self, lookback_days: Optional[int] = None) -> List[AlphaSale]:
         """
         Process ALPHA → TAO conversions (UNDELEGATE events).
         
@@ -928,11 +951,10 @@ class BittensorEmissionTracker:
         print(f"\n{'='*60}")
         print("Processing ALPHA → TAO Sales")
         print(f"{'='*60}")
-        
-        end_time = int(time.time())
-        start_time = max(
-            self.last_sale_timestamp + 1,
-            end_time - (days_back * 86400)
+        start_time, end_time = self._resolve_time_window(
+            "sales",
+            self.last_sale_timestamp,
+            lookback_days
         )
         
         delegations = self.wallet_client.get_delegations(
@@ -1070,7 +1092,7 @@ class BittensorEmissionTracker:
     # Transfer Processing (TAO → Kraken)
     # -------------------------------------------------------------------------
     
-    def process_transfers(self, days_back: int = 7) -> List[TaoTransfer]:
+    def process_transfers(self, lookback_days: Optional[int] = None) -> List[TaoTransfer]:
         """
         Process TAO → Kraken transfers.
         
@@ -1081,10 +1103,10 @@ class BittensorEmissionTracker:
         print("Processing TAO → Kraken Transfers")
         print(f"{'='*60}")
         
-        end_time = int(time.time())
-        start_time = max(
-            self.last_transfer_timestamp + 1,
-            end_time - (days_back * 86400)
+        start_time, end_time = self._resolve_time_window(
+            "transfers",
+            self.last_transfer_timestamp,
+            lookback_days
         )
         
         # Fetch all outgoing transfers from the wallet in the window so we can
@@ -1272,16 +1294,16 @@ class BittensorEmissionTracker:
     # Main Entry Points
     # -------------------------------------------------------------------------
 
-    def run_daily_check(self, days_back: int = 7):
+    def run_daily_check(self, lookback_days: Optional[int] = None):
         """Run daily check for all transaction types."""
         print(f"\n{'='*60}")
         print(f"Daily Check: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"{'='*60}")
 
-        contract_lots = self.process_contract_income(days_back)
-        staking_lots = self.process_staking_emissions(days_back)
-        sales = self.process_sales(days_back)
-        transfers = self.process_transfers(days_back)
+        contract_lots = self.process_contract_income(lookback_days)
+        staking_lots = self.process_staking_emissions(lookback_days)
+        sales = self.process_sales(lookback_days)
+        transfers = self.process_transfers(lookback_days)
 
         print(f"\n{'='*60}")
         print("Summary")
