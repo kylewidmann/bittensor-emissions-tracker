@@ -85,29 +85,29 @@ Examples:
     
     # Execute based on mode
     if args.mode == 'auto':
-        tracker.run_daily_check(days_back=args.lookback)
+        tracker.run_daily_check(lookback_days=args.lookback)
         
     elif args.mode == 'income':
         income_window = (
             f"last {args.lookback} days" if args.lookback is not None else "the period since your last run"
         )
         print(f"\nProcessing income for {income_window}...")
-        tracker.process_contract_income(days_back=args.lookback)
-        tracker.process_staking_emissions(days_back=args.lookback)
+        tracker.process_contract_income(lookback_days=args.lookback)
+        tracker.process_staking_emissions(lookback_days=args.lookback)
         
     elif args.mode == 'sales':
         sales_window = (
             f"last {args.lookback} days" if args.lookback is not None else "the period since your last run"
         )
         print(f"\nProcessing sales for {sales_window}...")
-        tracker.process_sales(days_back=args.lookback)
+        tracker.process_sales(lookback_days=args.lookback)
         
     elif args.mode == 'transfers':
         transfer_window = (
             f"last {args.lookback} days" if args.lookback is not None else "the period since your last run"
         )
         print(f"\nProcessing transfers for {transfer_window}...")
-        tracker.process_transfers(days_back=args.lookback)
+        tracker.process_transfers(lookback_days=args.lookback)
         
     elif args.mode == 'journal':
         month = args.month
