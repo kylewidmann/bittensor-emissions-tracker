@@ -174,6 +174,8 @@ class AlphaSale:
     tao_slippage: float = 0.0
     slippage_usd: float = 0.0
     slippage_ratio: float = 0.0
+    network_fee_tao: float = 0.0
+    network_fee_usd: float = 0.0
     extrinsic_id: Optional[str] = None
     notes: str = ""
     
@@ -206,6 +208,8 @@ class AlphaSale:
             self.tao_slippage,
             self.slippage_usd,
             self.slippage_ratio,
+            self.network_fee_tao,
+            self.network_fee_usd,
             self.consumed_lots_summary(),
             self.created_tao_lot_id,
             self.extrinsic_id or "",
@@ -218,8 +222,9 @@ class AlphaSale:
             "Sale ID", "Date", "Timestamp", "Block", "Alpha Disposed",
             "TAO Received", "TAO Price USD", "USD Proceeds", "Cost Basis",
             "Realized Gain/Loss", "Gain Type", "TAO Expected", "TAO Slippage",
-            "Slippage USD", "Slippage Ratio", "Consumed Lots", 
-            "Created TAO Lot ID", "Extrinsic ID", "Notes"
+            "Slippage USD", "Slippage Ratio",
+            "Network Fee (TAO)", "Network Fee (USD)",
+            "Consumed Lots", "Created TAO Lot ID", "Extrinsic ID", "Notes"
         ]
 
 
@@ -239,6 +244,9 @@ class TaoTransfer:
     transaction_hash: Optional[str] = None
     extrinsic_id: Optional[str] = None
     notes: str = ""
+    total_outflow_tao: float = 0.0
+    fee_tao: float = 0.0
+    fee_cost_basis_usd: float = 0.0
     
     @property
     def date(self) -> str:
@@ -262,7 +270,10 @@ class TaoTransfer:
             self.consumed_lots_summary(),
             self.transaction_hash or "",
             self.extrinsic_id or "",
-            self.notes
+            self.notes,
+            self.total_outflow_tao,
+            self.fee_tao,
+            self.fee_cost_basis_usd
         ]
     
     @classmethod
@@ -271,7 +282,8 @@ class TaoTransfer:
             "Transfer ID", "Date", "Timestamp", "Block", "TAO Amount",
             "TAO Price USD", "USD Proceeds", "Cost Basis", "Realized Gain/Loss",
             "Gain Type", "Consumed TAO Lots", "Transaction Hash", 
-            "Extrinsic ID", "Notes"
+            "Extrinsic ID", "Notes", "Total Outflow TAO", "Fee TAO",
+            "Fee Cost Basis USD"
         ]
 
 

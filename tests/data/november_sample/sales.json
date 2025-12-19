@@ -1,0 +1,35 @@
+[
+  {
+    "Sale ID": "SALE-9001",
+    "Timestamp": 1762959600,
+    "USD Proceeds": 620.0,
+    "Cost Basis": 430.0,
+    "Realized Gain/Loss": 186.0,
+    "Gain Type": "Short-term",
+    "Slippage USD": 8.0,
+    "Network Fee (TAO)": 0.04,
+    "Network Fee (USD)": 4.0
+  },
+  {
+    "Sale ID": "SALE-9002",
+    "Timestamp": 1763920800,
+    "USD Proceeds": 310.0,
+    "Cost Basis": 332.5,
+    "Realized Gain/Loss": -24.5,
+    "Gain Type": "Long-term",
+    "Slippage USD": 2.0,
+    "Network Fee (TAO)": 0.025,
+    "Network Fee (USD)": 2.5
+  },
+  {
+    "Sale ID": "SALE-OUT",
+    "Timestamp": 1764547200,
+    "USD Proceeds": 999.0,
+    "Cost Basis": 900.0,
+    "Realized Gain/Loss": 99.0,
+    "Gain Type": "Short-term",
+    "Slippage USD": 0.0,
+    "Network Fee (TAO)": 0.0,
+    "Network Fee (USD)": 0.0
+  }
+]

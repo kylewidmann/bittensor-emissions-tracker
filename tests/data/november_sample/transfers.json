@@ -1,0 +1,30 @@
+[
+  {
+    "Transfer ID": "XFER-9001",
+    "Timestamp": 1763470800,
+    "USD Proceeds": 480.0,
+    "Cost Basis": 420.0,
+    "Realized Gain/Loss": 60.0,
+    "Gain Type": "Short-term",
+    "Fee Cost Basis USD": 6.0,
+    "Notes": "Kraken deposit and fee pair"
+  },
+  {
+    "Transfer ID": "XFER-9002",
+    "Timestamp": 1764277200,
+    "USD Proceeds": 200.0,
+    "Cost Basis": 250.0,
+    "Realized Gain/Loss": -50.0,
+    "Gain Type": "Short-term",
+    "Notes": "fee_cost_basis=3.5"
+  },
+  {
+    "Transfer ID": "XFER-OUT",
+    "Timestamp": 1757044800,
+    "USD Proceeds": 999.0,
+    "Cost Basis": 999.0,
+    "Realized Gain/Loss": 0.0,
+    "Gain Type": "Short-term",
+    "Notes": "Outside November window"
+  }
+]

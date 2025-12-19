@@ -23,6 +23,17 @@ from emissions_tracker.models import (
 )
 
 SECONDS_PER_DAY = 86400
+RAO_PER_TAO = 10 ** 9
+
+
+def _rao_to_tao(value: Any) -> float:
+    """Convert rao-denominated values to TAO, tolerating None/strings."""
+    if value in (None, ""):
+        return 0.0
+    try:
+        return float(value) / RAO_PER_TAO
+    except (TypeError, ValueError):
+        return 0.0
 
 class BittensorEmissionTracker:
     """
@@ -1023,6 +1034,9 @@ class BittensorEmissionTracker:
             usd_proceeds = tao_received * tao_price
 
         slippage_usd = tao_slippage * tao_price if tao_price and tao_slippage else 0.0
+
+        fee_tao = _rao_to_tao(delegation.get('fee'))
+        fee_usd = fee_tao * tao_price if tao_price else 0.0
         
         # Consume ALPHA lots FIFO (collect updates for batch write)
         try:
@@ -1031,7 +1045,7 @@ class BittensorEmissionTracker:
             print(f"  Error: {e}")
             return None
         
-        realized_gain_loss = usd_proceeds - cost_basis
+        realized_gain_loss = usd_proceeds - cost_basis - fee_usd
         
         # Create TAO lot
         tao_lot_id = self._next_tao_lot_id()
@@ -1064,6 +1078,8 @@ class BittensorEmissionTracker:
             tao_slippage=tao_slippage,
             slippage_usd=slippage_usd,
             slippage_ratio=slippage_ratio,
+            network_fee_tao=fee_tao,
+            network_fee_usd=fee_usd,
             consumed_lots=consumed_lots,
             created_tao_lot_id=tao_lot_id,
             extrinsic_id=delegation.get('extrinsic_id')
@@ -1173,8 +1189,12 @@ class BittensorEmissionTracker:
         """
         # Determine amounts
         brokerage_amount = brokerage_amount if brokerage_amount is not None else transfer.get('amount')
-        total_outflow = total_outflow if total_outflow is not None else brokerage_amount
+        base_outflow = total_outflow if total_outflow is not None else brokerage_amount
         related_transfers = related_transfers or [transfer]
+
+        fee_tao = sum(_rao_to_tao(rt.get('fee')) for rt in related_transfers)
+        total_outflow_tao = (base_outflow or 0.0) + fee_tao
+        tao_to_consume = total_outflow_tao if total_outflow_tao > 0 else (base_outflow or 0.0)
 
         # Get TAO price at transfer time (used for proceeds calculation only for brokerage amount)
         tao_price = self.get_tao_price(transfer['timestamp'])
@@ -1186,13 +1206,13 @@ class BittensorEmissionTracker:
 
         # Consume TAO lots for the full outflow (brokerage + fees)
         try:
-            consumed_lots, total_cost_basis, gain_type, lot_updates = self.consume_tao_lots_fifo(total_outflow)
+            consumed_lots, total_cost_basis, gain_type, lot_updates = self.consume_tao_lots_fifo(tao_to_consume)
         except InsufficientLotsError as e:
             print(f"  Error: {e}")
             return None
 
         # Allocate cost basis proportionally to the brokerage amount vs total outflow
-        cost_basis_for_brokerage = (total_cost_basis * (brokerage_amount / total_outflow)) if total_outflow else 0.0
+        cost_basis_for_brokerage = (total_cost_basis * (brokerage_amount / total_outflow_tao)) if total_outflow_tao else 0.0
         fee_cost_basis = max(total_cost_basis - cost_basis_for_brokerage, 0.0)
         realized_gain_loss = usd_proceeds - cost_basis_for_brokerage
 
@@ -1206,8 +1226,8 @@ class BittensorEmissionTracker:
         notes_segments = []
         if fee_parts:
             notes_segments.append(f"Related outflows: {', '.join(fee_parts)}")
-        if fee_cost_basis > 0:
-            notes_segments.append(f"fee_cost_basis={fee_cost_basis:.8f}")
+        if fee_tao > 0:
+            notes_segments.append(f"Network fee: {fee_tao:.6f} TAO")
         notes = " | ".join(notes_segments)
 
         xfer = TaoTransfer(
@@ -1223,7 +1243,10 @@ class BittensorEmissionTracker:
             consumed_tao_lots=consumed_lots,
             transaction_hash=transfer.get('transaction_hash'),
             extrinsic_id=transfer.get('extrinsic_id'),
-            notes=notes
+            notes=notes,
+            total_outflow_tao=total_outflow_tao,
+            fee_tao=fee_tao,
+            fee_cost_basis_usd=fee_cost_basis
         )
 
         # Apply TAO lot updates (they reflect the total outflow consumption)
@@ -1233,7 +1256,7 @@ class BittensorEmissionTracker:
         self._sort_sheet_by_timestamp(self.transfers_sheet, timestamp_col=3, label="Transfers", range_str="A2:L")
 
         gain_str = "gain" if realized_gain_loss >= 0 else "loss"
-        print(f"  ✓ Transfer {xfer.transfer_id}: {brokerage_amount:.4f} TAO → Kraken (total outflow {total_outflow:.4f})")
+        print(f"  ✓ Transfer {xfer.transfer_id}: {brokerage_amount:.4f} TAO → Kraken (total outflow {total_outflow_tao:.4f})")
         print(f"    Proceeds: ${usd_proceeds:.2f}, Basis: ${cost_basis_for_brokerage:.2f}, {gain_type.value} {gain_str}: ${abs(realized_gain_loss):.2f}")
 
         return xfer
@@ -1285,6 +1308,7 @@ class BittensorEmissionTracker:
         print(f"  Sales Proceeds: ${summary['sales_proceeds']:.2f}")
         print(f"  Sales Gain/Loss: ${summary['sales_gain']:.2f}")
         print(f"  Sales Slippage (USD): ${summary['sales_slippage']:.2f}")
+        print(f"  Sales Fees: ${summary['sales_fees']:.2f}")
         print(f"  Transfer Gain/Loss: ${summary['transfer_gain']:.2f}")
         print(f"  Transfer Fees (cost basis): ${summary['transfer_fees']:.2f}")
 
@@ -1342,6 +1366,7 @@ def _aggregate_monthly_journal_entries(
         "sales_proceeds": 0.0,
         "sales_gain": 0.0,
         "sales_slippage": 0.0,
+        "sales_fees": 0.0,
         "transfer_gain": 0.0,
         "transfer_fees": 0.0,
     }
@@ -1390,6 +1415,11 @@ def _aggregate_monthly_journal_entries(
             slippage_usd = float(slippage_raw) if slippage_raw not in (None, "") else 0.0
         except (TypeError, ValueError):
             slippage_usd = 0.0
+        fee_raw = sale.get("Network Fee (USD)")
+        try:
+            sale_fee_usd = float(fee_raw) if fee_raw not in (None, "") else 0.0
+        except (TypeError, ValueError):
+            sale_fee_usd = 0.0
 
         summary["sales_proceeds"] += proceeds
         summary["sales_gain"] += gain_loss
@@ -1408,6 +1438,22 @@ def _aggregate_monthly_journal_entries(
             f"Sale {sale_id}: ALPHA cost basis ${cost_basis:.2f}"
         )
 
+        if sale_fee_usd:
+            summary["sales_fees"] += sale_fee_usd
+            fee_note = f"Sale {sale_id}: Network fee ${sale_fee_usd:.2f}"
+            _add_amount(
+                wave_config.sale_fee_account,
+                "debit",
+                sale_fee_usd,
+                fee_note
+            )
+            _add_amount(
+                wave_config.tao_asset_account,
+                "credit",
+                sale_fee_usd,
+                fee_note
+            )
+
         bucket = gain_buckets.setdefault(gain_type, {"amount": 0.0, "notes": []})
         bucket["amount"] += gain_loss
         bucket["notes"].append(f"Sale {sale_id}: ${gain_loss:.2f}")
@@ -1424,6 +1470,15 @@ def _aggregate_monthly_journal_entries(
                     return 0.0
         return 0.0
 
+    def _get_transfer_fee_cost_basis(record: Dict[str, Any]) -> float:
+        raw = record.get("Fee Cost Basis USD")
+        if raw not in (None, ""):
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                pass
+        return _parse_fee_cost_basis(record.get("Notes") or "")
+
     # ------------------------- Transfers (TAO -> Kraken) --------------------
     for xfer in transfer_records:
         ts = xfer.get("Timestamp")
@@ -1434,7 +1489,7 @@ def _aggregate_monthly_journal_entries(
         gain_loss = xfer.get("Realized Gain/Loss") or 0.0
         gain_type = xfer.get("Gain Type") or "Short-term"
         transfer_id = xfer.get("Transfer ID") or ""
-        fee_cost_basis = _parse_fee_cost_basis(xfer.get("Notes") or "")
+        fee_cost_basis = _get_transfer_fee_cost_basis(xfer)
 
         summary["transfer_gain"] += gain_loss
 

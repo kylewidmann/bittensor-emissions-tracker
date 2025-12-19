@@ -59,6 +59,11 @@ class WaveAccountSettings(BaseSettings):
         alias="WAVE_TRANSFER_FEE_ACCOUNT",
         description="Wave account for on-chain transfer fees paid in TAO"
     )
+    sale_fee_account: str = Field(
+        "Blockchain Fees - Alpha",
+        alias="WAVE_SALE_FEE_ACCOUNT",
+        description="Wave account for on-chain fees incurred during ALPHA -> TAO sales"
+    )
     
     # Gain/Loss accounts
     short_term_gain_account: str = Field(
