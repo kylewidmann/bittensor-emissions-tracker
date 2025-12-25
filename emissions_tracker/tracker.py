@@ -1045,7 +1045,8 @@ class BittensorEmissionTracker:
             print(f"  Error: {e}")
             return None
         
-        realized_gain_loss = usd_proceeds - cost_basis - fee_usd
+        # Realized gain/loss includes slippage as an economic loss
+        realized_gain_loss = usd_proceeds - cost_basis - fee_usd - slippage_usd
         
         # Create TAO lot
         tao_lot_id = self._next_tao_lot_id()
@@ -1421,6 +1422,7 @@ def _aggregate_monthly_journal_entries(
         except (TypeError, ValueError):
             sale_fee_usd = 0.0
 
+        # Note: gain_loss already includes slippage (calculated in _record_alpha_sale)
         summary["sales_proceeds"] += proceeds
         summary["sales_gain"] += gain_loss
         summary["sales_slippage"] += slippage_usd
@@ -1456,7 +1458,10 @@ def _aggregate_monthly_journal_entries(
 
         bucket = gain_buckets.setdefault(gain_type, {"amount": 0.0, "notes": []})
         bucket["amount"] += gain_loss
-        bucket["notes"].append(f"Sale {sale_id}: ${gain_loss:.2f}")
+        note_parts = [f"Sale {sale_id}: ${gain_loss:.2f}"]
+        if slippage_usd:
+            note_parts.append(f"(incl. ${slippage_usd:.2f} slippage)")
+        bucket["notes"].append(" ".join(note_parts))
 
     def _parse_fee_cost_basis(notes: str) -> float:
         if not notes:

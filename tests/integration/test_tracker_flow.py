@@ -225,7 +225,9 @@ def test_sales_and_transfers_capture_network_fees():
     sale = sales[0]
     assert sale.network_fee_tao == pytest.approx(SALE_FEE_TAO)
     assert sale.network_fee_usd == pytest.approx(SALE_FEE_TAO * 25.0)
-    assert sale.realized_gain_loss == pytest.approx(-400.0)
+    # Proceeds: 4.002 * 25 = 100.05, Cost basis: 500, Fee: 0.05, Slippage: 0.25
+    # Gain/Loss = 100.05 - 500 - 0.05 - 0.25 = -400.25
+    assert sale.realized_gain_loss == pytest.approx(-400.25)
 
     sale_rows = tracker.sales_sheet.get_all_records()
     assert len(sale_rows) == 1

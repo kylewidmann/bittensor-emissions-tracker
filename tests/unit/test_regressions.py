@@ -57,7 +57,7 @@ def test_november_summary_totals_match_expectations(november_context):
     assert summary["contract_income"] == 150.0
     assert summary["staking_income"] == 95.0
     assert summary["sales_proceeds"] == 930.0
-    assert summary["sales_gain"] == 161.5
+    assert summary["sales_gain"] == 151.5  # 178 - 26.5 = 151.5 (slippage already in gain/loss)
     assert summary["sales_slippage"] == 10.0
     assert summary["sales_fees"] == 6.5
     assert summary["transfer_gain"] == 10.0

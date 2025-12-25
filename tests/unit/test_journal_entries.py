@@ -37,7 +37,7 @@ def test_aggregate_monthly_journal_entries_balances_double_entry():
             "Sale ID": "SALE-1",
             "USD Proceeds": 200.0,
             "Cost Basis": 150.0,
-            "Realized Gain/Loss": 50.0,
+            "Realized Gain/Loss": 45.0,  # 200 - 150 - 5 (slippage included)
             "Gain Type": "Short-term",
             "Slippage USD": 5.0,
         },
@@ -125,7 +125,7 @@ def test_aggregate_monthly_journal_entries_balances_double_entry():
     assert math.isclose(totals[wave.transfer_proceeds_account]["debit"], 430.0)
     assert math.isclose(totals[wave.transfer_fee_account]["debit"], 10.0)
 
-    assert math.isclose(totals[wave.short_term_gain_account]["credit"], 20.0)
+    assert math.isclose(totals[wave.short_term_gain_account]["credit"], 15.0)  # Reduced by $5 slippage
     assert math.isclose(totals[wave.long_term_loss_account]["debit"], 10.0)
     assert math.isclose(totals.get(wave.short_term_loss_account, {"debit": 0.0}).get("debit", 0.0), 0.0)
     assert math.isclose(totals.get(wave.long_term_gain_account, {"credit": 0.0}).get("credit", 0.0), 0.0)
@@ -133,7 +133,7 @@ def test_aggregate_monthly_journal_entries_balances_double_entry():
     assert summary["contract_income"] == 100.0
     assert summary["staking_income"] == 50.0
     assert summary["sales_proceeds"] == 300.0
-    assert summary["sales_gain"] == 20.0
+    assert summary["sales_gain"] == 15.0  # 45 - 30 = 15 (slippage already in gain/loss)
     assert summary["sales_slippage"] == 5.0
     assert summary["sales_fees"] == 0.0
     assert summary["transfer_gain"] == -10.0
