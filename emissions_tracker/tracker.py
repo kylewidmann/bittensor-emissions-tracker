@@ -53,7 +53,30 @@ class BittensorEmissionTracker:
     JOURNAL_SHEET = "Journal Entries"
     TAO_LOTS_SHEET = "TAO Lots"  # Internal tracking sheet
     
-    def __init__(self, price_client: PriceClient, wallet_client: WalletClientInterface):
+    def __init__(
+        self, 
+        price_client: PriceClient, 
+        wallet_client: WalletClientInterface,
+        tracking_hotkey: str,
+        coldkey: str,
+        sheet_id: str,
+        label: str = "Tracker",
+        smart_contract_address: Optional[str] = None,
+        income_source: SourceType = SourceType.STAKING
+    ):
+        """
+        Initialize emissions tracker.
+        
+        Args:
+            price_client: Client for fetching TAO prices
+            wallet_client: Client for fetching wallet/blockchain data
+            tracking_hotkey: Hotkey address to track (validator or miner)
+            coldkey: Coldkey address (nominator)
+            sheet_id: Google Sheet ID for this tracker
+            label: Label for logging (e.g., "Smart Contract", "Mining")
+            smart_contract_address: Optional smart contract address for filtering contract income
+            income_source: Default income source type (STAKING for validator, MINING for miner)
+        """
         if gspread is None or ServiceAccountCredentials is None:
             raise ImportError(
                 "gspread and oauth2client must be installed to instantiate BittensorEmissionTracker"
@@ -63,18 +86,25 @@ class BittensorEmissionTracker:
         self.price_client = price_client
         self.wallet_client = wallet_client
         
-        # Wallet addresses
-        self.wallet_address = self.config.wallet_ss58
-        self.validator_address = self.config.validator_ss58
+        # Tracker-specific configuration
+        self.label = label
+        self.tracking_hotkey = tracking_hotkey
+        self.coldkey = coldkey
+        self.sheet_id = sheet_id
+        self.smart_contract_address = smart_contract_address
+        self.income_source = income_source
+        
+        # Wallet addresses (from config)
+        self.wallet_address = self.coldkey  # Use coldkey as wallet address
         self.brokerage_address = self.config.brokerage_ss58
-        self.smart_contract_address = self.config.smart_contract_ss58
         self.subnet_id = self.config.subnet_id
         
-        print(f"Initializing tracker:")
-        print(f"  Wallet: {self.wallet_address}")
-        print(f"  Validator: {self.validator_address}")
-        print(f"  Brokerage (Kraken): {self.brokerage_address}")
-        print(f"  Smart Contract: {self.smart_contract_address}")
+        print(f"Initializing {self.label} tracker:")
+        print(f"  Tracking Hotkey: {self.tracking_hotkey}")
+        print(f"  Coldkey: {self.coldkey}")
+        print(f"  Brokerage: {self.brokerage_address}")
+        if self.smart_contract_address:
+            print(f"  Smart Contract: {self.smart_contract_address}")
         
         # Connect to Google Sheets
         scope = [
@@ -85,7 +115,7 @@ class BittensorEmissionTracker:
             self.config.tracker_google_credentials, scope
         )
         self.sheets_client = gspread.authorize(creds)
-        self.sheet = self.sheets_client.open_by_key(self.config.tracker_sheet_id)
+        self.sheet = self.sheets_client.open_by_key(self.sheet_id)
         
         # Initialize sheets
         self._init_sheets()
@@ -693,7 +723,7 @@ class BittensorEmissionTracker:
             "delegations (contract)",
             self.wallet_client.get_delegations,
             netuid=self.subnet_id,
-            delegate=self.validator_address,
+            delegate=self.tracking_hotkey,
             nominator=self.wallet_address,
             start_time=start_time,
             end_time=end_time
@@ -725,9 +755,12 @@ class BittensorEmissionTracker:
     
     def process_staking_emissions(self, lookback_days: Optional[int] = None) -> List[AlphaLot]:
         """
-        Process staking emissions by comparing balance history with DELEGATE events.
+        Process emissions from balance increases (mining rewards or validator staking).
         
-        Emissions = Balance increase - DELEGATE inflows
+        For mining: Tracks balance increases on the miner's hotkey+coldkey.
+        For validators: Tracks balance increases on the validator's hotkey+nominator coldkey.
+        
+        Emissions = Balance increase - DELEGATE inflows + UNDELEGATE outflows
         
         Returns:
             List of newly created ALPHA lots
@@ -747,7 +780,7 @@ class BittensorEmissionTracker:
             "stake_balance_history",
             self.wallet_client.get_stake_balance_history,
             netuid=self.subnet_id,
-            hotkey=self.validator_address,
+            hotkey=self.tracking_hotkey,
             coldkey=self.wallet_address,
             start_time=start_time,
             end_time=end_time
@@ -768,7 +801,7 @@ class BittensorEmissionTracker:
             "delegations (staking window)",
             self.wallet_client.get_delegations,
             netuid=self.subnet_id,
-            delegate=self.validator_address,
+            delegate=self.tracking_hotkey,
             nominator=self.wallet_address,
             start_time=start_time,
             end_time=end_time
@@ -880,13 +913,13 @@ class BittensorEmissionTracker:
                     lot_id=self._next_alpha_lot_id(),
                     timestamp=balance['timestamp'],
                     block_number=balance['block_number'],
-                    source_type=SourceType.STAKING,
+                    source_type=self.income_source,
                     alpha_quantity=emissions,
                     alpha_remaining=emissions,
                     usd_fmv=usd_fmv,
                     usd_per_alpha=usd_per_alpha,
                     tao_equivalent=tao_equivalent,
-                    notes=f"Staking emissions (balance delta: {balance_change:.4f}, delegates: {delegate_inflow:.4f}, undelegates: {undelegate_outflow:.4f})"
+                    notes=f"{self.income_source.value} emissions (balance delta: {balance_change:.4f}, delegates: {delegate_inflow:.4f}, undelegates: {undelegate_outflow:.4f})"
                 )
                 
                 # Collect for batch append to avoid duplicate writes and rate limits
@@ -970,7 +1003,7 @@ class BittensorEmissionTracker:
         
         delegations = self.wallet_client.get_delegations(
             netuid=self.subnet_id,
-            delegate=self.validator_address,
+            delegate=self.tracking_hotkey,
             nominator=self.wallet_address,
             start_time=start_time,
             end_time=end_time
@@ -1325,7 +1358,12 @@ class BittensorEmissionTracker:
         print(f"Daily Check: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"{'='*60}")
 
-        contract_lots = self.process_contract_income(lookback_days)
+        # Process contract income only if we have a smart contract address (validator mode)
+        contract_lots = []
+        if self.smart_contract_address:
+            contract_lots = self.process_contract_income(lookback_days)
+        
+        # Process emissions (mining or validator staking rewards)
         staking_lots = self.process_staking_emissions(lookback_days)
         sales = self.process_sales(lookback_days)
         transfers = self.process_transfers(lookback_days)
@@ -1333,8 +1371,9 @@ class BittensorEmissionTracker:
         print(f"\n{'='*60}")
         print("Summary")
         print(f"{'='*60}")
-        print(f"  Contract Income Lots: {len(contract_lots)}")
-        print(f"  Staking Emission Lots: {len(staking_lots)}")
+        if contract_lots:
+            print(f"  Contract Income Lots: {len(contract_lots)}")
+        print(f"  {self.income_source.value} Emission Lots: {len(staking_lots)}")
         print(f"  ALPHA Sales: {len(sales)}")
         print(f"  TAO Transfers: {len(transfers)}")
 
@@ -1400,6 +1439,10 @@ def _aggregate_monthly_journal_entries(
             summary["staking_income"] += usd_fmv
             _add_amount(wave_config.alpha_asset_account, "debit", usd_fmv, f"Staking lot {note}: ${usd_fmv:.2f}")
             _add_amount(wave_config.staking_income_account, "credit", usd_fmv, f"Staking lot {note}: ${usd_fmv:.2f}")
+        elif source_type == SourceType.MINING.value:
+            summary["staking_income"] += usd_fmv  # Add to staking_income summary for now
+            _add_amount(wave_config.alpha_asset_account, "debit", usd_fmv, f"Mining lot {note}: ${usd_fmv:.2f}")
+            _add_amount(wave_config.mining_income_account, "credit", usd_fmv, f"Mining lot {note}: ${usd_fmv:.2f}")
 
     # ------------------------- Sales (ALPHA -> TAO) -------------------------
     for sale in sales_records:

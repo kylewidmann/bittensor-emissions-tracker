@@ -9,6 +9,7 @@ class SourceType(Enum):
     """Income source type for ALPHA lots."""
     CONTRACT = "Contract"
     STAKING = "Staking"
+    MINING = "Mining"
 
 
 class LotStatus(Enum):

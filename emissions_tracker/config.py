@@ -10,11 +10,16 @@ class TrackerSettings(BaseSettings):
     # Wallet addresses
     brokerage_ss58: str = Field(..., alias="BROKER_SS58", description="Kraken deposit address")
     validator_ss58: str = Field(..., alias="VALIDATOR_SS58", description="Validator hotkey")
-    wallet_ss58: str = Field(..., alias="WALLET_SS58", description="Personal coldkey wallet")
+    payout_coldkey_ss58: str = Field(..., alias="PAYOUT_COLDKEY_SS58", description="Coldkey wallet that receives smart contract payouts")
     smart_contract_ss58: str = Field(..., alias="SMART_CONTRACT_SS58", description="Smart contract address for filtering contract income")
     
+    # Mining tracker addresses (optional)
+    miner_hotkey_ss58: str = Field(None, alias="MINER_HOTKEY_SS58", description="Miner hotkey for mining emissions tracking")
+    miner_coldkey_ss58: str = Field(None, alias="MINER_COLDKEY_SS58", description="Miner coldkey for mining emissions tracking (if different from payout_coldkey_ss58)")
+    
     # Google Sheets
-    tracker_sheet_id: str = Field(..., alias="TRACKER_SHEET_ID", description="Google Sheet ID for tracking")
+    tracker_sheet_id: str = Field(..., alias="TRACKER_SHEET_ID", description="Google Sheet ID for smart contract tracking")
+    mining_tracker_sheet_id: str = Field(None, alias="MINING_TRACKER_SHEET_ID", description="Google Sheet ID for mining emissions tracking")
     tracker_google_credentials: str = Field(..., alias="TRACKER_GOOGLE_CREDENTIALS", description="Path to Google service account credentials")
     
     # Subnet configuration
@@ -36,6 +41,11 @@ class WaveAccountSettings(BaseSettings):
         "Staking Income - Alpha", 
         alias="WAVE_STAKING_INCOME_ACCOUNT",
         description="Wave account for staking/emissions income"
+    )
+    mining_income_account: str = Field(
+        "Mining Income - Alpha",
+        alias="WAVE_MINING_INCOME_ACCOUNT",
+        description="Wave account for mining emissions income"
     )
     
     # Asset accounts

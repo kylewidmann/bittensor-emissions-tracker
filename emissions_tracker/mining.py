@@ -1,12 +1,23 @@
 #!/usr/bin/env python3
 """
-Bittensor ALPHA/TAO Subledger Tracker
+Bittensor Mining Emissions Tracker
 
-Tracks cryptocurrency income and disposals for tax accounting:
-- ALPHA income (Contract + Staking emissions)
-- ALPHA → TAO sales with FIFO lot consumption
+Tracks mining emissions for tax accounting:
+- ALPHA mining emissions (balance increases on miner hotkey+coldkey)
+- ALPHA → TAO conversions (undelegate events)
 - TAO → Kraken transfers with capital gains tracking
 - Monthly Wave journal entry generation
+
+IMPORTANT: Mining emissions work differently than validator emissions:
+- Mining rewards show up as balance increases in the stake_balance_history API
+  when queried with the miner's own hotkey+coldkey combination
+- There are NO delegation events for mining rewards - they are direct balance increases
+- Undelegation events (ALPHA → TAO) work the same as validator mode
+- The process_staking_emissions() method detects these balance increases by:
+  1. Fetching stake balance history for the miner's hotkey+coldkey
+  2. Calculating balance deltas between consecutive snapshots
+  3. Accounting for manual DELEGATE/UNDELEGATE events
+  4. Remaining increase = mining emissions
 """
 
 import argparse
@@ -20,27 +31,27 @@ from emissions_tracker.models import SourceType
 
 def run():
     parser = argparse.ArgumentParser(
-        description='Bittensor ALPHA/TAO Subledger Tracker',
+        description='Bittensor Mining Emissions Tracker',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   # Run daily check (process all recent transactions)
-  python -m emissions_tracker.main --mode auto
+  python -m emissions_tracker.mining --mode auto
 
   # Process only income
-  python -m emissions_tracker.main --mode income --lookback 30
+  python -m emissions_tracker.mining --mode income --lookback 30
 
-  # Process only sales
-  python -m emissions_tracker.main --mode sales --lookback 14
+  # Process only sales (ALPHA → TAO undelegations)
+  python -m emissions_tracker.mining --mode sales --lookback 14
 
   # Process only transfers  
-  python -m emissions_tracker.main --mode transfers --lookback 7
+  python -m emissions_tracker.mining --mode transfers --lookback 7
 
   # Generate monthly journal entries
-  python -m emissions_tracker.main --mode journal --month 2025-11
+  python -m emissions_tracker.mining --mode journal --month 2025-11
 
   # Run with custom lookback period
-  python -m emissions_tracker.main --mode auto --lookback 30
+  python -m emissions_tracker.mining --mode auto --lookback 30
         """
     )
     
@@ -50,8 +61,8 @@ Examples:
         default='auto',
         help='''Mode of operation:
             auto - Process all transaction types (default)
-            income - Process only ALPHA income (Contract + Staking)
-            sales - Process only ALPHA → TAO sales
+            income - Process only ALPHA mining emissions
+            sales - Process only ALPHA → TAO conversions (undelegations)
             transfers - Process only TAO → Kraken transfers
             journal - Generate monthly Wave journal entries
         '''
@@ -77,21 +88,40 @@ Examples:
     # Load configuration
     config = TrackerSettings()
     
+    # Validate mining configuration
+    if not config.miner_hotkey_ss58:
+        print("Error: MINER_HOTKEY_SS58 environment variable is required for mining tracker")
+        print("Please set it in your .env file")
+        return
+    
+    if not config.mining_tracker_sheet_id:
+        print("Error: MINING_TRACKER_SHEET_ID environment variable is required for mining tracker")
+        print("Please set it in your .env file")
+        return
+    
+    # Use miner coldkey if specified, otherwise fall back to payout_coldkey_ss58
+    miner_coldkey = config.miner_coldkey_ss58 or config.payout_coldkey_ss58
+    
+    if not miner_coldkey:
+        print("Error: Either MINER_COLDKEY_SS58 or PAYOUT_COLDKEY_SS58 must be set")
+        print("Please set one in your .env file")
+        return
+    
     # Initialize clients
     print("Initializing TaoStats API client...")
     taostats_client = TaoStatsAPIClient()
     
-    # Initialize tracker for smart contract emissions
-    print("Initializing Smart Contract tracker...")
+    # Initialize tracker for mining emissions
+    print("Initializing Mining tracker...")
     tracker = BittensorEmissionTracker(
         price_client=taostats_client,
         wallet_client=taostats_client,
-        tracking_hotkey=config.validator_ss58,
-        coldkey=config.payout_coldkey_ss58,
-        sheet_id=config.tracker_sheet_id,
-        label="Smart Contract",
-        smart_contract_address=config.smart_contract_ss58,
-        income_source=SourceType.STAKING
+        tracking_hotkey=config.miner_hotkey_ss58,
+        coldkey=miner_coldkey,
+        sheet_id=config.mining_tracker_sheet_id,
+        label="Mining",
+        smart_contract_address=None,
+        income_source=SourceType.MINING
     )
     
     # Execute based on mode
@@ -102,15 +132,15 @@ Examples:
         income_window = (
             f"last {args.lookback} days" if args.lookback is not None else "the period since your last run"
         )
-        print(f"\nProcessing income for {income_window}...")
-        tracker.process_contract_income(lookback_days=args.lookback)
+        print(f"\nProcessing mining emissions for {income_window}...")
+        # Mining uses staking emissions method (same API, different address)
         tracker.process_staking_emissions(lookback_days=args.lookback)
         
     elif args.mode == 'sales':
         sales_window = (
             f"last {args.lookback} days" if args.lookback is not None else "the period since your last run"
         )
-        print(f"\nProcessing sales for {sales_window}...")
+        print(f"\nProcessing undelegations (ALPHA → TAO) for {sales_window}...")
         tracker.process_sales(lookback_days=args.lookback)
         
     elif args.mode == 'transfers':
