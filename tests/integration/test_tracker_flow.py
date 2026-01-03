@@ -106,10 +106,16 @@ def build_tracker(price_client, wallet_client, alpha_records, *, last_sale_ts, l
     tracker.wave_config = SimpleNamespace()
     tracker.price_client = price_client
     tracker.wallet_client = wallet_client
+    
+    # New tracker attributes
+    tracker.label = "Test Tracker"
+    tracker.tracking_hotkey = "validator-ss58"
+    tracker.coldkey = "wallet-ss58"
     tracker.wallet_address = "wallet-ss58"
-    tracker.validator_address = "validator-ss58"
     tracker.brokerage_address = "brokerage-ss58"
     tracker.smart_contract_address = "contract-ss58"
+    tracker.sheet_id = "test-sheet-id"
+    tracker.income_source = None
     tracker.subnet_id = 64
 
     tracker.alpha_lot_counter = 100
@@ -225,9 +231,10 @@ def test_sales_and_transfers_capture_network_fees():
     sale = sales[0]
     assert sale.network_fee_tao == pytest.approx(SALE_FEE_TAO)
     assert sale.network_fee_usd == pytest.approx(SALE_FEE_TAO * 25.0)
-    # Proceeds: 4.002 * 25 = 100.05, Cost basis: 500, Fee: 0.05, Slippage: 0.25
-    # Gain/Loss = 100.05 - 500 - 0.05 - 0.25 = -400.25
-    assert sale.realized_gain_loss == pytest.approx(-400.25)
+    # Proceeds: 4.002 * 25 = 100.05, Cost basis: 500, Fee: 0.05
+    # Slippage (0.25) is already reflected in proceeds, so it's not subtracted again
+    # Gain/Loss = 100.05 - 500 - 0.05 = -400.0
+    assert sale.realized_gain_loss == pytest.approx(-400.0)
 
     sale_rows = tracker.sales_sheet.get_all_records()
     assert len(sale_rows) == 1

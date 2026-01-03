@@ -1078,8 +1078,10 @@ class BittensorEmissionTracker:
             print(f"  Error: {e}")
             return None
         
-        # Realized gain/loss includes slippage as an economic loss
-        realized_gain_loss = usd_proceeds - cost_basis - fee_usd - slippage_usd
+        # Realized gain/loss calculation
+        # Note: slippage is already reflected in usd_proceeds (TAO received, not expected)
+        # So we don't subtract it again here - that would double-count the loss
+        realized_gain_loss = usd_proceeds - cost_basis - fee_usd
         
         # Create TAO lot
         tao_lot_id = self._next_tao_lot_id()
