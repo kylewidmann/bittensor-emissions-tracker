@@ -9,6 +9,7 @@ except ImportError:  # pragma: no cover - optional for unit tests
     ServiceAccountCredentials = None
 from datetime import datetime, timedelta, timezone
 import time
+import backoff
 from typing import List, Dict, Any, Optional, Tuple
 from collections import defaultdict
 from collections import defaultdict
@@ -18,7 +19,7 @@ from emissions_tracker.clients.wallet import WalletClientInterface
 from emissions_tracker.config import TrackerSettings, WaveAccountSettings
 from emissions_tracker.exceptions import PriceNotAvailableError, InsufficientLotsError
 from emissions_tracker.models import (
-    AlphaLot, TaoLot, AlphaSale, TaoTransfer, JournalEntry,
+    AlphaLot, TaoLot, AlphaSale, TaoTransfer, Expense, JournalEntry,
     LotConsumption, SourceType, LotStatus, GainType
 )
 
@@ -35,6 +36,14 @@ def _rao_to_tao(value: Any) -> float:
     except (TypeError, ValueError):
         return 0.0
 
+
+def _is_rate_limit_error(e: Exception) -> bool:
+    """Check if an exception is a Google Sheets rate limit error."""
+    error_str = str(e)
+    error_type = type(e).__name__
+    return '429' in error_str or 'Quota exceeded' in error_str or 'APIError' in error_type
+
+
 class BittensorEmissionTracker:
     """
     Tracks Bittensor ALPHA/TAO transactions for tax accounting purposes.
@@ -49,6 +58,7 @@ class BittensorEmissionTracker:
     # Sheet names
     INCOME_SHEET = "Income"
     SALES_SHEET = "Sales"  
+    EXPENSES_SHEET = "Expenses"
     TRANSFERS_SHEET = "Transfers"
     JOURNAL_SHEET = "Journal Entries"
     TAO_LOTS_SHEET = "TAO Lots"  # Internal tracking sheet
@@ -115,7 +125,7 @@ class BittensorEmissionTracker:
             self.config.tracker_google_credentials, scope
         )
         self.sheets_client = gspread.authorize(creds)
-        self.sheet = self.sheets_client.open_by_key(self.sheet_id)
+        self.sheet = self._open_sheet_with_retry(self.sheet_id)
         
         # Initialize sheets
         self._init_sheets()
@@ -134,6 +144,7 @@ class BittensorEmissionTracker:
         sheet_configs = [
             (self.INCOME_SHEET, AlphaLot.sheet_headers()),
             (self.SALES_SHEET, AlphaSale.sheet_headers()),
+            (self.EXPENSES_SHEET, Expense.sheet_headers()),
             (self.TAO_LOTS_SHEET, TaoLot.sheet_headers()),
             (self.TRANSFERS_SHEET, TaoTransfer.sheet_headers()),
             (self.JOURNAL_SHEET, JournalEntry.sheet_headers()),
@@ -152,6 +163,7 @@ class BittensorEmissionTracker:
         # Store worksheet references
         self.income_sheet = self.sheet.worksheet(self.INCOME_SHEET)
         self.sales_sheet = self.sheet.worksheet(self.SALES_SHEET)
+        self.expenses_sheet = self.sheet.worksheet(self.EXPENSES_SHEET)
         self.tao_lots_sheet = self.sheet.worksheet(self.TAO_LOTS_SHEET)
         self.transfers_sheet = self.sheet.worksheet(self.TRANSFERS_SHEET)
         self.journal_sheet = self.sheet.worksheet(self.JOURNAL_SHEET)
@@ -176,6 +188,7 @@ class BittensorEmissionTracker:
         self.last_contract_income_timestamp = 0
         self.last_staking_income_timestamp = 0
         self.last_sale_timestamp = 0
+        self.last_expense_timestamp = 0
         self.last_transfer_timestamp = 0
         
         try:
@@ -204,6 +217,14 @@ class BittensorEmissionTracker:
                 print(f"  Last sale timestamp: {self.last_sale_timestamp}")
         except Exception as e:
             print(f"  Warning: Could not load sales state: {e}")
+        
+        try:
+            records = self.expenses_sheet.get_all_records()
+            if records:
+                self.last_expense_timestamp = max(r['Timestamp'] for r in records)
+                print(f"  Last expense timestamp: {self.last_expense_timestamp}")
+        except Exception as e:
+            print(f"  Warning: Could not load expenses state: {e}")
         
         try:
             records = self.transfers_sheet.get_all_records()
@@ -282,6 +303,16 @@ class BittensorEmissionTracker:
             self.sale_counter = 1
         
         try:
+            records = self.expenses_sheet.get_all_records()
+            if records:
+                max_id = max(int(r['Expense ID'].split('-')[1]) for r in records if r['Expense ID'])
+                self.expense_counter = max_id + 1
+            else:
+                self.expense_counter = 1
+        except:
+            self.expense_counter = 1
+        
+        try:
             records = self.tao_lots_sheet.get_all_records()
             if records:
                 max_id = max(int(r['TAO Lot ID'].split('-')[1]) for r in records if r['TAO Lot ID'])
@@ -301,7 +332,7 @@ class BittensorEmissionTracker:
         except:
             self.transfer_counter = 1
         
-        print(f"  Counters: ALPHA={self.alpha_lot_counter}, SALE={self.sale_counter}, TAO={self.tao_lot_counter}, XFER={self.transfer_counter}")
+        print(f"  Counters: ALPHA={self.alpha_lot_counter}, SALE={self.sale_counter}, EXPENSE={self.expense_counter}, TAO={self.tao_lot_counter}, XFER={self.transfer_counter}")
 
     # -------------------------------------------------------------------------
     # Lightweight logging / timing helpers
@@ -372,6 +403,11 @@ class BittensorEmissionTracker:
         sale_id = f"SALE-{self.sale_counter:04d}"
         self.sale_counter += 1
         return sale_id
+    
+    def _next_expense_id(self) -> str:
+        expense_id = f"EXP-{self.expense_counter:04d}"
+        self.expense_counter += 1
+        return expense_id
     
     def _next_tao_lot_id(self) -> str:
         lot_id = f"TAO-{self.tao_lot_counter:04d}"
@@ -500,6 +536,100 @@ class BittensorEmissionTracker:
         gain_type = GainType.LONG_TERM if all_long_term else GainType.SHORT_TERM
         return consumed, total_basis, gain_type, lot_updates
     
+    def _consume_alpha_lots_from_cache(
+        self, 
+        alpha_needed: float, 
+        lots_cache: List[Dict[str, Any]]
+    ) -> Tuple[List[LotConsumption], float, GainType, List[Dict[str, Any]]]:
+        """
+        Consume ALPHA lots from an in-memory cache (for batch processing).
+        
+        Updates the cache in-place to reflect consumption, avoiding reads from sheets.
+        
+        Args:
+            alpha_needed: Amount of ALPHA to consume
+            lots_cache: In-memory list of lot dicts (will be modified)
+            
+        Returns:
+            Tuple of (consumed lots, total cost basis, gain type, lot updates for sheet)
+        """
+        # Filter open lots with remaining balance
+        open_lots = [
+            lot for lot in lots_cache
+            if lot['Status'] in ('Open', 'Partial') and lot['Alpha Remaining'] > 0
+        ]
+        
+        # Sort by strategy (FIFO by default)
+        strategy = getattr(self.config, 'lot_strategy', 'FIFO')
+        if isinstance(strategy, str) and strategy.upper() == 'HIFO':
+            def _unit_price(l):
+                try:
+                    qty = l.get('Alpha Quantity') or 0
+                    fmv = l.get('USD FMV') or 0
+                    return (fmv / qty) if qty else 0
+                except Exception:
+                    return 0
+            open_lots.sort(key=lambda x: (-_unit_price(x), x['Timestamp']))
+        else:
+            open_lots.sort(key=lambda x: x['Timestamp'])
+        
+        total_available = sum(lot['Alpha Remaining'] for lot in open_lots)
+        if total_available < alpha_needed:
+            raise InsufficientLotsError(
+                f"Need {alpha_needed:.4f} ALPHA but only {total_available:.4f} available"
+            )
+        
+        consumed = []
+        lot_updates = []
+        total_basis = 0.0
+        remaining_need = alpha_needed
+        all_long_term = True
+        now_ts = int(time.time())
+        
+        for lot in open_lots:
+            if remaining_need <= 0:
+                break
+            
+            lot_id = lot['Lot ID']
+            available = lot['Alpha Remaining']
+            original_qty = lot['Alpha Quantity']
+            original_basis = lot['USD FMV']
+            acquisition_ts = lot['Timestamp']
+            
+            holding_days = (now_ts - acquisition_ts) / SECONDS_PER_DAY
+            if holding_days < 365:
+                all_long_term = False
+            
+            to_consume = min(available, remaining_need)
+            basis_consumed = (to_consume / original_qty) * original_basis
+            
+            consumed.append(LotConsumption(
+                lot_id=lot_id,
+                alpha_consumed=to_consume,
+                cost_basis_consumed=basis_consumed,
+                acquisition_timestamp=acquisition_ts
+            ))
+            
+            total_basis += basis_consumed
+            remaining_need -= to_consume
+            
+            # Update cache in-place
+            new_remaining = available - to_consume
+            new_status = LotStatus.CLOSED.value if new_remaining == 0 else LotStatus.PARTIAL.value
+            lot['Alpha Remaining'] = new_remaining
+            lot['Status'] = new_status
+            
+            # Track update for sheet write
+            lot_updates.append({
+                "lot_id": lot_id,
+                "row_num": lot["_row_num"],
+                "remaining": new_remaining,
+                "status": new_status
+            })
+        
+        gain_type = GainType.LONG_TERM if all_long_term else GainType.SHORT_TERM
+        return consumed, total_basis, gain_type, lot_updates
+    
     def _batch_update_alpha_lots(self, updates: List[Dict[str, Any]]):
         """Batch update ALPHA lot remaining amounts/status to reduce write calls."""
         if not updates:
@@ -522,17 +652,21 @@ class BittensorEmissionTracker:
             "data": data
         }
         
-        # Simple retry to handle transient 429s
-        for attempt in range(3):
-            try:
-                self.sheet.values_batch_update(body)
-                return
-            except Exception as e:
-                if attempt == 2:
-                    raise
-                sleep_for = 2 ** attempt
-                print(f"  Warning: batch alpha update failed (attempt {attempt + 1}), retrying in {sleep_for}s: {e}")
-                time.sleep(sleep_for)
+        self._batch_update_with_backoff(body)
+    
+    @backoff.on_exception(
+        backoff.expo,
+        Exception,
+        max_tries=5,
+        max_time=180,
+        base=10,
+        factor=5,
+        giveup=lambda e: not _is_rate_limit_error(e),
+        on_backoff=lambda details: print(f"  Warning: batch alpha update failed (attempt {details['tries']}), retrying in {details['wait']:.1f}s...")
+    )
+    def _batch_update_with_backoff(self, body: Dict[str, Any]):
+        """Batch update with exponential backoff for rate limits."""
+        self.sheet.values_batch_update(body)
     
     # -------------------------------------------------------------------------
     # TAO Lot Management (FIFO)
@@ -627,6 +761,110 @@ class BittensorEmissionTracker:
         gain_type = GainType.LONG_TERM if all_long_term else GainType.SHORT_TERM
         return consumed, total_basis, gain_type, lot_updates
     
+    def _get_tao_lots_with_rows(self) -> List[Dict[str, Any]]:
+        """Return TAO lots sheet records with sheet row numbers included."""
+        records = self.tao_lots_sheet.get_all_records()
+        for idx, record in enumerate(records, start=2):
+            record['_row_num'] = idx
+        return records
+    
+    def _consume_tao_lots_from_cache(
+        self,
+        tao_needed: float,
+        lots_cache: List[Dict[str, Any]],
+        as_of_timestamp: Optional[int] = None
+    ) -> Tuple[List[LotConsumption], float, GainType, List[Dict[str, Any]]]:
+        """
+        Consume TAO lots from an in-memory cache (for batch processing).
+        
+        Updates the cache in-place to reflect consumption, avoiding reads from sheets.
+        
+        Args:
+            tao_needed: Amount of TAO to consume
+            lots_cache: In-memory list of TAO lot dicts (will be modified)
+            as_of_timestamp: Only consider lots created at or before this timestamp (prevents consuming future lots)
+            
+        Returns:
+            Tuple of (consumed lots, total cost basis, gain type, lot updates for sheet)
+        """
+        # Filter open lots with remaining balance (and created before/at the as_of_timestamp if provided)
+        open_lots = [
+            lot for lot in lots_cache
+            if lot['Status'] in ('Open', 'Partial') and lot['TAO Remaining'] > 0
+            and (as_of_timestamp is None or lot['Timestamp'] <= as_of_timestamp)
+        ]
+        
+        # Sort by strategy (FIFO by default)
+        strategy = getattr(self.config, 'lot_strategy', 'FIFO')
+        if isinstance(strategy, str) and strategy.upper() == 'HIFO':
+            def _unit_price_tao(l):
+                try:
+                    qty = l.get('TAO Quantity') or 0
+                    basis = l.get('USD Basis') or 0
+                    return (basis / qty) if qty else 0
+                except Exception:
+                    return 0
+            open_lots.sort(key=lambda x: (-_unit_price_tao(x), x['Timestamp']))
+        else:
+            open_lots.sort(key=lambda x: x['Timestamp'])
+        
+        total_available = sum(lot['TAO Remaining'] for lot in open_lots)
+        if total_available < tao_needed:
+            raise InsufficientLotsError(
+                f"Need {tao_needed:.4f} TAO but only {total_available:.4f} available"
+            )
+        
+        consumed = []
+        lot_updates = []
+        total_basis = 0.0
+        remaining_need = tao_needed
+        all_long_term = True
+        now_ts = int(time.time())
+        
+        for lot in open_lots:
+            if remaining_need <= 0:
+                break
+            
+            lot_id = lot['TAO Lot ID']
+            available = lot['TAO Remaining']
+            original_qty = lot['TAO Quantity']
+            original_basis = lot['USD Basis']
+            acquisition_ts = lot['Timestamp']
+            
+            holding_days = (now_ts - acquisition_ts) / SECONDS_PER_DAY
+            if holding_days < 365:
+                all_long_term = False
+            
+            to_consume = min(available, remaining_need)
+            basis_consumed = (to_consume / original_qty) * original_basis
+            
+            consumed.append(LotConsumption(
+                lot_id=lot_id,
+                alpha_consumed=to_consume,  # Reusing field for TAO amount
+                cost_basis_consumed=basis_consumed,
+                acquisition_timestamp=acquisition_ts
+            ))
+            
+            total_basis += basis_consumed
+            remaining_need -= to_consume
+            
+            # Update cache in-place
+            new_remaining = available - to_consume
+            new_status = LotStatus.CLOSED.value if new_remaining == 0 else LotStatus.PARTIAL.value
+            lot['TAO Remaining'] = new_remaining
+            lot['Status'] = new_status
+            
+            # Track update for sheet write
+            lot_updates.append({
+                "lot_id": lot_id,
+                "row_num": lot["_row_num"],
+                "remaining": new_remaining,
+                "status": new_status
+            })
+        
+        gain_type = GainType.LONG_TERM if all_long_term else GainType.SHORT_TERM
+        return consumed, total_basis, gain_type, lot_updates
+    
     def _batch_update_tao_lots(self, updates: List[Dict[str, Any]]):
         """Batch update TAO lot remaining amounts/status to reduce write calls."""
         if not updates:
@@ -649,44 +887,64 @@ class BittensorEmissionTracker:
             "data": data
         }
         
-        for attempt in range(3):
-            try:
-                self.sheet.values_batch_update(body)
-                return
-            except Exception as e:
-                if attempt == 2:
-                    raise
-                sleep_for = 2 ** attempt
-                print(f"  Warning: batch TAO lot update failed (attempt {attempt + 1}), retrying in {sleep_for}s: {e}")
-                time.sleep(sleep_for)
+        self._batch_update_tao_lots_with_backoff(body)
     
+    @backoff.on_exception(
+        backoff.expo,
+        Exception,
+        max_tries=5,
+        max_time=180,
+        base=10,
+        factor=5,
+        giveup=lambda e: not _is_rate_limit_error(e),
+        on_backoff=lambda details: print(f"  Warning: opening sheet failed (attempt {details['tries']}), retrying in {details['wait']:.1f}s...")
+    )
+    def _open_sheet_with_retry(self, sheet_id: str):
+        """Open a Google Sheet by key with exponential backoff for rate limiting."""
+        return self.sheets_client.open_by_key(sheet_id)
+    
+    @backoff.on_exception(
+        backoff.expo,
+        Exception,
+        max_tries=5,
+        max_time=180,
+        base=10,
+        factor=5,
+        giveup=lambda e: not _is_rate_limit_error(e),
+        on_backoff=lambda details: print(f"  Warning: batch TAO lot update failed (attempt {details['tries']}), retrying in {details['wait']:.1f}s...")
+    )
+    def _batch_update_tao_lots_with_backoff(self, body: Dict[str, Any]):
+        """Batch update TAO lots with exponential backoff for rate limits."""
+        self.sheet.values_batch_update(body)
+    
+    @backoff.on_exception(
+        backoff.expo,
+        Exception,
+        max_tries=5,
+        max_time=180,
+        base=10,
+        factor=5,
+        giveup=lambda e: not _is_rate_limit_error(e),
+        on_backoff=lambda details: print(f"  Warning: append to {details['args'][2]} failed (attempt {details['tries']}), retrying in {details['wait']:.1f}s...")
+    )
     def _append_with_retry(self, worksheet, row_values: List[Any], label: str):
-        """Append a single row with small retry/backoff to handle rate limiting."""
-        for attempt in range(3):
-            try:
-                worksheet.append_row(row_values)
-                return
-            except Exception as e:
-                if attempt == 2:
-                    raise
-                sleep_for = 2 ** attempt
-                print(f"  Warning: append to {label} failed (attempt {attempt + 1}), retrying in {sleep_for}s: {e}")
-                time.sleep(sleep_for)
+        """Append a single row with exponential backoff for rate limiting."""
+        worksheet.append_row(row_values)
     
-    def _append_rows_with_retry(self, worksheet, rows: List[List[Any]], label: str):
-        """Append multiple rows with retry/backoff to reduce API calls."""
-        if not rows:
-            return
-        for attempt in range(3):
-            try:
-                worksheet.append_rows(rows)
-                return
-            except Exception as e:
-                if attempt == 2:
-                    raise
-                sleep_for = 2 ** attempt
-                print(f"  Warning: append rows to {label} failed (attempt {attempt + 1}), retrying in {sleep_for}s: {e}")
-                time.sleep(sleep_for)
+    @backoff.on_exception(
+        backoff.expo,
+        Exception,
+        max_tries=5,
+        max_time=180,
+        base=10,
+        factor=5,
+        giveup=lambda e: not _is_rate_limit_error(e),
+        on_backoff=lambda details: print(f"  Warning: append rows failed (attempt {details['tries']}), retrying in {details['wait']:.1f}s...")
+    )
+    def _append_rows_with_retry(self, worksheet, rows: List[List[Any]]):
+        """Append multiple rows with exponential backoff to reduce API calls."""
+        if rows:
+            worksheet.append_rows(rows)
 
     def _sort_sheet_by_timestamp(self, worksheet, timestamp_col: int, label: str, range_str: str = "A2:Z"):
         """Sort a worksheet by a timestamp column (ascending) excluding header row."""
@@ -726,12 +984,15 @@ class BittensorEmissionTracker:
             delegate=self.tracking_hotkey,
             nominator=self.wallet_address,
             start_time=start_time,
-            end_time=end_time
+            end_time=end_time,
+            is_transfer=True
         )
         
         new_lots = []
         for d in delegations:
             # Filter: DELEGATE events from smart contract
+            # is_transfer=True means ALPHA was transferred from another wallet (smart contract)
+            # while remaining delegated to the validator
             if (d['action'] == 'DELEGATE' and 
                 d.get('is_transfer') == True and 
                 d.get('transfer_address') == self.smart_contract_address and
@@ -937,7 +1198,7 @@ class BittensorEmissionTracker:
         if new_lots:
             # Batch append emissions to reduce write calls
             try:
-                self._append_rows_with_retry(self.income_sheet, pending_rows, label="Income")
+                self._append_rows_with_retry(self.income_sheet, pending_rows)
             except Exception as e:
                 print(f"  Error writing emissions to sheet: {e}")
                 raise
@@ -956,9 +1217,15 @@ class BittensorEmissionTracker:
     
     def _create_alpha_lot_from_delegation(self, delegation: Dict[str, Any], source_type: SourceType) -> Optional[AlphaLot]:
         """Create an ALPHA lot from a delegation event."""
-        alpha_amount = delegation['alpha']
+        alpha_amount = delegation['alpha']  # in RAO
         usd_value = delegation['usd']
-        usd_per_alpha = delegation.get('alpha_price_in_usd') or (usd_value / alpha_amount if alpha_amount > 0 else 0)
+        # Calculate USD per RAO (not per full ALPHA token)
+        # If API provides alpha_price_in_usd, it's per full ALPHA, so divide by 1e9 to get per RAO
+        alpha_price_usd = delegation.get('alpha_price_in_usd')
+        if alpha_price_usd:
+            usd_per_alpha_rao = alpha_price_usd / RAO_PER_TAO  # Convert from per-ALPHA to per-RAO
+        else:
+            usd_per_alpha_rao = usd_value / alpha_amount if alpha_amount > 0 else 0
         tao_equivalent = delegation['tao_amount']
         
         lot = AlphaLot(
@@ -969,7 +1236,7 @@ class BittensorEmissionTracker:
             alpha_quantity=alpha_amount,
             alpha_remaining=alpha_amount,
             usd_fmv=usd_value,
-            usd_per_alpha=usd_per_alpha,
+            usd_per_alpha=usd_per_alpha_rao,
             tao_equivalent=tao_equivalent,
             extrinsic_id=delegation.get('extrinsic_id'),
             transfer_address=delegation.get('transfer_address'),
@@ -980,6 +1247,7 @@ class BittensorEmissionTracker:
         print(f"  ✓ {source_type.value}: {alpha_amount:.4f} ALPHA (${usd_value:.2f}) at {lot.date}")
         
         return lot
+    
     
     # -------------------------------------------------------------------------
     # Sales Processing (ALPHA → TAO)
@@ -1009,8 +1277,15 @@ class BittensorEmissionTracker:
             end_time=end_time
         )
         
+        # Load ALPHA lots once into memory cache for batch processing
+        # This prevents each sale from reading stale data from sheets
+        alpha_lots_cache = self._get_alpha_records_with_rows()
         
         new_sales = []
+        tao_lot_rows = []
+        sale_rows = []
+        alpha_lot_updates = []
+        
         for d in delegations:
             # Filter: UNDELEGATE events (user-initiated unstakes)
             # is_transfer=null indicates user-initiated (not a transfer to another address)
@@ -1018,11 +1293,22 @@ class BittensorEmissionTracker:
                 d.get('is_transfer') is None and
                 d['timestamp'] > self.last_sale_timestamp):
                 
-                sale = self._process_undelegate(d)
+                sale, tao_lot, lot_updates = self._process_undelegate(d, alpha_lots_cache=alpha_lots_cache)
                 if sale:
                     new_sales.append(sale)
+                    tao_lot_rows.append(tao_lot.to_sheet_row())
+                    sale_rows.append(sale.to_sheet_row())
+                    alpha_lot_updates.extend(lot_updates)
         
+        # Batch write all updates at once
         if new_sales:
+            self._batch_update_alpha_lots(alpha_lot_updates)
+            self._append_rows_with_retry(self.tao_lots_sheet, tao_lot_rows)
+            self._append_rows_with_retry(self.sales_sheet, sale_rows)
+            self._sort_sheet_by_timestamp(self.income_sheet, timestamp_col=3, label="Income", range_str="A2:O")
+            self._sort_sheet_by_timestamp(self.sales_sheet, timestamp_col=3, label="Sales", range_str="A2:O")
+            self._sort_sheet_by_timestamp(self.tao_lots_sheet, timestamp_col=3, label="TAO Lots", range_str="A2:L")
+            
             max_ts = max(sale.timestamp for sale in new_sales)
             self.last_sale_timestamp = max_ts
             print(f"\n✓ Processed {len(new_sales)} ALPHA sales")
@@ -1031,8 +1317,12 @@ class BittensorEmissionTracker:
         
         return new_sales
     
-    def _process_undelegate(self, delegation: Dict[str, Any]) -> Optional[AlphaSale]:
-        """Process an UNDELEGATE event into a sale."""
+    def _process_undelegate(self, delegation: Dict[str, Any], alpha_lots_cache: Optional[List[Dict[str, Any]]] = None) -> Optional[Tuple[AlphaSale, TaoLot, List[Dict[str, Any]]]]:
+        """Process an UNDELEGATE event into a sale.
+        
+        Returns:
+            Tuple of (sale, tao_lot, lot_updates) or None if processing fails
+        """
         alpha_disposed = delegation['alpha']
         tao_received = delegation['tao_amount']
         slippage_ratio = delegation.get('slippage') or 0.0
@@ -1068,12 +1358,16 @@ class BittensorEmissionTracker:
 
         slippage_usd = tao_slippage * tao_price if tao_price and tao_slippage else 0.0
 
-        fee_tao = _rao_to_tao(delegation.get('fee'))
+        # Fee is already in TAO (converted by the client), don't convert again
+        fee_tao = delegation.get('fee', 0)
         fee_usd = fee_tao * tao_price if tao_price else 0.0
         
-        # Consume ALPHA lots FIFO (collect updates for batch write)
+        # Consume ALPHA lots - use cache if provided (batch mode), otherwise read from sheets
         try:
-            consumed_lots, cost_basis, gain_type, lot_updates = self.consume_alpha_lots_fifo(alpha_disposed)
+            if alpha_lots_cache is not None:
+                consumed_lots, cost_basis, gain_type, lot_updates = self._consume_alpha_lots_from_cache(alpha_disposed, alpha_lots_cache)
+            else:
+                consumed_lots, cost_basis, gain_type, lot_updates = self.consume_alpha_lots_fifo(alpha_disposed)
         except InsufficientLotsError as e:
             print(f"  Error: {e}")
             return None
@@ -1084,16 +1378,20 @@ class BittensorEmissionTracker:
         realized_gain_loss = usd_proceeds - cost_basis - fee_usd
         
         # Create TAO lot
+        # The network fee is paid FROM the TAO received, so the actual TAO entering
+        # the wallet (and tracked in the lot) is the net amount after fees
         tao_lot_id = self._next_tao_lot_id()
         sale_id = self._next_sale_id()
+        tao_net = tao_received - fee_tao  # Net TAO after network fee
+        usd_basis_net = usd_proceeds - fee_usd  # Net USD basis after fee
         
         tao_lot = TaoLot(
             lot_id=tao_lot_id,
             timestamp=delegation['timestamp'],
             block_number=delegation['block_number'],
-            tao_quantity=tao_received,
-            tao_remaining=tao_received,
-            usd_basis=usd_proceeds,  # Basis is FMV at time of receipt
+            tao_quantity=tao_net,
+            tao_remaining=tao_net,
+            usd_basis=usd_basis_net,  # Basis is FMV at time of receipt, minus fee
             usd_per_tao=tao_price,
             source_sale_id=sale_id,
             extrinsic_id=delegation.get('extrinsic_id')
@@ -1121,7 +1419,18 @@ class BittensorEmissionTracker:
             extrinsic_id=delegation.get('extrinsic_id')
         )
         
-        # Apply updates in batches to avoid write limits
+        # Batch mode: defer writes, return objects for caller to batch
+        if alpha_lots_cache is not None:
+            gain_str = "gain" if realized_gain_loss >= 0 else "loss"
+            print(f"  ✓ Sale {sale_id}: {alpha_disposed:.4f} ALPHA → {tao_received:.4f} TAO")
+            if abs(tao_slippage) > 0.0000001:
+                print(
+                    f"    Slippage: {tao_slippage:+.6f} TAO (${slippage_usd:+.2f}) ({slippage_ratio:+.6%})"
+                )
+            print(f"    Proceeds: ${usd_proceeds:.2f}, Basis: ${cost_basis:.2f}, {gain_type.value} {gain_str}: ${abs(realized_gain_loss):.2f}")
+            return (sale, tao_lot, lot_updates)
+        
+        # Immediate write mode (single sale processing)
         self._batch_update_alpha_lots(lot_updates)
         self._append_with_retry(self.tao_lots_sheet, tao_lot.to_sheet_row(), label="TAO Lots")
         self._append_with_retry(self.sales_sheet, sale.to_sheet_row(), label="Sales")
@@ -1138,7 +1447,171 @@ class BittensorEmissionTracker:
             )
         print(f"    Proceeds: ${usd_proceeds:.2f}, Basis: ${cost_basis:.2f}, {gain_type.value} {gain_str}: ${abs(realized_gain_loss):.2f}")
         
-        return sale
+        return (sale, tao_lot, lot_updates)
+
+    # -------------------------------------------------------------------------
+    # Expense Processing (ALPHA → TAO payments to other entities)
+    # -------------------------------------------------------------------------
+    
+    def process_expenses(self, lookback_days: Optional[int] = None) -> List[Expense]:
+        """
+        Process ALPHA → TAO payment/expense events (UNDELEGATE with is_transfer=True to non-smart-contract).
+        
+        These are automatically added to the Expenses sheet with an empty category field.
+        The user must categorize them before they can be included in journal entries.
+        
+        Returns:
+            List of newly created expenses
+        """
+        print(f"\n{'='*60}")
+        print("Processing ALPHA → TAO Expenses")
+        print(f"{'='*60}")
+        start_time, end_time = self._resolve_time_window(
+            "expenses",
+            self.last_expense_timestamp,
+            lookback_days
+        )
+        
+        delegations = self.wallet_client.get_delegations(
+            netuid=self.subnet_id,
+            delegate=self.tracking_hotkey,
+            nominator=self.wallet_address,
+            start_time=start_time,
+            end_time=end_time
+        )
+        
+        # Load ALPHA lots once into memory cache for batch processing
+        alpha_lots_cache = self._get_alpha_records_with_rows()
+        
+        new_expenses = []
+        expense_rows = []
+        alpha_lot_updates = []
+        
+        for d in delegations:
+            # Filter: UNDELEGATE events with is_transfer=True to a non-smart-contract address
+            # These are payments/transfers to other entities (not user-initiated sales)
+            if (d['action'] == 'UNDELEGATE' and 
+                d.get('is_transfer') == True and
+                d.get('transfer_address') != self.smart_contract_address and
+                d['timestamp'] > self.last_expense_timestamp):
+                
+                expense, lot_updates = self._process_expense_undelegate(d, alpha_lots_cache=alpha_lots_cache)
+                if expense:
+                    new_expenses.append(expense)
+                    expense_rows.append(expense.to_sheet_row())
+                    alpha_lot_updates.extend(lot_updates)
+        
+        # Batch write all updates at once
+        if new_expenses:
+            self._batch_update_alpha_lots(alpha_lot_updates)
+            self._append_rows_with_retry(self.expenses_sheet, expense_rows)
+            self._sort_sheet_by_timestamp(self.income_sheet, timestamp_col=3, label="Income", range_str="A2:O")
+            self._sort_sheet_by_timestamp(self.expenses_sheet, timestamp_col=3, label="Expenses", range_str="A2:W")
+            self._sort_sheet_by_timestamp(self.tao_lots_sheet, timestamp_col=3, label="TAO Lots", range_str="A2:L")
+            
+            max_ts = max(expense.timestamp for expense in new_expenses)
+            self.last_expense_timestamp = max_ts
+            print(f"\n✓ Processed {len(new_expenses)} ALPHA expenses")
+            print(f"⚠️  Please categorize these expenses in the Expenses sheet before running journal entries")
+        else:
+            print("ℹ️  No new expense UNDELEGATE events found")
+        
+        return new_expenses
+    
+    def _process_expense_undelegate(self, delegation: Dict[str, Any], alpha_lots_cache: Optional[List[Dict[str, Any]]] = None) -> Optional[Tuple[Expense, List[Dict[str, Any]]]]:
+        """Process an UNDELEGATE expense event (direct ALPHA transfer payment to another entity).
+        
+        These are direct ALPHA transfers with NO TAO involved.
+        Proceeds are calculated based on ALPHA's FMV in USD at time of transfer.
+        
+        Returns:
+            Tuple of (expense, lot_updates) or None if processing fails
+        """
+        alpha_disposed = delegation['alpha']
+        
+        # Extract transfer address
+        transfer_address_data = delegation.get('transfer_address')
+        if isinstance(transfer_address_data, dict):
+            transfer_address = transfer_address_data.get('ss58', '')
+        else:
+            transfer_address = transfer_address_data or ''
+        
+        # Calculate USD proceeds based on ALPHA's FMV
+        # Use the 'usd' field if available (from taostats), otherwise calculate from ALPHA price
+        usd_proceeds = delegation.get('usd') or 0.0
+        alpha_price_usd = 0.0
+        
+        if usd_proceeds and alpha_disposed:
+            alpha_price_usd = usd_proceeds / alpha_disposed
+        else:
+            # Get ALPHA price in USD via TAO
+            # ALPHA price = (ALPHA/TAO ratio) × (TAO/USD price)
+            alpha_price_in_tao = delegation.get('alpha_price_in_tao')
+            if alpha_price_in_tao:
+                tao_price = self.get_tao_price(delegation['timestamp'])
+                if not tao_price:
+                    print(f"  Warning: Could not get TAO price for expense at {delegation['timestamp']}")
+                    return None
+                alpha_price_usd = alpha_price_in_tao * tao_price
+                usd_proceeds = alpha_disposed * alpha_price_usd
+            else:
+                print(f"  Warning: Could not determine ALPHA price for expense at {delegation['timestamp']}")
+                return None
+
+        # Network fee (in ALPHA, already provided in USD if available)
+        fee_usd = delegation.get('fee_usd', 0.0)
+        if not fee_usd:
+            fee_alpha = delegation.get('fee', 0.0)
+            fee_usd = fee_alpha * alpha_price_usd if alpha_price_usd else 0.0
+        
+        # Consume ALPHA lots
+        try:
+            if alpha_lots_cache is not None:
+                consumed_lots, cost_basis, gain_type, lot_updates = self._consume_alpha_lots_from_cache(alpha_disposed, alpha_lots_cache)
+            else:
+                consumed_lots, cost_basis, gain_type, lot_updates = self.consume_alpha_lots_fifo(alpha_disposed)
+        except InsufficientLotsError as e:
+            print(f"  Error: {e}")
+            return None
+        
+        # Realized gain/loss calculation: FMV - cost basis - fees
+        realized_gain_loss = usd_proceeds - cost_basis - fee_usd
+        
+        expense_id = self._next_expense_id()
+        
+        # Create expense record (category is empty - user must fill it in)
+        # No TAO involved, so tao_received=0, tao_price_usd=0, created_tao_lot_id=""
+        expense = Expense(
+            expense_id=expense_id,
+            timestamp=delegation['timestamp'],
+            block_number=delegation['block_number'],
+            transfer_address=transfer_address,
+            category="",  # User must categorize
+            alpha_disposed=alpha_disposed,
+            tao_received=0.0,  # No TAO involved in direct ALPHA transfer
+            tao_price_usd=0.0,
+            usd_proceeds=usd_proceeds,  # FMV of ALPHA at time of transfer
+            cost_basis=cost_basis,
+            realized_gain_loss=realized_gain_loss,
+            gain_type=gain_type,
+            tao_expected=0.0,
+            tao_slippage=0.0,
+            slippage_usd=0.0,
+            slippage_ratio=0.0,
+            network_fee_tao=0.0,
+            network_fee_usd=fee_usd,
+            consumed_lots=consumed_lots,
+            created_tao_lot_id="",  # No TAO lot created
+            extrinsic_id=delegation.get('extrinsic_id'),
+            notes=f"Direct ALPHA transfer (no TAO involved)"
+        )
+        
+        gain_str = "gain" if realized_gain_loss >= 0 else "loss"
+        print(f"  ✓ Expense {expense_id}: {alpha_disposed:.4f} ALPHA (${usd_proceeds:.2f}) to {transfer_address[:8]}...")
+        print(f"    FMV: ${usd_proceeds:.2f}, Basis: ${cost_basis:.2f}, {gain_type.value} {gain_str}: ${abs(realized_gain_loss):.2f}")
+        print(f"    ⚠️  Category required: Please update Category column in Expenses sheet")
+        
+        return (expense, lot_updates)
 
     # -------------------------------------------------------------------------
     # Transfer Processing (TAO → Kraken)
@@ -1182,6 +1655,11 @@ class BittensorEmissionTracker:
             key = t.get('extrinsic_id') or t.get('transaction_hash') or (t.get('block_number'), t.get('timestamp'))
             groups.setdefault(key, []).append(t)
 
+        # Load TAO lots once into memory cache for batch processing
+        tao_lots_cache = self._get_tao_lots_with_rows()
+        all_lot_updates = []
+        transfer_rows = []
+        
         new_transfers = []
         for key, group in groups.items():
             # Find if this group contains a transfer to the brokerage address
@@ -1196,11 +1674,21 @@ class BittensorEmissionTracker:
             # Prefer timestamp from brokerage transfer record
             primary = next((g for g in group if g.get('to') == self.brokerage_address), group[0])
             if primary['timestamp'] > self.last_transfer_timestamp:
-                transfer = self._process_tao_transfer(primary, brokerage_amount=brokerage_amount, total_outflow=total_outflow, related_transfers=group)
+                transfer = self._process_tao_transfer(primary, brokerage_amount=brokerage_amount, total_outflow=total_outflow, related_transfers=group, tao_lots_cache=tao_lots_cache)
                 if transfer:
                     new_transfers.append(transfer)
+                    transfer_rows.append(transfer.to_sheet_row())
+                    # Accumulate lot updates from this transfer
+                    if hasattr(transfer, '_lot_updates'):
+                        all_lot_updates.extend(transfer._lot_updates)
         
+        # Batch write all updates once at the end
         if new_transfers:
+            self._batch_update_tao_lots(all_lot_updates)
+            self._append_rows_with_retry(self.transfers_sheet, transfer_rows)
+            self._sort_sheet_by_timestamp(self.tao_lots_sheet, timestamp_col=3, label="TAO Lots", range_str="A2:L")
+            self._sort_sheet_by_timestamp(self.transfers_sheet, timestamp_col=3, label="Transfers", range_str="A2:L")
+            
             max_ts = max(xfer.timestamp for xfer in new_transfers)
             self.last_transfer_timestamp = max_ts
             print(f"\n✓ Processed {len(new_transfers)} TAO transfers to Kraken")
@@ -1214,7 +1702,8 @@ class BittensorEmissionTracker:
         transfer: Dict[str, Any],
         brokerage_amount: Optional[float] = None,
         total_outflow: Optional[float] = None,
-        related_transfers: Optional[List[Dict[str, Any]]] = None
+        related_transfers: Optional[List[Dict[str, Any]]] = None,
+        tao_lots_cache: Optional[List[Dict[str, Any]]] = None
     ) -> Optional[TaoTransfer]:
         """Process a TAO transfer to Kraken.
 
@@ -1228,7 +1717,8 @@ class BittensorEmissionTracker:
         base_outflow = total_outflow if total_outflow is not None else brokerage_amount
         related_transfers = related_transfers or [transfer]
 
-        fee_tao = sum(_rao_to_tao(rt.get('fee')) for rt in related_transfers)
+        # Fee is already in TAO (converted by the client), don't convert again
+        fee_tao = sum(rt.get('fee', 0) for rt in related_transfers)
         total_outflow_tao = (base_outflow or 0.0) + fee_tao
         tao_to_consume = total_outflow_tao if total_outflow_tao > 0 else (base_outflow or 0.0)
 
@@ -1240,9 +1730,15 @@ class BittensorEmissionTracker:
 
         usd_proceeds = brokerage_amount * tao_price
 
-        # Consume TAO lots for the full outflow (brokerage + fees)
+        # Consume TAO lots for the full outflow (brokerage + fees) - use cache if provided
+        # Pass transfer timestamp to prevent consuming lots created after this transfer
         try:
-            consumed_lots, total_cost_basis, gain_type, lot_updates = self.consume_tao_lots_fifo(tao_to_consume)
+            if tao_lots_cache is not None:
+                consumed_lots, total_cost_basis, gain_type, lot_updates = self._consume_tao_lots_from_cache(
+                    tao_to_consume, tao_lots_cache, as_of_timestamp=transfer['timestamp']
+                )
+            else:
+                consumed_lots, total_cost_basis, gain_type, lot_updates = self.consume_tao_lots_fifo(tao_to_consume)
         except InsufficientLotsError as e:
             print(f"  Error: {e}")
             return None
@@ -1285,15 +1781,20 @@ class BittensorEmissionTracker:
             fee_cost_basis_usd=fee_cost_basis
         )
 
-        # Apply TAO lot updates (they reflect the total outflow consumption)
+        gain_str = "gain" if realized_gain_loss >= 0 else "loss"
+        print(f"  ✓ Transfer {xfer.transfer_id}: {brokerage_amount:.4f} TAO → Kraken (total outflow {total_outflow_tao:.4f})")
+        print(f"    Proceeds: ${usd_proceeds:.2f}, Basis: ${cost_basis_for_brokerage:.2f}, {gain_type.value} {gain_str}: ${abs(realized_gain_loss):.2f}")
+
+        # Batch mode: store lot updates for caller to batch write
+        if tao_lots_cache is not None:
+            xfer._lot_updates = lot_updates
+            return xfer
+        
+        # Immediate write mode (single transfer processing)
         self._batch_update_tao_lots(lot_updates)
         self._append_with_retry(self.transfers_sheet, xfer.to_sheet_row(), label="Transfers")
         self._sort_sheet_by_timestamp(self.tao_lots_sheet, timestamp_col=3, label="TAO Lots", range_str="A2:L")
         self._sort_sheet_by_timestamp(self.transfers_sheet, timestamp_col=3, label="Transfers", range_str="A2:L")
-
-        gain_str = "gain" if realized_gain_loss >= 0 else "loss"
-        print(f"  ✓ Transfer {xfer.transfer_id}: {brokerage_amount:.4f} TAO → Kraken (total outflow {total_outflow_tao:.4f})")
-        print(f"    Proceeds: ${usd_proceeds:.2f}, Basis: ${cost_basis_for_brokerage:.2f}, {gain_type.value} {gain_str}: ${abs(realized_gain_loss):.2f}")
 
         return xfer
 
@@ -1321,14 +1822,55 @@ class BittensorEmissionTracker:
         print(f"Generating journal entries for {year_month}...")
         print(f"{'='*60}")
 
+        # Load all records once
+        expense_records = self.expenses_sheet.get_all_records()
         income_records = self.income_sheet.get_all_records()
         sales_records = self.sales_sheet.get_all_records()
         transfer_records = self.transfers_sheet.get_all_records()
+        
+        return self._generate_monthly_journal_entries_from_records(
+            year_month, start_ts, end_ts,
+            income_records, sales_records, expense_records, transfer_records
+        )
+    
+    def _generate_monthly_journal_entries_from_records(
+        self,
+        year_month: str,
+        start_ts: int,
+        end_ts: int,
+        income_records: List[Dict[str, Any]],
+        sales_records: List[Dict[str, Any]],
+        expense_records: List[Dict[str, Any]],
+        transfer_records: List[Dict[str, Any]]
+    ) -> List[JournalEntry]:
+        """Internal method to generate journal entries from pre-loaded records."""
+        # Check for uncategorized expenses before proceeding
+        uncategorized_expenses = [
+            exp for exp in expense_records
+            if start_ts <= exp['Timestamp'] < end_ts and not exp.get('Category', '').strip()
+        ]
+        
+        if uncategorized_expenses:
+            print(f"\n❌ ERROR: Found {len(uncategorized_expenses)} uncategorized expense(s) in {year_month}")
+            print("Please categorize all expenses in the Expenses sheet before generating journal entries.")
+            print("\nUncategorized expenses:")
+            for exp in uncategorized_expenses:
+                exp_date = datetime.fromtimestamp(exp['Timestamp']).strftime('%Y-%m-%d %H:%M:%S')
+                exp_id = exp.get('Expense ID', 'unknown')
+                transfer_addr = exp.get('Transfer Address', 'unknown')
+                alpha = exp.get('Alpha Disposed', 0)
+                print(f"  - {exp_id} ({exp_date}): {alpha:.4f} ALPHA to {transfer_addr[:8]}...")
+            raise ValueError(
+                f"Cannot generate journal entries for {year_month}: "
+                f"{len(uncategorized_expenses)} uncategorized expense(s) found. "
+                "Please update the Category column in the Expenses sheet."
+            )
 
         entries, summary = _aggregate_monthly_journal_entries(
             year_month,
             income_records,
             sales_records,
+            expense_records,
             transfer_records,
             self.wave_config,
             start_ts,
@@ -1345,6 +1887,8 @@ class BittensorEmissionTracker:
         print(f"  Sales Gain/Loss: ${summary['sales_gain']:.2f}")
         print(f"  Sales Slippage (USD): ${summary['sales_slippage']:.2f}")
         print(f"  Sales Fees: ${summary['sales_fees']:.2f}")
+        print(f"  Expense Total: ${summary['expense_total']:.2f}")
+        print(f"  Expense Gain/Loss: ${summary['expense_gain']:.2f}")
         print(f"  Transfer Gain/Loss: ${summary['transfer_gain']:.2f}")
         print(f"  Transfer Fees (cost basis): ${summary['transfer_fees']:.2f}")
 
@@ -1368,6 +1912,7 @@ class BittensorEmissionTracker:
         # Process emissions (mining or validator staking rewards)
         staking_lots = self.process_staking_emissions(lookback_days)
         sales = self.process_sales(lookback_days)
+        expenses = self.process_expenses(lookback_days)
         transfers = self.process_transfers(lookback_days)
 
         print(f"\n{'='*60}")
@@ -1377,17 +1922,216 @@ class BittensorEmissionTracker:
             print(f"  Contract Income Lots: {len(contract_lots)}")
         print(f"  {self.income_source.value} Emission Lots: {len(staking_lots)}")
         print(f"  ALPHA Sales: {len(sales)}")
+        print(f"  ALPHA Expenses: {len(expenses)}")
         print(f"  TAO Transfers: {len(transfers)}")
 
     def run_monthly_summary(self, year_month: str = None):
         """Generate monthly Wave journal entries."""
         self.generate_monthly_journal_entries(year_month)
 
+    def generate_yearly_journal_entries(self, year: int) -> List[JournalEntry]:
+        """Generate journal entries for all months in a given year."""
+        print(f"\n{'='*60}")
+        print(f"Generating journal entries for entire year {year}")
+        print(f"{'='*60}")
+        
+        # Read all sheets once at the start
+        print("\nLoading data from sheets...")
+        expense_records = self.expenses_sheet.get_all_records()
+        income_records = self.income_sheet.get_all_records()
+        sales_records = self.sales_sheet.get_all_records()
+        transfer_records = self.transfers_sheet.get_all_records()
+        print("✓ Data loaded\n")
+        
+        # Calculate year boundaries
+        year_start = datetime(year, 1, 1, tzinfo=timezone.utc)
+        year_end = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
+        year_start_ts = int(year_start.timestamp())
+        year_end_ts = int(year_end.timestamp())
+        
+        # Check for uncategorized expenses in the entire year BEFORE processing any months
+        uncategorized_expenses = [
+            exp for exp in expense_records
+            if year_start_ts <= exp['Timestamp'] < year_end_ts and not exp.get('Category', '').strip()
+        ]
+        
+        if uncategorized_expenses:
+            print(f"\n❌ ERROR: Found {len(uncategorized_expenses)} uncategorized expense(s) in {year}")
+            print("Please categorize all expenses in the Expenses sheet before generating journal entries.")
+            print("\nUncategorized expenses:")
+            for exp in uncategorized_expenses:
+                exp_date = datetime.fromtimestamp(exp['Timestamp']).strftime('%Y-%m-%d %H:%M:%S')
+                exp_id = exp.get('Expense ID', 'unknown')
+                transfer_addr = exp.get('Transfer Address', 'unknown')
+                alpha = exp.get('Alpha Disposed', 0)
+                print(f"  - {exp_id} ({exp_date}): {alpha:.4f} ALPHA to {transfer_addr[:8]}...")
+            raise ValueError(
+                f"Cannot generate journal entries for {year}: "
+                f"{len(uncategorized_expenses)} uncategorized expense(s) found. "
+                "Please update the Category column in the Expenses sheet."
+            )
+        
+        all_entries = []
+        all_rows = []  # Collect all rows for batch write
+        
+        for month in range(1, 13):
+            year_month = f"{year}-{month:02d}"
+            
+            # Calculate timestamps for this month
+            try:
+                period_start = datetime.strptime(year_month, "%Y-%m").replace(tzinfo=timezone.utc)
+                first_day_next_month = (period_start.replace(day=28) + timedelta(days=4)).replace(day=1)
+                start_ts = int(period_start.timestamp())
+                end_ts = int(first_day_next_month.timestamp())
+            except ValueError:
+                continue
+            
+            print(f"\n{'='*60}")
+            print(f"Generating journal entries for {year_month}...")
+            print(f"{'='*60}")
+            
+            try:
+                # Use aggregation function directly (we already checked expenses above)
+                entries, summary = _aggregate_monthly_journal_entries(
+                    year_month,
+                    income_records,
+                    sales_records,
+                    expense_records,
+                    transfer_records,
+                    self.wave_config,
+                    start_ts,
+                    end_ts,
+                )
+                
+                # Collect rows for batch write
+                for entry in entries:
+                    all_rows.append(entry.to_sheet_row())
+                    all_entries.append(entry)
+                
+                # Print summary
+                print(f"✓ Generated {len(entries)} aggregated journal entries for {year_month}")
+                print(f"  Contract Income: ${summary['contract_income']:.2f}")
+                print(f"  Staking Income: ${summary['staking_income']:.2f}")
+                print(f"  Sales Proceeds: ${summary['sales_proceeds']:.2f}")
+                print(f"  Sales Gain/Loss: ${summary['sales_gain']:.2f}")
+                print(f"  Sales Slippage (USD): ${summary['sales_slippage']:.2f}")
+                print(f"  Sales Fees: ${summary['sales_fees']:.2f}")
+                print(f"  Expense Total: ${summary['expense_total']:.2f}")
+                print(f"  Expense Gain/Loss: ${summary['expense_gain']:.2f}")
+                print(f"  Transfer Gain/Loss: ${summary['transfer_gain']:.2f}")
+                print(f"  Transfer Fees (cost basis): ${summary['transfer_fees']:.2f}")
+                
+            except ValueError as e:
+                # Skip months with errors (e.g., no data)
+                print(f"  Skipping {year_month}: {e}")
+                continue
+        
+        # Batch write all journal entries at once
+        if all_rows:
+            print(f"\nWriting {len(all_rows)} journal entries to sheet...")
+            self._append_rows_with_retry(self.journal_sheet, all_rows)
+            print("✓ Journal entries written")
+        
+        print(f"\n✓ Generated {len(all_entries)} total journal entries for {year}")
+        return all_entries
+
+    def clear_income_sheets(self):
+        """Clear all income and ALPHA lot data (for regeneration)."""
+        print("  Clearing Income sheet...")
+        try:
+            # Get all values and clear everything except header
+            all_values = self.income_sheet.get_all_values()
+            if len(all_values) > 1:  # If there's more than just the header
+                # Clear from row 2 onward
+                last_row = len(all_values)
+                self.income_sheet.batch_clear([f'A2:Z{last_row}'])
+            print("  ✓ Income sheet cleared")
+        except Exception as e:
+            print(f"  Warning: Could not clear income sheet: {e}")
+        
+        # Reset state to match cleared sheet
+        self.last_contract_income_timestamp = 0
+        self.last_staking_income_timestamp = 0
+        self.last_income_timestamp = 0
+        self.alpha_lot_counter = 1
+
+    def clear_sales_sheet(self):
+        """Clear all sales and TAO lot data (for regeneration)."""
+        print("  Clearing Sales sheet...")
+        try:
+            all_values = self.sales_sheet.get_all_values()
+            if len(all_values) > 1:
+                last_row = len(all_values)
+                self.sales_sheet.batch_clear([f'A2:Z{last_row}'])
+            print("  ✓ Sales sheet cleared")
+        except Exception as e:
+            print(f"  Warning: Could not clear sales sheet: {e}")
+        
+        print("  Clearing TAO Lots sheet...")
+        try:
+            all_values = self.tao_lots_sheet.get_all_values()
+            if len(all_values) > 1:
+                last_row = len(all_values)
+                self.tao_lots_sheet.batch_clear([f'A2:Z{last_row}'])
+            print("  ✓ TAO Lots sheet cleared")
+        except Exception as e:
+            print(f"  Warning: Could not clear TAO lots sheet: {e}")
+        
+        # Reset state to match cleared sheets
+        self.last_sale_timestamp = 0
+        self.sale_counter = 1
+        self.tao_lot_counter = 1
+
+    def clear_transfers_sheet(self):
+        """Clear all transfer data (for regeneration)."""
+        print("  Clearing Transfers sheet...")
+        try:
+            all_values = self.transfers_sheet.get_all_values()
+            if len(all_values) > 1:
+                last_row = len(all_values)
+                self.transfers_sheet.batch_clear([f'A2:Z{last_row}'])
+            print("  ✓ Transfers sheet cleared")
+        except Exception as e:
+            print(f"  Warning: Could not clear transfers sheet: {e}")
+        
+        # Reset state to match cleared sheet
+        self.last_transfer_timestamp = 0
+        self.transfer_counter = 1
+
+    def clear_expenses_sheet(self):
+        """Clear all expense data (for regeneration)."""
+        print("  Clearing Expenses sheet...")
+        try:
+            all_values = self.expenses_sheet.get_all_values()
+            if len(all_values) > 1:
+                last_row = len(all_values)
+                self.expenses_sheet.batch_clear([f'A2:Z{last_row}'])
+            print("  ✓ Expenses sheet cleared")
+        except Exception as e:
+            print(f"  Warning: Could not clear expenses sheet: {e}")
+        
+        # Reset state to match cleared sheet
+        self.last_expense_timestamp = 0
+        self.expense_counter = 1
+
+    def clear_journal_sheet(self):
+        """Clear all journal entries (for regeneration)."""
+        print("  Clearing Journal Entries sheet...")
+        try:
+            all_values = self.journal_sheet.get_all_values()
+            if len(all_values) > 1:
+                last_row = len(all_values)
+                self.journal_sheet.batch_clear([f'A2:Z{last_row}'])
+            print("  ✓ Journal Entries sheet cleared")
+        except Exception as e:
+            print(f"  Warning: Could not clear journal sheet: {e}")
+
 
 def _aggregate_monthly_journal_entries(
     year_month: str,
     income_records: List[Dict[str, Any]],
     sales_records: List[Dict[str, Any]],
+    expense_records: List[Dict[str, Any]],
     transfer_records: List[Dict[str, Any]],
     wave_config: WaveAccountSettings,
     start_ts: int,
@@ -1409,6 +2153,8 @@ def _aggregate_monthly_journal_entries(
         "sales_gain": 0.0,
         "sales_slippage": 0.0,
         "sales_fees": 0.0,
+        "expense_total": 0.0,
+        "expense_gain": 0.0,
         "transfer_gain": 0.0,
         "transfer_fees": 0.0,
     }
@@ -1428,7 +2174,13 @@ def _aggregate_monthly_journal_entries(
     # ------------------------- Income ---------------------------------------
     for record in income_records:
         ts = record.get("Timestamp")
-        if ts is None or ts < start_ts or ts >= end_ts:
+        if ts is None:
+            continue
+        try:
+            ts = int(ts)
+        except (TypeError, ValueError):
+            continue
+        if ts < start_ts or ts >= end_ts:
             continue
         usd_fmv = record.get("USD FMV") or 0.0
         source_type = record.get("Source Type")
@@ -1449,7 +2201,13 @@ def _aggregate_monthly_journal_entries(
     # ------------------------- Sales (ALPHA -> TAO) -------------------------
     for sale in sales_records:
         ts = sale.get("Timestamp")
-        if ts is None or ts < start_ts or ts >= end_ts:
+        if ts is None:
+            continue
+        try:
+            ts = int(ts)
+        except (TypeError, ValueError):
+            continue
+        if ts < start_ts or ts >= end_ts:
             continue
         proceeds = sale.get("USD Proceeds") or 0.0
         cost_basis = sale.get("Cost Basis") or 0.0
@@ -1489,7 +2247,7 @@ def _aggregate_monthly_journal_entries(
             summary["sales_fees"] += sale_fee_usd
             fee_note = f"Sale {sale_id}: Network fee ${sale_fee_usd:.2f}"
             _add_amount(
-                wave_config.sale_fee_account,
+                wave_config.blockchain_fee_account,
                 "debit",
                 sale_fee_usd,
                 fee_note
@@ -1507,6 +2265,73 @@ def _aggregate_monthly_journal_entries(
         if slippage_usd:
             note_parts.append(f"(incl. ${slippage_usd:.2f} slippage)")
         bucket["notes"].append(" ".join(note_parts))
+
+    # ------------------------- Expenses (ALPHA payments) -------------------
+    for expense in expense_records:
+        ts = expense.get("Timestamp")
+        if ts is None:
+            continue
+        try:
+            ts = int(ts)
+        except (TypeError, ValueError):
+            continue
+        if ts < start_ts or ts >= end_ts:
+            continue
+        
+        category = expense.get("Category", "").strip()
+        if not category:
+            continue  # Should have been caught earlier, but skip uncategorized
+        
+        proceeds = expense.get("USD Proceeds") or 0.0
+        cost_basis = expense.get("Cost Basis") or 0.0
+        gain_loss = expense.get("Realized Gain/Loss") or 0.0
+        gain_type = expense.get("Gain Type") or "Short-term"
+        expense_id = expense.get("Expense ID") or ""
+        fee_raw = expense.get("Network Fee (USD)")
+        try:
+            expense_fee_usd = float(fee_raw) if fee_raw not in (None, "") else 0.0
+        except (TypeError, ValueError):
+            expense_fee_usd = 0.0
+        
+        summary["expense_total"] += proceeds
+        summary["expense_gain"] += gain_loss
+        
+        # Debit expense category (e.g., "Computer - Hosting")
+        _add_amount(
+            category,
+            "debit",
+            proceeds,
+            f"Expense {expense_id}: ${proceeds:.2f}"
+        )
+        
+        # Credit ALPHA asset for cost basis
+        _add_amount(
+            wave_config.alpha_asset_account,
+            "credit",
+            cost_basis,
+            f"Expense {expense_id}: ALPHA cost basis ${cost_basis:.2f}"
+        )
+        
+        # Handle network fees if any
+        if expense_fee_usd:
+            fee_note = f"Expense {expense_id}: Network fee ${expense_fee_usd:.2f}"
+            _add_amount(
+                wave_config.blockchain_fee_account,
+                "debit",
+                expense_fee_usd,
+                fee_note
+            )
+            _add_amount(
+                wave_config.alpha_asset_account,
+                "credit",
+                expense_fee_usd,
+                fee_note
+            )
+        
+        # Add gain/loss to appropriate bucket
+        bucket = gain_buckets.setdefault(gain_type, {"amount": 0.0, "notes": []})
+        bucket["amount"] += gain_loss
+        bucket["notes"].append(f"Expense {expense_id}: ${gain_loss:.2f}")
 
     def _parse_fee_cost_basis(notes: str) -> float:
         if not notes:
@@ -1532,7 +2357,13 @@ def _aggregate_monthly_journal_entries(
     # ------------------------- Transfers (TAO -> Kraken) --------------------
     for xfer in transfer_records:
         ts = xfer.get("Timestamp")
-        if ts is None or ts < start_ts or ts >= end_ts:
+        if ts is None:
+            continue
+        try:
+            ts = int(ts)
+        except (TypeError, ValueError):
+            continue
+        if ts < start_ts or ts >= end_ts:
             continue
         proceeds = xfer.get("USD Proceeds") or 0.0
         cost_basis = xfer.get("Cost Basis") or 0.0
@@ -1552,8 +2383,8 @@ def _aggregate_monthly_journal_entries(
         _add_amount(
             wave_config.tao_asset_account,
             "credit",
-            cost_basis,
-            f"Transfer {transfer_id}: Cost basis ${cost_basis:.2f}"
+            cost_basis,  # Use cost basis from consumed lots
+            f"Transfer {transfer_id}: TAO disposed ${cost_basis:.2f}"
         )
         if fee_cost_basis:
             _add_amount(
@@ -1563,7 +2394,7 @@ def _aggregate_monthly_journal_entries(
                 f"Transfer {transfer_id}: Fee cost basis ${fee_cost_basis:.2f}"
             )
             _add_amount(
-                wave_config.transfer_fee_account,
+                wave_config.blockchain_fee_account,
                 "debit",
                 fee_cost_basis,
                 f"Transfer {transfer_id}: On-chain fees ${fee_cost_basis:.2f}"
@@ -1588,12 +2419,22 @@ def _aggregate_monthly_journal_entries(
         if abs(amount) < 0.00001:
             continue
         notes = ", ".join(data["notes"][:5])
-        if amount > 0:
-            account = gain_account_map.get(gain_type, wave_config.short_term_gain_account)
-            _add_amount(account, "credit", amount, notes or f"{gain_type} gain total ${amount:.2f}")
+        
+        gain_account = gain_account_map.get(gain_type, wave_config.short_term_gain_account)
+        loss_account = loss_account_map.get(gain_type, wave_config.short_term_loss_account)
+        
+        # If using the same account for gains and losses, record net amount once
+        if gain_account == loss_account:
+            if amount > 0:
+                _add_amount(gain_account, "credit", amount, notes or f"{gain_type} net gain ${amount:.2f}")
+            else:
+                _add_amount(gain_account, "debit", abs(amount), notes or f"{gain_type} net loss ${abs(amount):.2f}")
         else:
-            account = loss_account_map.get(gain_type, wave_config.short_term_loss_account)
-            _add_amount(account, "debit", abs(amount), notes or f"{gain_type} loss total ${abs(amount):.2f}")
+            # Separate accounts: record gain or loss to appropriate account
+            if amount > 0:
+                _add_amount(gain_account, "credit", amount, notes or f"{gain_type} gain total ${amount:.2f}")
+            else:
+                _add_amount(loss_account, "debit", abs(amount), notes or f"{gain_type} loss total ${abs(amount):.2f}")
 
     entries: List[JournalEntry] = []
     for account, values in sorted(account_totals.items()):
@@ -1635,10 +2476,31 @@ def _aggregate_monthly_journal_entries(
             entries.append(target_entry)
 
         note = f"rounding adjustment {rounding_diff:+.2f}"
+        # If debits > credits (positive diff), we need to increase credits
+        # If credits > debits (negative diff), we need to increase debits
+        # BUT: adjust the side that already has a value, not create both sides
         if rounding_diff > 0:
-            target_entry.credit = round(target_entry.credit + abs(rounding_diff), 2)
+            # Debits exceed credits, so we need more credits
+            if target_entry.credit > 0:
+                # Already has credits, add to them
+                target_entry.credit = round(target_entry.credit + rounding_diff, 2)
+            elif target_entry.debit > 0:
+                # Has debits, reduce them instead
+                target_entry.debit = round(target_entry.debit - rounding_diff, 2)
+            else:
+                # Empty entry, add credit
+                target_entry.credit = round(rounding_diff, 2)
         else:
-            target_entry.debit = round(target_entry.debit + abs(rounding_diff), 2)
+            # Credits exceed debits, so we need more debits
+            if target_entry.debit > 0:
+                # Already has debits, add to them
+                target_entry.debit = round(target_entry.debit + abs(rounding_diff), 2)
+            elif target_entry.credit > 0:
+                # Has credits, reduce them instead
+                target_entry.credit = round(target_entry.credit - abs(rounding_diff), 2)
+            else:
+                # Empty entry, add debit
+                target_entry.debit = round(abs(rounding_diff), 2)
         if note not in target_entry.description:
             target_entry.description += ("; " if target_entry.description else "") + note
 

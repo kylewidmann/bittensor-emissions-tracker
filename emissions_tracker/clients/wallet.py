@@ -49,7 +49,8 @@ class WalletClientInterface(ABC):
         delegate: str,
         nominator: str,
         start_time: int,
-        end_time: int
+        end_time: int,
+        is_transfer: Optional[bool] = None
     ) -> List[Dict[str, Any]]:
         """
         Fetch delegation events (DELEGATE/UNDELEGATE).
@@ -60,6 +61,9 @@ class WalletClientInterface(ABC):
             nominator: Coldkey SS58
             start_time: Unix timestamp start
             end_time: Unix timestamp end
+            is_transfer: If True, only return DELEGATE events with transfers.
+                        If False, only return events without transfers.
+                        If None, return all events.
             
         Returns:
             List of delegation dicts with keys:

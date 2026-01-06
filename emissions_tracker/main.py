@@ -10,7 +10,7 @@ Tracks cryptocurrency income and disposals for tax accounting:
 """
 
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 
 from emissions_tracker.clients.taostats import TaoStatsAPIClient
 from emissions_tracker.tracker import BittensorEmissionTracker
@@ -38,9 +38,21 @@ Examples:
 
   # Generate monthly journal entries
   python -m emissions_tracker.main --mode journal --month 2025-11
+  
+  # Generate journal entries for entire year
+  python -m emissions_tracker.main --mode journal --year 2025
+  
+  # Regenerate journal entries for entire year
+  python -m emissions_tracker.main --mode journal --year 2025 --regenerate
 
   # Run with custom lookback period
   python -m emissions_tracker.main --mode auto --lookback 30
+  
+  # Regenerate all data (clear and reprocess)
+  python -m emissions_tracker.main --mode auto --lookback 365 --regenerate
+  
+  # Regenerate only transfers
+  python -m emissions_tracker.main --mode transfers --lookback 365 --regenerate
         """
     )
     
@@ -72,6 +84,19 @@ Examples:
         help='Month for journal entries in YYYY-MM format (default: last month)'
     )
     
+    parser.add_argument(
+        '--year',
+        type=int,
+        default=None,
+        help='Year for journal entries (generates all 12 months)'
+    )
+    
+    parser.add_argument(
+        '--regenerate',
+        action='store_true',
+        help='Clear existing data before processing (forces full regeneration)'
+    )
+    
     args = parser.parse_args()
     
     # Load configuration
@@ -93,6 +118,20 @@ Examples:
         smart_contract_address=config.smart_contract_ss58,
         income_source=SourceType.STAKING
     )
+    
+    # Handle regeneration if requested
+    if args.regenerate:
+        print("\n⚠️  REGENERATION MODE: Clearing existing data...")
+        if args.mode in ['auto', 'income']:
+            tracker.clear_income_sheets()
+        if args.mode in ['auto', 'sales']:
+            tracker.clear_sales_sheet()
+            tracker.clear_expenses_sheet()
+        if args.mode in ['auto', 'transfers']:
+            tracker.clear_transfers_sheet()
+        if args.mode == 'journal':
+            tracker.clear_journal_sheet()
+        print("✓ Sheets cleared\n")
     
     # Execute based on mode
     if args.mode == 'auto':
@@ -121,16 +160,20 @@ Examples:
         tracker.process_transfers(lookback_days=args.lookback)
         
     elif args.mode == 'journal':
-        month = args.month
-        if not month:
-            # Default to last month
-            today = datetime.now()
-            if today.month == 1:
-                month = f"{today.year - 1}-12"
-            else:
-                month = f"{today.year}-{today.month - 1:02d}"
-        print(f"\nGenerating journal entries for {month}...")
-        tracker.generate_monthly_journal_entries(month)
+        if args.year:
+            print(f"\nGenerating journal entries for all of {args.year}...")
+            tracker.generate_yearly_journal_entries(args.year)
+        else:
+            month = args.month
+            if not month:
+                # Default to last month
+                today = datetime.now()
+                if today.month == 1:
+                    month = f"{today.year - 1}-12"
+                else:
+                    month = f"{today.year}-{today.month - 1:02d}"
+            print(f"\nGenerating journal entries for {month}...")
+            tracker.generate_monthly_journal_entries(month)
     
     print("\n✓ Done!")
 

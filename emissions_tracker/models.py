@@ -289,6 +289,83 @@ class TaoTransfer:
 
 
 @dataclass
+class Expense:
+    """Represents an ALPHA → TAO payment/expense event (transferred to another entity)."""
+    expense_id: str
+    timestamp: int
+    block_number: int
+    alpha_disposed: float
+    tao_received: float
+    tao_price_usd: float
+    usd_proceeds: float  # TAO received × TAO price
+    cost_basis: float  # Sum of consumed lot bases
+    realized_gain_loss: float
+    gain_type: GainType
+    consumed_lots: List[LotConsumption]
+    created_tao_lot_id: str  # Link to TAO lot created
+    transfer_address: str  # Address the TAO was transferred to
+    category: str = ""  # User fills this in (e.g., "Payment to Entity", "Distribution", etc.)
+    tao_expected: float = 0.0
+    tao_slippage: float = 0.0
+    slippage_usd: float = 0.0
+    slippage_ratio: float = 0.0
+    network_fee_tao: float = 0.0
+    network_fee_usd: float = 0.0
+    extrinsic_id: Optional[str] = None
+    notes: str = ""
+    
+    @property
+    def date(self) -> str:
+        return datetime.fromtimestamp(self.timestamp).strftime('%Y-%m-%d %H:%M:%S')
+    
+    def consumed_lots_json(self) -> str:
+        """JSON representation of consumed lots for sheet storage."""
+        return json.dumps([c.to_dict() for c in self.consumed_lots])
+    
+    def consumed_lots_summary(self) -> str:
+        """Human-readable summary of consumed lots."""
+        return ", ".join([f"{c.lot_id}:{c.alpha_consumed:.4f}" for c in self.consumed_lots])
+    
+    def to_sheet_row(self) -> List[Any]:
+        return [
+            self.expense_id,
+            self.date,
+            self.timestamp,
+            self.block_number,
+            self.transfer_address,
+            self.category,
+            self.alpha_disposed,
+            self.tao_received,
+            self.tao_price_usd,
+            self.usd_proceeds,
+            self.cost_basis,
+            self.realized_gain_loss,
+            self.gain_type.value,
+            self.tao_expected,
+            self.tao_slippage,
+            self.slippage_usd,
+            self.slippage_ratio,
+            self.network_fee_tao,
+            self.network_fee_usd,
+            self.consumed_lots_summary(),
+            self.created_tao_lot_id,
+            self.extrinsic_id or "",
+            self.notes
+        ]
+    
+    @classmethod
+    def sheet_headers(cls) -> List[str]:
+        return [
+            "Expense ID", "Date", "Timestamp", "Block", "Transfer Address", "Category",
+            "Alpha Disposed", "TAO Received", "TAO Price USD", "USD Proceeds", 
+            "Cost Basis", "Realized Gain/Loss", "Gain Type", "TAO Expected", 
+            "TAO Slippage", "Slippage USD", "Slippage Ratio",
+            "Network Fee (TAO)", "Network Fee (USD)",
+            "Consumed Lots", "Created TAO Lot ID", "Extrinsic ID", "Notes"
+        ]
+
+
+@dataclass
 class JournalEntry:
     """Represents a Wave journal entry row."""
     month: str  # YYYY-MM

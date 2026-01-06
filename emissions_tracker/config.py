@@ -26,6 +26,13 @@ class TrackerSettings(BaseSettings):
     subnet_id: int = Field(64, alias="SUBNET_ID", description="Bittensor subnet ID")
     # Lot consumption strategy: HIFO (default) or FIFO. HIFO = Highest cost-basis first.
     lot_strategy: str = Field("HIFO", alias="LOT_STRATEGY", description="Lot consumption strategy: HIFO or FIFO")
+    
+    # API rate limiting
+    taostats_rate_limit_seconds: float = Field(
+        1.0, 
+        alias="TAOSTATS_RATE_LIMIT_SECONDS",
+        description="Minimum seconds between TaoStats API requests (default: 1.0 for 60 req/min)"
+    )
 
 
 class WaveAccountSettings(BaseSettings):
@@ -64,15 +71,10 @@ class WaveAccountSettings(BaseSettings):
         alias="WAVE_TRANSFER_PROCEEDS_ACCOUNT",
         description="Wave account for USD proceeds when TAO is transferred off-chain"
     )
-    transfer_fee_account: str = Field(
-        "Blockchain Fees - TAO",
-        alias="WAVE_TRANSFER_FEE_ACCOUNT",
-        description="Wave account for on-chain transfer fees paid in TAO"
-    )
-    sale_fee_account: str = Field(
-        "Blockchain Fees - Alpha",
-        alias="WAVE_SALE_FEE_ACCOUNT",
-        description="Wave account for on-chain fees incurred during ALPHA -> TAO sales"
+    blockchain_fee_account: str = Field(
+        "Blockchain Fees",
+        alias="WAVE_BLOCKCHAIN_FEE_ACCOUNT",
+        description="Wave account for on-chain transaction fees (paid in ALPHA or TAO)"
     )
     
     # Gain/Loss accounts
@@ -106,6 +108,11 @@ class TaoStatsSettings(BaseSettings):
         "https://api.taostats.io/api",
         alias="TAOSTATS_BASE_URL",
         description="TaoStats API base URL"
+    )
+    rate_limit_seconds: float = Field(
+        1.0,
+        alias="TAOSTATS_RATE_LIMIT_SECONDS",
+        description="Minimum seconds between API requests (default: 1.0 for 60 req/min)"
     )
 
 

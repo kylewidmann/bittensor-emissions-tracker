@@ -28,6 +28,7 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
         self._last_call_time = None
         self._price_bucket_cache = {}   # keyed by 15m bucket
         self._price_window_cache = {}   # keyed by (start, end)
+        self._rate_limit_seconds = self.config.rate_limit_seconds  # Configurable rate limit
 
     @property
     def name(self) -> str:
@@ -45,14 +46,14 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
         all_data = []
         page = 1
         while True:
-            if self._last_call_time and time.time() - self._last_call_time < 12:
-                sleep_time = 12 - (time.time() - self._last_call_time)
-                time.sleep(sleep_time)  # Pace at 12s to stay under 5 req/min
+            if self._last_call_time and time.time() - self._last_call_time < self._rate_limit_seconds:
+                sleep_time = self._rate_limit_seconds - (time.time() - self._last_call_time)
+                time.sleep(sleep_time)  # Enforce configured rate limit
             params['page'] = page
-            params['per_page'] = per_page
+            params['limit'] = per_page
             if page == 1 or page % 5 == 0:
                 label = context or url
-                print(f"  Fetching {label}, page {page} (per_page={per_page})")
+                print(f"  Fetching {label}, page {page} (limit={per_page})")
             response = requests.get(url, headers=self.headers, params=params)
             response.raise_for_status()
             data = response.json()
@@ -80,8 +81,9 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
             url = f"{self.base_url}/transfer/v1"
             params = {
                 "address": account_address,
-                "start_time": start_time,
-                "end_time": end_time
+                "timestamp_start": start_time,
+                "timestamp_end": end_time,
+                "order": "timestamp_asc"
             }
             if sender:
                 params["sender"] = sender
@@ -94,12 +96,14 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
             for t in transfer_data:
                 timestamp = int(datetime.fromisoformat(t['timestamp'].replace('Z', '+00:00')).timestamp())
                 amount = int(t['amount']) / 1e9  # RAO to TAO
+                fee = int(t.get('fee', 0)) / 1e9  # RAO to TAO
                 
                 transfers.append({
                     'timestamp': timestamp,
                     'from': t['from']['ss58'],
                     'to': t['to']['ss58'],
                     'amount': amount,
+                    'fee': fee,
                     'block_number': t['block_number'],
                     'transaction_hash': t['transaction_hash'],
                     'extrinsic_id': t['extrinsic_id'],
@@ -117,9 +121,16 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
         delegate: str,
         nominator: str,
         start_time: int,
-        end_time: int
+        end_time: int,
+        is_transfer: Optional[bool] = None
     ) -> List[Dict[str, Any]]:
-        """Fetch delegation/stake events via Taostats API."""
+        """Fetch delegation/stake events via Taostats API.
+        
+        Args:
+            is_transfer: If True, only return DELEGATE events with transfers to another address.
+                        If False, only return events without transfers.
+                        If None, return all events.
+        """
         try:
             url = f"{self.base_url}/delegation/v1"
             params = {
@@ -127,9 +138,12 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
                 "netuid": netuid,
                 "delegate": delegate,
                 "nominator": nominator,
-                "start_time": start_time,
-                "end_time": end_time
+                "timestamp_start": start_time,
+                "timestamp_end": end_time,
+                "order": "timestamp_asc"
             }
+            if is_transfer is not None:
+                params["is_transfer"] = "true" if is_transfer else "false"
 
             delegation_data = self._fetch_with_pagination(url, params, per_page=500, context="delegations")
             
