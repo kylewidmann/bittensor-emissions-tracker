@@ -48,6 +48,7 @@ def test_november_summary_totals_match_expectations(november_context):
         year_month,
         income_records,
         sales_records,
+        [],  # expense_records
         transfer_records,
         wave,
         start_ts,
@@ -70,16 +71,13 @@ def test_november_summary_totals_match_expectations(november_context):
     assert math.isclose(alpha_account["credit"], 762.5, rel_tol=1e-9)
 
     tao_account = totals[wave.tao_asset_account]
-    assert math.isclose(tao_account["debit"], 930.0, rel_tol=1e-9)
-    assert math.isclose(tao_account["credit"], 686.0, rel_tol=1e-9)
+    assert math.isclose(tao_account["debit"], 930.0, rel_tol=1e-9)  # Sales proceeds
+    assert math.isclose(tao_account["credit"], 686.0, rel_tol=1e-9)  # Transfer cost basis + fees
 
-    fee_account = totals[wave.sale_fee_account]
-    assert math.isclose(fee_account["debit"], 6.5, rel_tol=1e-9)
+    # Both sale fees and transfer fees now go to the same consolidated account
+    fee_account = totals[wave.blockchain_fee_account]
+    assert math.isclose(fee_account["debit"], 16.0, rel_tol=1e-9)  # 6.5 (sale fees) + 9.5 (transfer fees)
     assert math.isclose(fee_account["credit"], 0.0, rel_tol=1e-9)
-
-    transfer_fee_account = totals[wave.transfer_fee_account]
-    assert math.isclose(transfer_fee_account["debit"], 9.5, rel_tol=1e-9)
-    assert math.isclose(transfer_fee_account["credit"], 0.0, rel_tol=1e-9)
 
 
 def test_transfer_fee_column_overrides_note_metadata(november_context):
@@ -101,6 +99,7 @@ def test_transfer_fee_column_overrides_note_metadata(november_context):
         year_month,
         [],
         [],
+        [],  # expense_records
         transfer_records,
         wave,
         start_ts,
@@ -110,9 +109,9 @@ def test_transfer_fee_column_overrides_note_metadata(november_context):
     assert summary["transfer_fees"] == 7.0
 
     totals = _collect_account_totals(entries)
-    transfer_fee_account = totals[wave.transfer_fee_account]
+    transfer_fee_account = totals[wave.blockchain_fee_account]
     assert math.isclose(transfer_fee_account["debit"], 7.0, rel_tol=1e-9)
     assert math.isclose(transfer_fee_account["credit"], 0.0, rel_tol=1e-9)
 
     tao_account = totals[wave.tao_asset_account]
-    assert math.isclose(tao_account["credit"], 127.0, rel_tol=1e-9)
+    assert math.isclose(tao_account["credit"], 127.0, rel_tol=1e-9)  # Transfer cost basis + fee

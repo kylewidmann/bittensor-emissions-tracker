@@ -24,9 +24,16 @@ def column_letter_to_index(letters: str) -> int:
 
 
 class InMemoryWorksheet:
+    """
+    Mock worksheet that simulates Google Sheets' delayed write behavior.
+    
+    Batch updates are staged and only applied when flush_pending_updates() is called,
+    replicating the eventual consistency issue that causes batch lot consumption bugs.
+    """
     def __init__(self, headers):
         self.headers = headers
         self.rows = []
+        self.pending_updates = []  # Staged updates not yet applied
 
     def seed_records(self, records):
         for record in records:
@@ -34,6 +41,7 @@ class InMemoryWorksheet:
             self.rows.append(row)
 
     def get_all_records(self):
+        """Read from current state (doesn't see pending updates - simulates sheet read lag)."""
         results = []
         for row in self.rows:
             record = {}
@@ -43,6 +51,7 @@ class InMemoryWorksheet:
         return results
 
     def append_row(self, row):
+        """Immediate append (simulates how new rows appear right away)."""
         padded = list(row) + [""] * max(0, len(self.headers) - len(row))
         self.rows.append(padded[:len(self.headers)])
 
@@ -55,13 +64,30 @@ class InMemoryWorksheet:
         return
 
     def update_cell(self, row_num: int, column_letters: str, value):
-        column_index = column_letter_to_index(column_letters) - 1
-        row_index = row_num - 2  # Skip header row
-        if 0 <= row_index < len(self.rows) and 0 <= column_index < len(self.headers):
-            self.rows[row_index][column_index] = value
+        """Stage update for later (simulates delayed batch write)."""
+        self.pending_updates.append({
+            'row_num': row_num,
+            'column_letters': column_letters,
+            'value': value
+        })
+    
+    def flush_pending_updates(self):
+        """Apply all staged updates (simulates batch write completion)."""
+        for update in self.pending_updates:
+            column_index = column_letter_to_index(update['column_letters']) - 1
+            row_index = update['row_num'] - 2  # Skip header row
+            if 0 <= row_index < len(self.rows) and 0 <= column_index < len(self.headers):
+                self.rows[row_index][column_index] = update['value']
+        self.pending_updates.clear()
 
 
 class FakeSpreadsheet:
+    """
+    Mock spreadsheet that simulates Google Sheets batch update behavior.
+    
+    Batch updates via values_batch_update() are staged but not immediately visible
+    to subsequent reads, replicating the delayed write issue in production.
+    """
     def __init__(self):
         self.worksheets = {}
 
@@ -69,6 +95,7 @@ class FakeSpreadsheet:
         self.worksheets[name] = worksheet
 
     def values_batch_update(self, body):
+        """Apply batch updates immediately (Google Sheets batch API is synchronous)."""
         for update in body.get("data", []):
             sheet_name, cell_range = update["range"].split("!")
             worksheet = self.worksheets[sheet_name]
@@ -77,7 +104,16 @@ class FakeSpreadsheet:
             numbers = "".join([c for c in start_cell if c.isdigit()])
             row_num = int(numbers)
             value = update["values"][0][0]
-            worksheet.update_cell(row_num, letters, value)
+            # Apply directly - batch API is synchronous
+            column_index = column_letter_to_index(letters) - 1
+            row_index = row_num - 2  # Skip header row
+            if 0 <= row_index < len(worksheet.rows) and 0 <= column_index < len(worksheet.headers):
+                worksheet.rows[row_index][column_index] = value
+    
+    def flush_all_pending_updates(self):
+        """Flush all pending updates across all worksheets."""
+        for worksheet in self.worksheets.values():
+            worksheet.flush_pending_updates()
 
 
 class StubPriceClient:
@@ -179,7 +215,7 @@ def test_sales_and_transfers_capture_network_fees():
             "usd": 100.05,
             "slippage": 0.01,
             "extrinsic_id": "0xSALE",
-                "fee": SALE_FEE_RAO,
+            "fee": SALE_FEE_TAO,  # Client returns TAO values, not RAO
         }
     ]
 
@@ -192,7 +228,7 @@ def test_sales_and_transfers_capture_network_fees():
             "amount": 4.0,
             "transaction_hash": "0xXFER",
             "extrinsic_id": "0xXFER",
-                "fee": TRANSFER_FEE_RAO,
+            "fee": TRANSFER_FEE_TAO,  # Client returns TAO values, not RAO
         }
     ]
 

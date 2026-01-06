@@ -107,6 +107,7 @@ def test_aggregate_monthly_journal_entries_balances_double_entry():
         year_month,
         income_records,
         sales_records,
+        [],  # expense_records
         transfer_records,
         wave,
         start_ts,
@@ -120,10 +121,10 @@ def test_aggregate_monthly_journal_entries_balances_double_entry():
     assert math.isclose(totals[wave.alpha_asset_account]["credit"], 280.0)
 
     assert math.isclose(totals[wave.tao_asset_account]["debit"], 300.0)
-    assert math.isclose(totals[wave.tao_asset_account]["credit"], 450.0)
+    assert math.isclose(totals[wave.tao_asset_account]["credit"], 450.0)  # Transfer cost basis (370) + fees (10) + Sale proceeds (70)
 
     assert math.isclose(totals[wave.transfer_proceeds_account]["debit"], 430.0)
-    assert math.isclose(totals[wave.transfer_fee_account]["debit"], 10.0)
+    assert math.isclose(totals[wave.blockchain_fee_account]["debit"], 10.0)
 
     assert math.isclose(totals[wave.short_term_gain_account]["credit"], 20.0)  # 50 (SALE-1) - 30 (SALE-2) + 20 (XFER-1) - 20 (XFER-2)
     assert math.isclose(totals[wave.long_term_loss_account]["debit"], 10.0)
@@ -163,6 +164,7 @@ def test_rounding_adjustment_balances_totals_with_combined_accounts():
         "2025-11",
         income_records,
         sales_records,
+        [],  # expense_records
         [],
         wave,
         0,
