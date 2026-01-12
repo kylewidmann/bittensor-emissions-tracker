@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
 
+from emissions_tracker.models import TaoStatsDelegation
+
 
 class WalletClientInterface(ABC):
     """Abstract interface for wallet/blockchain data clients."""
@@ -51,7 +53,7 @@ class WalletClientInterface(ABC):
         start_time: int,
         end_time: int,
         is_transfer: Optional[bool] = None
-    ) -> List[Dict[str, Any]]:
+    ) -> List[TaoStatsDelegation]:
         """
         Fetch delegation events (DELEGATE/UNDELEGATE).
         

@@ -1,7 +1,9 @@
 from pathlib import Path
 from typing import Optional
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
+
+from emissions_tracker.models import CostBasisMethod
 
 
 class TrackerSettings(BaseSettings):
@@ -25,7 +27,15 @@ class TrackerSettings(BaseSettings):
     # Subnet configuration
     subnet_id: int = Field(64, alias="SUBNET_ID", description="Bittensor subnet ID")
     # Lot consumption strategy: HIFO (default) or FIFO. HIFO = Highest cost-basis first.
-    lot_strategy: str = Field("HIFO", alias="LOT_STRATEGY", description="Lot consumption strategy: HIFO or FIFO")
+    lot_strategy: CostBasisMethod = Field(CostBasisMethod.HIFO, alias="LOT_STRATEGY", description="Lot consumption strategy: CostBasisMethod.HIFO or CostBasisMethod.FIFO")
+    
+    @field_validator('lot_strategy', mode='before')
+    @classmethod
+    def parse_lot_strategy(cls, v):
+        """Parse lot_strategy from string to enum if needed."""
+        if isinstance(v, str):
+            return CostBasisMethod[v.upper()]
+        return v
     
     # API rate limiting
     taostats_rate_limit_seconds: float = Field(

@@ -10,6 +10,12 @@ from emissions_tracker.clients.price import PriceClient
 from emissions_tracker.clients.wallet import WalletClientInterface
 from emissions_tracker.config import TaoStatsSettings
 from emissions_tracker.exceptions import PriceNotAvailableError
+from emissions_tracker.models import (
+    TaoStatsTransfer,
+    TaoStatsDelegation,
+    TaoStatsStakeBalance,
+    TaoStatsAddress
+)
 
 
 class TaoStatsAPIClient(WalletClientInterface, PriceClient):
@@ -75,7 +81,7 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
         end_time: int,
         sender: Optional[str] = None,
         receiver: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
+    ) -> List[TaoStatsTransfer]:
         """Fetch TAO transfers via Taostats API."""
         try:
             url = f"{self.base_url}/transfer/v1"
@@ -94,21 +100,17 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
             
             transfers = []
             for t in transfer_data:
-                timestamp = int(datetime.fromisoformat(t['timestamp'].replace('Z', '+00:00')).timestamp())
-                amount = int(t['amount']) / 1e9  # RAO to TAO
-                fee = int(t.get('fee', 0)) / 1e9  # RAO to TAO
-                
-                transfers.append({
-                    'timestamp': timestamp,
-                    'from': t['from']['ss58'],
-                    'to': t['to']['ss58'],
-                    'amount': amount,
-                    'fee': fee,
-                    'block_number': t['block_number'],
-                    'transaction_hash': t['transaction_hash'],
-                    'extrinsic_id': t['extrinsic_id'],
-                    'tao_price_usd': None  # Will be fetched separately if needed
-                })
+                transfer = TaoStatsTransfer(
+                    block_number=t['block_number'],
+                    timestamp=t['timestamp'],
+                    transaction_hash=t['transaction_hash'],
+                    extrinsic_id=t['extrinsic_id'],
+                    amount=t['amount'],
+                    fee=t.get('fee'),
+                    from_address=TaoStatsAddress(ss58=t['from']['ss58'], hex=t['from']['hex']),
+                    to_address=TaoStatsAddress(ss58=t['to']['ss58'], hex=t['to']['hex'])
+                )
+                transfers.append(transfer)
             
             return transfers
         except Exception as e:
@@ -123,7 +125,7 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
         start_time: int,
         end_time: int,
         is_transfer: Optional[bool] = None
-    ) -> List[Dict[str, Any]]:
+    ) -> List[TaoStatsDelegation]:
         """Fetch delegation/stake events via Taostats API.
         
         Args:
@@ -149,25 +151,25 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
             
             delegations = []
             for d in delegation_data:
-                timestamp = int(datetime.fromisoformat(d['timestamp'].replace('Z', '+00:00')).timestamp())
-                tao_amount = float(d['amount']) / 1e9  # RAO to TAO
-                alpha_amount = float(d['alpha']) / 1e9  # RAO to ALPHA
-                
-                delegations.append({
-                    'timestamp': timestamp,
-                    'action': d['action'],
-                    'alpha': alpha_amount,
-                    'tao_amount': tao_amount,
-                    'usd': float(d['usd']),
-                    'alpha_price_in_usd': float(d['alpha_price_in_usd']) if d.get('alpha_price_in_usd') else None,
-                    'alpha_price_in_tao': float(d['alpha_price_in_tao']) if d.get('alpha_price_in_tao') else None,
-                    'slippage': float(d.get('slippage')) if d.get('slippage') is not None else 0.0,
-                    'block_number': d['block_number'],
-                    'extrinsic_id': d['extrinsic_id'],
-                    'is_transfer': d.get('is_transfer'),
-                    'transfer_address': d.get('transfer_address', {}).get('ss58') if d.get('transfer_address') else None,
-                    'fee': float(d.get('fee', 0)) / 1e9
-                })
+                delegation = TaoStatsDelegation(
+                    block_number=int(d['block_number']),
+                    timestamp=d['timestamp'],
+                    action=d['action'],
+                    nominator=TaoStatsAddress(ss58=d['nominator']['ss58'], hex=d['nominator']['hex']),
+                    delegate=TaoStatsAddress(ss58=d['delegate']['ss58'], hex=d['delegate']['hex']),
+                    netuid=int(d['netuid']),
+                    amount=int(d['amount']),
+                    alpha=int(d['alpha']),
+                    usd=float(d['usd']),
+                    alpha_price_in_usd=d.get('alpha_price_in_usd'),
+                    alpha_price_in_tao=d.get('alpha_price_in_tao'),
+                    slippage=d.get('slippage'),
+                    extrinsic_id=d['extrinsic_id'],
+                    is_transfer=d.get('is_transfer'),
+                    transfer_address=TaoStatsAddress(ss58=d['transfer_address']['ss58'], hex=d['transfer_address']['hex']) if d.get('transfer_address') else None,
+                    fee=d.get('fee')
+                )
+                delegations.append(delegation)
             
             return delegations
         except Exception as e:
@@ -182,7 +184,7 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
         coldkey: str,
         start_time: int,
         end_time: int
-    ) -> List[Dict[str, Any]]:
+    ) -> List[TaoStatsStakeBalance]:
         """Fetch historical stake balance snapshots via Taostats API."""
         try:
             url = f"{self.base_url}/dtao/stake_balance/history/v1"
@@ -199,14 +201,17 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
             
             balances = []
             for h in history_data:
-                timestamp = int(datetime.fromisoformat(h['timestamp'].replace('Z', '+00:00')).timestamp())
-                
-                balances.append({
-                    'timestamp': timestamp,
-                    'block_number': h['block_number'],
-                    'alpha_balance': int(h['balance']),  # Keep in RAO for precision
-                    'tao_equivalent': int(h['balance_as_tao'])  # Keep in RAO
-                })
+                balance = TaoStatsStakeBalance(
+                    block_number=h['block_number'],
+                    timestamp=h['timestamp'],
+                    hotkey_name=h['hotkey_name'],
+                    hotkey=TaoStatsAddress(ss58=h['hotkey']['ss58'], hex=h['hotkey']['hex']),
+                    coldkey=TaoStatsAddress(ss58=h['coldkey']['ss58'], hex=h['coldkey']['hex']),
+                    netuid=h['netuid'],
+                    balance=h['balance'],
+                    balance_as_tao=h['balance_as_tao']
+                )
+                balances.append(balance)
             
             return balances
         except Exception as e:

@@ -5,11 +5,168 @@ from typing import List, Optional, Dict, Any
 import json
 
 
+# TaoStats API Response Models
+
+@dataclass
+class TaoStatsAddress:
+    """Represents an address in TaoStats API responses."""
+    ss58: str
+    hex: str
+
+
+@dataclass
+class TaoStatsStakeBalance:
+    """Represents a stake balance history entry from TaoStats API."""
+    block_number: int
+    timestamp: str
+    hotkey_name: str
+    hotkey: TaoStatsAddress
+    coldkey: TaoStatsAddress
+    netuid: int
+    balance: str  # RAO as string
+    balance_as_tao: str  # RAO as string
+    
+    @property
+    def timestamp_unix(self) -> int:
+        """Convert ISO timestamp to Unix timestamp."""
+        return int(datetime.fromisoformat(self.timestamp.replace('Z', '+00:00')).timestamp())
+    
+    @property
+    def balance_rao(self) -> int:
+        """Balance in RAO as integer."""
+        return int(self.balance)
+    
+    @property
+    def balance_tao(self) -> float:
+        """Balance in TAO (converted from RAO)."""
+        return int(self.balance) / 1e9
+    
+    @property
+    def balance_as_tao_rao(self) -> int:
+        """Balance as TAO equivalent in RAO as integer."""
+        return int(self.balance_as_tao)
+    
+    @property
+    def balance_as_tao_float(self) -> float:
+        """Balance as TAO equivalent (converted from RAO)."""
+        return int(self.balance_as_tao) / 1e9
+
+
+@dataclass
+class TaoStatsDelegation:
+    """Represents a delegation event from TaoStats API."""
+    block_number: int
+    timestamp: str
+    action: str
+    nominator: TaoStatsAddress
+    delegate: TaoStatsAddress
+    netuid: int
+    amount: int  # RAO
+    alpha: int  # RAO
+    usd: float
+    alpha_price_in_usd: Optional[float]
+    alpha_price_in_tao: Optional[float]
+    slippage: Optional[float]
+    extrinsic_id: str
+    is_transfer: Optional[bool]
+    transfer_address: Optional[TaoStatsAddress]
+    fee: Optional[int]  # RAO
+    
+    def __post_init__(self):
+        """Convert optional numeric fields to proper types after initialization."""
+        # Convert alpha_price_in_usd to float if not None
+        if self.alpha_price_in_usd is not None and not isinstance(self.alpha_price_in_usd, float):
+            self.alpha_price_in_usd = float(self.alpha_price_in_usd)
+        
+        # Convert alpha_price_in_tao to float if not None
+        if self.alpha_price_in_tao is not None and not isinstance(self.alpha_price_in_tao, float):
+            self.alpha_price_in_tao = float(self.alpha_price_in_tao)
+        
+        # Convert slippage to float if not None
+        if self.slippage is not None and not isinstance(self.slippage, float):
+            self.slippage = float(self.slippage)
+        
+        # Convert fee to int if not None
+        if self.fee is not None and not isinstance(self.fee, int):
+            self.fee = int(self.fee)
+    
+    @property
+    def timestamp_unix(self) -> int:
+        """Convert ISO timestamp to Unix timestamp."""
+        return int(datetime.fromisoformat(self.timestamp.replace('Z', '+00:00')).timestamp())
+    
+    @property
+    def rao(self) -> int:
+        """Amount in RAO as integer."""
+        return int(self.amount)
+    
+    @property
+    def tao(self) -> float:
+        """Amount in TAO (converted from RAO)."""
+        return int(self.amount) / 1e9
+    
+    @property
+    def alpha_float(self) -> float:
+        """Alpha (converted from RAO)."""
+        return int(self.alpha) / 1e9
+    
+    @property
+    def fee_tao(self) -> float:
+        """Fee in TAO (converted from RAO)."""
+        return int(self.fee) / 1e9 if self.fee else 0.0
+
+
+@dataclass
+class TaoStatsTransfer:
+    """Represents a transfer from TaoStats API."""
+    block_number: int
+    timestamp: str
+    transaction_hash: str
+    extrinsic_id: str
+    amount: str  # RAO as string
+    fee: Optional[str]  # RAO as string
+    from_address: TaoStatsAddress  # Note: API uses 'from' key
+    to_address: TaoStatsAddress  # Note: API uses 'to' key
+    
+    @property
+    def timestamp_unix(self) -> int:
+        """Convert ISO timestamp to Unix timestamp."""
+        return int(datetime.fromisoformat(self.timestamp.replace('Z', '+00:00')).timestamp())
+    
+    @property
+    def amount_rao(self) -> int:
+        """Amount in RAO as integer."""
+        return int(self.amount)
+    
+    @property
+    def amount_tao(self) -> float:
+        """Amount in TAO (converted from RAO)."""
+        return int(self.amount) / 1e9
+    
+    @property
+    def fee_rao(self) -> int:
+        """Fee in RAO as integer."""
+        return int(self.fee) if self.fee else 0
+    
+    @property
+    def fee_tao(self) -> float:
+        """Fee in TAO (converted from RAO)."""
+        return int(self.fee) / 1e9 if self.fee else 0.0
+
+
+# Business Logic Models
+
 class SourceType(Enum):
     """Income source type for ALPHA lots."""
     CONTRACT = "Contract"
     STAKING = "Staking"
     MINING = "Mining"
+
+
+class CostBasisMethod(Enum):
+    """Cost basis calculation method for lot consumption."""
+    FIFO = "FIFO"  # First In First Out
+    HIFO = "HIFO"  # Highest In First Out
 
 
 class LotStatus(Enum):
