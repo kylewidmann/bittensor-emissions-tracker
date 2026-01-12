@@ -49,10 +49,11 @@ class MockTaoStatsClient(WalletClientInterface, PriceClient):
         with open(TEST_DATA_DIR / "stake_balance.json") as f:
             self._raw_stake_balance = json.load(f)["data"]
         
-        # Load price data
+        # Load price data (dict with dates as keys)
         with open(TEST_DATA_DIR / "historical_tao_prices.json") as f:
-            price_data = json.load(f)
-            self._raw_prices = price_data.get("data", [])
+            price_dict = json.load(f)
+            # Convert dict to list for easier searching
+            self._raw_prices = list(price_dict.values())
     
     @property
     def name(self) -> str:
@@ -255,9 +256,7 @@ class MockTaoStatsClient(WalletClientInterface, PriceClient):
         # Find closest price by timestamp
         closest = min(
             self._raw_prices,
-            key=lambda p: abs(
-                int(datetime.fromisoformat(p['created_at'].replace('Z', '+00:00')).timestamp()) - timestamp
-            )
+            key=lambda p: abs(p['timestamp'] - timestamp)
         )
         
         return float(closest['price'])
@@ -269,9 +268,7 @@ class MockTaoStatsClient(WalletClientInterface, PriceClient):
         
         filtered = []
         for price_data in self._raw_prices:
-            price_ts = int(datetime.fromisoformat(
-                price_data['created_at'].replace('Z', '+00:00')
-            ).timestamp())
+            price_ts = price_data['timestamp']
             
             if start_time <= price_ts <= end_time:
                 filtered.append({
@@ -290,10 +287,7 @@ class MockTaoStatsClient(WalletClientInterface, PriceClient):
             raise PriceNotAvailableError("No price data available")
         
         # Get most recent price
-        latest = max(
-            self._raw_prices,
-            key=lambda p: datetime.fromisoformat(p['created_at'].replace('Z', '+00:00')).timestamp()
-        )
+        latest = max(self._raw_prices, key=lambda p: p['timestamp'])
         
         return float(latest['price'])
 

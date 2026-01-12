@@ -1,7 +1,5 @@
 """Unit tests for contract income processing."""
-import json
 from datetime import datetime
-from pathlib import Path
 from unittest.mock import patch
 import pytest
 
@@ -56,29 +54,11 @@ def filter_contract_income_events(
     return filtered_events
 
 
-@pytest.fixture
-def tracker(mock_taostats_client) -> BittensorEmissionTracker   :
-    """Create tracker instance with properly mocked dependencies."""
-    # Create tracker normally through __init__
-    tracker = BittensorEmissionTracker(
-        price_client=mock_taostats_client,
-        wallet_client=mock_taostats_client,
-        tracking_hotkey=TEST_VALIDATOR_SS58,
-        coldkey=TEST_PAYOUT_COLDKEY_SS58,
-        sheet_id=TEST_TRACKER_SHEET_ID,
-        label="Test Tracker",
-        smart_contract_address=TEST_SMART_CONTRACT_SS58,
-        income_source=SourceType.CONTRACT
-    )
-    
-    return tracker
-
-
 @pytest.mark.parametrize("start_date,end_date", [
     (datetime(2025, 11, 1), datetime(2025, 11, 30, 23, 59, 59)),
     (datetime(2025, 10, 1), datetime(2025, 10, 31, 23, 59, 59)),
 ])
-def test_process_contract_income(tracker, raw_stake_events, start_date, end_date):
+def test_process_contract_income(contract_tracker, raw_stake_events, start_date, end_date):
     """Test contract income processing for a given date range."""
     # Filter raw events for contract income in the date range
     # Must match the same filters that the API client uses
@@ -102,8 +82,8 @@ def test_process_contract_income(tracker, raw_stake_events, start_date, end_date
     end_time = int(end_date.timestamp())
     lookback_days = (end_date - start_date).days + 1
     
-    with patch.object(tracker, '_resolve_time_window', return_value=(start_time, end_time)):
-        new_lots = tracker.process_contract_income(lookback_days=lookback_days)
+    with patch.object(contract_tracker, '_resolve_time_window', return_value=(start_time, end_time)):
+        new_lots = contract_tracker.process_contract_income(lookback_days=lookback_days)
     
     # Get actual results from returned lots
     actual_count = len(new_lots)

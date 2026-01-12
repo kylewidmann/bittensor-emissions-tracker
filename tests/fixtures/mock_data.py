@@ -9,3 +9,10 @@ def raw_stake_events():
     data_path = Path(__file__).parent.parent / "data" / "all" / "stake_events.json"
     with open(data_path) as f:
         return json.load(f)["data"]
+
+@pytest.fixture
+def raw_stake_balance():
+    """Load raw stake balance history from test data."""
+    data_path = Path(__file__).parent.parent / "data" / "all" / "stake_balance.json"
+    with open(data_path) as f:
+        return json.load(f)["data"]

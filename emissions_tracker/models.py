@@ -15,6 +15,13 @@ class TaoStatsAddress:
 
 
 @dataclass
+class DailyBalance:
+    """Represents the last balance snapshot for a given day."""
+    day: str  # Date in 'YYYY-MM-DD' format
+    balance: 'TaoStatsStakeBalance'  # The balance snapshot for this day
+
+
+@dataclass
 class TaoStatsStakeBalance:
     """Represents a stake balance history entry from TaoStats API."""
     block_number: int
