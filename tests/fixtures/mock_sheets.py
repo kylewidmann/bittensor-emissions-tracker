@@ -24,6 +24,8 @@ from typing import List, Dict, Any, Optional
 from unittest.mock import patch, MagicMock
 from dataclasses import dataclass, field
 
+from tests.fixtures.mock_config import TEST_PAYOUT_COLDKEY_SS58, TEST_SMART_CONTRACT_SS58, TEST_SUBNET_ID, TEST_VALIDATOR_SS58
+
 
 def column_letter_to_index(letters: str) -> int:
     """Convert Excel-style column letters to 0-based index."""
@@ -661,3 +663,47 @@ def seed_historical_lots(mock_sheets, raw_stake_balance, raw_stake_events, raw_h
                 lot_counter += 1
     
     return _seed_lots
+
+
+@pytest.fixture()
+def seed_contract_sheets(seed_historical_lots, mock_sheets):
+    """
+    Fixture that seeds mock sheets with historical data based on test parameters.
+    Returns a function that takes test params and seeds the sheets.
+    """
+    def _seed_sheets(start_date, end_date, sheet_id):
+        """Seed the Income sheet with historical ALPHA lots for the test period."""
+        
+        # seed_historical_lots now uses historical TAO prices and derives opening balance from account_history.json
+        # It also includes contract income when contract parameters are provided
+        seed_historical_lots(
+            sheet_id=sheet_id,
+            start_date=start_date,
+            end_date=end_date,
+            include_opening_lot=True,
+            contract_address=TEST_SMART_CONTRACT_SS58,
+            netuid=TEST_SUBNET_ID,
+            delegate=TEST_VALIDATOR_SS58,
+            nominator=TEST_PAYOUT_COLDKEY_SS58
+        )
+
+                # Read back the seeded lots from the Income sheet
+        spreadsheet = mock_sheets.client.spreadsheets.get(sheet_id)
+        income_sheet = spreadsheet.worksheet("Income")
+        lot_rows = income_sheet.get_all_records()
+        
+        # Convert to dict format for consumption tracking
+        alpha_lots = []
+        for row in lot_rows:
+            alpha_lots.append({
+                'lot_id': row['Lot ID'],
+                'timestamp': int(datetime.fromisoformat(row['Date']).timestamp()) if isinstance(row['Date'], str) else row['Date'],
+                'alpha_quantity': float(row['Alpha Quantity']),
+                'alpha_remaining': float(row['Alpha Remaining']),
+                'usd_fmv': float(row['USD FMV']),
+                'usd_per_alpha': float(row['USD FMV']) / float(row['Alpha Quantity']) if float(row['Alpha Quantity']) > 0 else 0,
+            })
+        
+        return alpha_lots
+    
+    return _seed_sheets

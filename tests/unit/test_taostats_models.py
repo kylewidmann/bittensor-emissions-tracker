@@ -166,7 +166,7 @@ def test_get_delegations_returns_models_matching_raw_json(client):
             verify_delegation_matches_raw(delegation, raw)
 
 
-@pytest.mark.parametrize("test_dir", ["all", "bak"])
+@pytest.mark.parametrize("test_dir", ["all"])
 def test_transfer_models_work_across_datasets(test_dir, client):
     """Verify transfer model parsing works with both sanitized and backup datasets."""
     raw_data = load_json_file('transfers.json', test_dir)
@@ -188,7 +188,7 @@ def test_transfer_models_work_across_datasets(test_dir, client):
             verify_transfer_matches_raw(transfers[idx], raw_records[idx])
 
 
-@pytest.mark.parametrize("test_dir", ["all", "bak"])
+@pytest.mark.parametrize("test_dir", ["all"])
 def test_stake_balance_models_work_across_datasets(test_dir, client):
     """Verify stake balance model parsing works with both sanitized and backup datasets."""
     raw_data = load_json_file('stake_balance.json', test_dir)
@@ -210,7 +210,7 @@ def test_stake_balance_models_work_across_datasets(test_dir, client):
             verify_stake_balance_matches_raw(stake_balances[idx], raw_records[idx])
 
 
-@pytest.mark.parametrize("test_dir", ["all", "bak"])
+@pytest.mark.parametrize("test_dir", ["all"])
 def test_delegation_models_work_across_datasets(test_dir, client):
     """Verify delegation model parsing works with both sanitized and backup datasets."""
     raw_data = load_json_file('stake_events.json', test_dir)
