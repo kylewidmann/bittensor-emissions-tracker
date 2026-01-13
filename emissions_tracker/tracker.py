@@ -12,15 +12,14 @@ import time
 import backoff
 from typing import List, Dict, Any, Optional, Tuple
 from collections import defaultdict
-from collections import defaultdict
 
 from emissions_tracker.clients.price import PriceClient
 from emissions_tracker.clients.wallet import WalletClientInterface
 from emissions_tracker.config import TrackerSettings, WaveAccountSettings
 from emissions_tracker.exceptions import PriceNotAvailableError, InsufficientLotsError
 from emissions_tracker.models import (
-    AlphaLot, TaoLot, AlphaSale, TaoTransfer, Expense, JournalEntry,
-    LotConsumption, SourceType, LotStatus, GainType
+    AlphaLot, TaoLot, AlphaSale, TaoStatsDelegation, TaoTransfer, Expense, JournalEntry,
+    LotConsumption, SourceType, LotStatus, GainType, CostBasisMethod, DailyBalance
 )
 
 SECONDS_PER_DAY = 86400
@@ -446,9 +445,9 @@ class BittensorEmissionTracker:
             r for r in records 
             if r['Status'] in ('Open', 'Partial') and r['Alpha Remaining'] > 0
         ]
-        # Support configurable lot consumption strategies. Default is FIFO (old behavior).
-        strategy = getattr(self.config, 'lot_strategy', 'FIFO')
-        if isinstance(strategy, str) and strategy.upper() == 'HIFO':
+        # Support configurable lot consumption strategies. Default is HIFO.
+        strategy = self.config.lot_strategy
+        if strategy == CostBasisMethod.HIFO:
             # Highest cost-basis first: compute USD per ALPHA from sheet fields when available.
             def _unit_price(l):
                 try:
@@ -559,9 +558,9 @@ class BittensorEmissionTracker:
             if lot['Status'] in ('Open', 'Partial') and lot['Alpha Remaining'] > 0
         ]
         
-        # Sort by strategy (FIFO by default)
-        strategy = getattr(self.config, 'lot_strategy', 'FIFO')
-        if isinstance(strategy, str) and strategy.upper() == 'HIFO':
+        # Sort by strategy (HIFO by default)
+        strategy = self.config.lot_strategy
+        if strategy == CostBasisMethod.HIFO:
             def _unit_price(l):
                 try:
                     qty = l.get('Alpha Quantity') or 0
@@ -696,8 +695,8 @@ class BittensorEmissionTracker:
                 lot['_row_num'] = idx
                 open_lots.append(lot)
         # Ordering depends on lot strategy: FIFO (by timestamp) or HIFO (by USD basis per TAO desc)
-        strategy = getattr(self.config, 'lot_strategy', 'FIFO')
-        if isinstance(strategy, str) and strategy.upper() == 'HIFO':
+        strategy = self.config.lot_strategy
+        if strategy == CostBasisMethod.HIFO:
             def _unit_price_tao(l):
                 try:
                     qty = l.get('TAO Quantity') or 0
@@ -794,9 +793,9 @@ class BittensorEmissionTracker:
             and (as_of_timestamp is None or lot['Timestamp'] <= as_of_timestamp)
         ]
         
-        # Sort by strategy (FIFO by default)
-        strategy = getattr(self.config, 'lot_strategy', 'FIFO')
-        if isinstance(strategy, str) and strategy.upper() == 'HIFO':
+        # Sort by strategy (HIFO by default)
+        strategy = self.config.lot_strategy
+        if strategy == CostBasisMethod.HIFO:
             def _unit_price_tao(l):
                 try:
                     qty = l.get('TAO Quantity') or 0
@@ -977,7 +976,7 @@ class BittensorEmissionTracker:
         
         print(f"Fetching delegations from {datetime.fromtimestamp(start_time)} to {datetime.fromtimestamp(end_time)}")
 
-        delegations = self._timed_call(
+        delegations: list[TaoStatsDelegation] = self._timed_call(
             "delegations (contract)",
             self.wallet_client.get_delegations,
             netuid=self.subnet_id,
@@ -993,10 +992,10 @@ class BittensorEmissionTracker:
             # Filter: DELEGATE events from smart contract
             # is_transfer=True means ALPHA was transferred from another wallet (smart contract)
             # while remaining delegated to the validator
-            if (d['action'] == 'DELEGATE' and 
-                d.get('is_transfer') == True and 
-                d.get('transfer_address') == self.smart_contract_address and
-                d['timestamp'] > self.last_contract_income_timestamp):
+            if (d.action == 'DELEGATE' and 
+                d.is_transfer == True and 
+                d.transfer_address.ss58 == self.smart_contract_address and
+                d.timestamp_unix > self.last_contract_income_timestamp):
                 
                 lot = self._create_alpha_lot_from_delegation(d, SourceType.CONTRACT)
                 if lot:
@@ -1049,7 +1048,7 @@ class BittensorEmissionTracker:
         # Guard against providers returning data outside requested window
         balances = [
             b for b in balances
-            if start_time <= b.get('timestamp', 0) <= end_time
+            if start_time <= b.timestamp_unix <= end_time
         ]
         
         if not balances:
@@ -1069,26 +1068,11 @@ class BittensorEmissionTracker:
         )
         delegations = [
             d for d in delegations
-            if start_time <= d.get('timestamp', 0) <= end_time
+            if start_time <= d.timestamp_unix <= end_time
         ]
         
-        # Build list of delegation events with timestamps for windowed lookup
-        delegation_events = []
-        for d in delegations:
-            if d['action'] == 'DELEGATE' and d.get('is_transfer') == True:
-                delegation_events.append({
-                    'timestamp': d['timestamp'],
-                    'alpha': d['alpha'],
-                    'action': 'DELEGATE'
-                })
-            elif d['action'] == 'UNDELEGATE':
-                delegation_events.append({
-                    'timestamp': d['timestamp'],
-                    'alpha': d['alpha'],
-                    'action': 'UNDELEGATE'
-                })
-        
-        delegation_events = sorted(delegation_events, key=lambda x: x['timestamp'])
+        # Sort delegation events by timestamp for windowed lookup
+        delegation_events = sorted(delegations, key=lambda d: d.timestamp_unix)
         
         # Preload prices for the full window to minimize API calls (15m granularity)
         price_points = []
@@ -1109,43 +1093,65 @@ class BittensorEmissionTracker:
             return self.get_tao_price(ts)
         
         # Calculate emissions as balance increases not explained by DELEGATEs
-        balances = sorted(balances, key=lambda b: b['timestamp'])
+        # Group by calendar day to create one lot per day
+        balances = sorted(balances, key=lambda b: b.timestamp_unix)
+        
+        # Group balances by day, keeping only the last balance of each day
+        balances_by_day = defaultdict(list)
+        for balance in balances:
+            if balance.timestamp_unix <= self.last_staking_income_timestamp:
+                continue
+            dt = datetime.fromtimestamp(balance.timestamp_unix)
+            day_key = dt.strftime('%Y-%m-%d')
+            balances_by_day[day_key].append(balance)
+        
+        # Get last balance for each day (sorted by timestamp)
+        daily_balances = []
+        for day_key in sorted(balances_by_day.keys()):
+            day_balances = sorted(balances_by_day[day_key], key=lambda b: b.timestamp_unix)
+            last_balance = day_balances[-1]  # Use last balance of the day
+            daily_balances.append(DailyBalance(
+                day=day_key,
+                balance=last_balance
+            ))
+        
+        # Group delegation events by day
+        delegation_events_by_day = defaultdict(list)
+        for event in delegation_events:
+            dt = datetime.fromtimestamp(event.timestamp_unix)
+            day_key = dt.strftime('%Y-%m-%d')
+            delegation_events_by_day[day_key].append(event)
+        
         new_lots = []
-        total_balances = len(balances)
         pending_rows = []
+        total_days = len(daily_balances) - 1  # -1 because we skip first day
+        processed_days = 0
         last_progress_log = time.time()
         
-        for i, balance in enumerate(balances):
-            if balance['timestamp'] <= self.last_staking_income_timestamp:
-                # Skip already-processed windows
-                self._log(f"Skipping balance at {datetime.fromtimestamp(balance['timestamp'])} because <= last_staking_income_timestamp ({self.last_staking_income_timestamp})")
-                continue
-
-            if i == 0:
-                # Need previous balance to calculate delta
-                self._log(f"Skipping first balance point at {datetime.fromtimestamp(balance['timestamp'])} (no previous sample)")
-                continue
+        # Compare consecutive days
+        for i in range(1, len(daily_balances)):
+            processed_days += 1
+            prev_day = daily_balances[i - 1]
+            curr_day = daily_balances[i]
             
-            prev_balance = balances[i - 1]
-            alpha_now = balance['alpha_balance'] / 1e9
-            alpha_prev = prev_balance['alpha_balance'] / 1e9
-            balance_change = alpha_now - alpha_prev
+            prev_balance = prev_day.balance
+            curr_balance = curr_day.balance
             
-            if balance_change == 0:
-                continue
+            # Calculate balance change from end of previous day to end of current day
+            alpha_prev = prev_balance.balance_rao / 1e9
+            alpha_curr = curr_balance.balance_rao / 1e9
+            balance_change = alpha_curr - alpha_prev
             
-            # Find all delegation events between prev_balance and this balance timestamps
-            window_start = prev_balance['timestamp']
-            window_end = balance['timestamp']
+            # Get all delegation events for current day
+            day_events = delegation_events_by_day.get(curr_day.day, [])
             
             delegate_inflow = 0.0
             undelegate_outflow = 0.0
-            for event in delegation_events:
-                if window_start < event['timestamp'] <= window_end:
-                    if event['action'] == 'DELEGATE':
-                        delegate_inflow += event['alpha']
-                    elif event['action'] == 'UNDELEGATE':
-                        undelegate_outflow += event['alpha']
+            for event in day_events:
+                if event.action == 'DELEGATE':
+                    delegate_inflow += event.alpha_float
+                elif event.action == 'UNDELEGATE':
+                    undelegate_outflow += event.alpha_float
             
             # Emissions = balance_change - delegate_inflow + undelegate_outflow
             # (balance went up by balance_change, subtract delegates that contributed,
@@ -1153,46 +1159,45 @@ class BittensorEmissionTracker:
             emissions = balance_change - delegate_inflow + undelegate_outflow
             
             if emissions > 0.0001:  # Minimum threshold to avoid noise
-                # Get TAO price for FMV calculation
-                tao_price = get_price_for(balance['timestamp'])
+                # Get TAO price for FMV calculation (use current day's balance timestamp)
+                tao_price = get_price_for(curr_balance.timestamp_unix)
                 if not tao_price:
-                    print(f"  Warning: Could not get price for block {balance['block_number']}, skipping")
+                    print(f"  Warning: Could not get price for {curr_day.day}, skipping")
                     continue
                 
-                # Calculate FMV using TAO equivalent ratio
-                tao_ratio = balance['tao_equivalent'] / balance['alpha_balance'] if balance['alpha_balance'] > 0 else 0
+                # Calculate FMV using TAO equivalent ratio from current balance
+                tao_ratio = curr_balance.balance_as_tao_rao / curr_balance.balance_rao if curr_balance.balance_rao > 0 else 0
                 tao_equivalent = emissions * tao_ratio
                 usd_fmv = tao_equivalent * tao_price
                 usd_per_alpha = usd_fmv / emissions if emissions > 0 else 0
                 
                 # Log computed emission details for debugging/diagnosis
                 self._log(
-                    f"Emission detected — ts={balance['timestamp']} block={balance['block_number']} delta={balance_change:.6f} delegates_in={delegate_inflow:.6f} undelegates_out={undelegate_outflow:.6f} tao_eq={tao_equivalent:.6f} tao_price={tao_price:.4f} usd_fmv={usd_fmv:.2f}"
+                    f"Emission for {curr_day.day} — block={curr_balance.block_number} delta={balance_change:.6f} delegates_in={delegate_inflow:.6f} undelegates_out={undelegate_outflow:.6f} tao_eq={tao_equivalent:.6f} tao_price={tao_price:.4f} usd_fmv={usd_fmv:.2f}"
                 )
 
                 lot = AlphaLot(
                     lot_id=self._next_alpha_lot_id(),
-                    timestamp=balance['timestamp'],
-                    block_number=balance['block_number'],
+                    timestamp=curr_balance.timestamp_unix,
+                    block_number=curr_balance.block_number,
                     source_type=self.income_source,
                     alpha_quantity=emissions,
                     alpha_remaining=emissions,
                     usd_fmv=usd_fmv,
                     usd_per_alpha=usd_per_alpha,
                     tao_equivalent=tao_equivalent,
-                    notes=f"{self.income_source.value} emissions (balance delta: {balance_change:.4f}, delegates: {delegate_inflow:.4f}, undelegates: {undelegate_outflow:.4f})"
+                    notes=f"{self.income_source.value} emissions for {curr_day.day} (balance delta: {balance_change:.4f}, delegates: {delegate_inflow:.4f}, undelegates: {undelegate_outflow:.4f})"
                 )
                 
                 # Collect for batch append to avoid duplicate writes and rate limits
                 pending_rows.append(lot.to_sheet_row())
                 new_lots.append(lot)
-                self._log(f"Prepared emission lot {lot.lot_id} — {emissions:.4f} ALPHA (${usd_fmv:.2f}) at block {balance['block_number']}")
+                self._log(f"Prepared emission lot {lot.lot_id} for {curr_day.day} — {emissions:.4f} ALPHA (${usd_fmv:.2f})")
             
             # Periodic progress indicator to show the loop is advancing
-            if (i % 100 == 0) or (time.time() - last_progress_log > 5):
-                pct = (i + 1) / total_balances * 100 if total_balances else 100
-                ts_readable = datetime.fromtimestamp(balance['timestamp']).strftime('%Y-%m-%d %H:%M:%S')
-                print(f"    Progress: {i + 1}/{total_balances} ({pct:.1f}%) — up to {ts_readable}")
+            if (processed_days % 10 == 0) or (time.time() - last_progress_log > 5):
+                pct = processed_days / total_days * 100 if total_days else 100
+                print(f"    Progress: {processed_days}/{total_days} days ({pct:.1f}%) — processed {curr_day.day}")
                 last_progress_log = time.time()
         
         if new_lots:
@@ -1215,31 +1220,31 @@ class BittensorEmissionTracker:
         
         return new_lots
     
-    def _create_alpha_lot_from_delegation(self, delegation: Dict[str, Any], source_type: SourceType) -> Optional[AlphaLot]:
+    def _create_alpha_lot_from_delegation(self, delegation: TaoStatsDelegation, source_type: SourceType) -> Optional[AlphaLot]:
         """Create an ALPHA lot from a delegation event."""
-        alpha_amount = delegation['alpha']  # in RAO
-        usd_value = delegation['usd']
+        alpha_amount = delegation.alpha  # in RAO
+        usd_value = delegation.usd
         # Calculate USD per RAO (not per full ALPHA token)
         # If API provides alpha_price_in_usd, it's per full ALPHA, so divide by 1e9 to get per RAO
-        alpha_price_usd = delegation.get('alpha_price_in_usd')
+        alpha_price_usd = delegation.alpha_price_in_usd
         if alpha_price_usd:
             usd_per_alpha_rao = alpha_price_usd / RAO_PER_TAO  # Convert from per-ALPHA to per-RAO
         else:
             usd_per_alpha_rao = usd_value / alpha_amount if alpha_amount > 0 else 0
-        tao_equivalent = delegation['tao_amount']
+        tao_equivalent = delegation.tao
         
         lot = AlphaLot(
             lot_id=self._next_alpha_lot_id(),
-            timestamp=delegation['timestamp'],
-            block_number=delegation['block_number'],
+            timestamp=delegation.timestamp_unix,
+            block_number=delegation.block_number,
             source_type=source_type,
             alpha_quantity=alpha_amount,
             alpha_remaining=alpha_amount,
             usd_fmv=usd_value,
             usd_per_alpha=usd_per_alpha_rao,
             tao_equivalent=tao_equivalent,
-            extrinsic_id=delegation.get('extrinsic_id'),
-            transfer_address=delegation.get('transfer_address'),
+            extrinsic_id=delegation.extrinsic_id,
+            transfer_address=delegation.transfer_address.ss58,
             notes=f"{source_type.value} income"
         )
         
@@ -1289,9 +1294,9 @@ class BittensorEmissionTracker:
         for d in delegations:
             # Filter: UNDELEGATE events (user-initiated unstakes)
             # is_transfer=null indicates user-initiated (not a transfer to another address)
-            if (d['action'] == 'UNDELEGATE' and 
-                d.get('is_transfer') is None and
-                d['timestamp'] > self.last_sale_timestamp):
+            if (d.action == 'UNDELEGATE' and 
+                d.is_transfer is None and
+                d.timestamp_unix > self.last_sale_timestamp):
                 
                 sale, tao_lot, lot_updates = self._process_undelegate(d, alpha_lots_cache=alpha_lots_cache)
                 if sale:
@@ -1317,16 +1322,16 @@ class BittensorEmissionTracker:
         
         return new_sales
     
-    def _process_undelegate(self, delegation: Dict[str, Any], alpha_lots_cache: Optional[List[Dict[str, Any]]] = None) -> Optional[Tuple[AlphaSale, TaoLot, List[Dict[str, Any]]]]:
+    def _process_undelegate(self, delegation: TaoStatsDelegation, alpha_lots_cache: Optional[List[Dict[str, Any]]] = None) -> Optional[Tuple[AlphaSale, TaoLot, List[Dict[str, Any]]]]:
         """Process an UNDELEGATE event into a sale.
         
         Returns:
             Tuple of (sale, tao_lot, lot_updates) or None if processing fails
         """
-        alpha_disposed = delegation['alpha']
-        tao_received = delegation['tao_amount']
-        slippage_ratio = delegation.get('slippage') or 0.0
-        alpha_price_in_tao = delegation.get('alpha_price_in_tao')
+        alpha_disposed = delegation.alpha_float
+        tao_received = delegation.tao
+        slippage_ratio = delegation.slippage or 0.0
+        alpha_price_in_tao = delegation.alpha_price_in_tao
         tao_expected_from_price = None
         if alpha_price_in_tao:
             tao_expected_from_price = alpha_disposed * alpha_price_in_tao
@@ -1345,21 +1350,21 @@ class BittensorEmissionTracker:
         tao_slippage = (tao_expected - tao_received) if (tao_expected is not None and tao_received is not None) else 0.0
         
         # Determine USD proceeds / TAO price using Taostats data first
-        usd_proceeds = delegation.get('usd') or 0.0
+        usd_proceeds = delegation.usd or 0.0
         tao_price = 0.0
         if usd_proceeds and tao_received:
             tao_price = usd_proceeds / tao_received
         else:
-            tao_price = self.get_tao_price(delegation['timestamp'])
+            tao_price = self.get_tao_price(delegation.timestamp_unix)
             if not tao_price:
-                print(f"  Warning: Could not get TAO price for UNDELEGATE at {delegation['timestamp']}")
+                print(f"  Warning: Could not get TAO price for UNDELEGATE at {delegation.timestamp_unix}")
                 return None
             usd_proceeds = tao_received * tao_price
 
         slippage_usd = tao_slippage * tao_price if tao_price and tao_slippage else 0.0
 
-        # Fee is already in TAO (converted by the client), don't convert again
-        fee_tao = delegation.get('fee', 0)
+        # Fee is already in TAO (converted via property)
+        fee_tao = delegation.fee_tao
         fee_usd = fee_tao * tao_price if tao_price else 0.0
         
         # Consume ALPHA lots - use cache if provided (batch mode), otherwise read from sheets
@@ -1387,20 +1392,20 @@ class BittensorEmissionTracker:
         
         tao_lot = TaoLot(
             lot_id=tao_lot_id,
-            timestamp=delegation['timestamp'],
-            block_number=delegation['block_number'],
+            timestamp=delegation.timestamp_unix,
+            block_number=delegation.block_number,
             tao_quantity=tao_net,
             tao_remaining=tao_net,
             usd_basis=usd_basis_net,  # Basis is FMV at time of receipt, minus fee
             usd_per_tao=tao_price,
             source_sale_id=sale_id,
-            extrinsic_id=delegation.get('extrinsic_id')
+            extrinsic_id=delegation.extrinsic_id
         )
         # Create sale record
         sale = AlphaSale(
             sale_id=sale_id,
-            timestamp=delegation['timestamp'],
-            block_number=delegation['block_number'],
+            timestamp=delegation.timestamp_unix,
+            block_number=delegation.block_number,
             alpha_disposed=alpha_disposed,
             tao_received=tao_received,
             tao_price_usd=tao_price,
@@ -1416,7 +1421,7 @@ class BittensorEmissionTracker:
             network_fee_usd=fee_usd,
             consumed_lots=consumed_lots,
             created_tao_lot_id=tao_lot_id,
-            extrinsic_id=delegation.get('extrinsic_id')
+            extrinsic_id=delegation.extrinsic_id
         )
         
         # Batch mode: defer writes, return objects for caller to batch
@@ -1490,10 +1495,10 @@ class BittensorEmissionTracker:
         for d in delegations:
             # Filter: UNDELEGATE events with is_transfer=True to a non-smart-contract address
             # These are payments/transfers to other entities (not user-initiated sales)
-            if (d['action'] == 'UNDELEGATE' and 
-                d.get('is_transfer') == True and
-                d.get('transfer_address') != self.smart_contract_address and
-                d['timestamp'] > self.last_expense_timestamp):
+            if (d.action == 'UNDELEGATE' and 
+                d.is_transfer == True and
+                d.transfer_address != self.smart_contract_address and
+                d.timestamp_unix > self.last_expense_timestamp):
                 
                 expense, lot_updates = self._process_expense_undelegate(d, alpha_lots_cache=alpha_lots_cache)
                 if expense:
@@ -1518,7 +1523,7 @@ class BittensorEmissionTracker:
         
         return new_expenses
     
-    def _process_expense_undelegate(self, delegation: Dict[str, Any], alpha_lots_cache: Optional[List[Dict[str, Any]]] = None) -> Optional[Tuple[Expense, List[Dict[str, Any]]]]:
+    def _process_expense_undelegate(self, delegation: TaoStatsDelegation, alpha_lots_cache: Optional[List[Dict[str, Any]]] = None) -> Optional[Tuple[Expense, List[Dict[str, Any]]]]:
         """Process an UNDELEGATE expense event (direct ALPHA transfer payment to another entity).
         
         These are direct ALPHA transfers with NO TAO involved.
@@ -1527,18 +1532,14 @@ class BittensorEmissionTracker:
         Returns:
             Tuple of (expense, lot_updates) or None if processing fails
         """
-        alpha_disposed = delegation['alpha']
+        alpha_disposed = delegation.alpha_float
         
-        # Extract transfer address
-        transfer_address_data = delegation.get('transfer_address')
-        if isinstance(transfer_address_data, dict):
-            transfer_address = transfer_address_data.get('ss58', '')
-        else:
-            transfer_address = transfer_address_data or ''
+        # Extract transfer address (convert TaoStatsAddress to string)
+        transfer_address = delegation.transfer_address.ss58 if delegation.transfer_address else ''
         
         # Calculate USD proceeds based on ALPHA's FMV
         # Use the 'usd' field if available (from taostats), otherwise calculate from ALPHA price
-        usd_proceeds = delegation.get('usd') or 0.0
+        usd_proceeds = delegation.usd or 0.0
         alpha_price_usd = 0.0
         
         if usd_proceeds and alpha_disposed:
@@ -1546,22 +1547,22 @@ class BittensorEmissionTracker:
         else:
             # Get ALPHA price in USD via TAO
             # ALPHA price = (ALPHA/TAO ratio) × (TAO/USD price)
-            alpha_price_in_tao = delegation.get('alpha_price_in_tao')
+            alpha_price_in_tao = delegation.alpha_price_in_tao
             if alpha_price_in_tao:
-                tao_price = self.get_tao_price(delegation['timestamp'])
+                tao_price = self.get_tao_price(delegation.timestamp_unix)
                 if not tao_price:
-                    print(f"  Warning: Could not get TAO price for expense at {delegation['timestamp']}")
+                    print(f"  Warning: Could not get TAO price for expense at {delegation.timestamp_unix}")
                     return None
                 alpha_price_usd = alpha_price_in_tao * tao_price
                 usd_proceeds = alpha_disposed * alpha_price_usd
             else:
-                print(f"  Warning: Could not determine ALPHA price for expense at {delegation['timestamp']}")
+                print(f"  Warning: Could not determine ALPHA price for expense at {delegation.timestamp_unix}")
                 return None
 
         # Network fee (in ALPHA, already provided in USD if available)
-        fee_usd = delegation.get('fee_usd', 0.0)
+        fee_usd = 0.0  # TaoStatsDelegation doesn't have fee_usd field
         if not fee_usd:
-            fee_alpha = delegation.get('fee', 0.0)
+            fee_alpha = delegation.fee_tao  # Already converted to TAO via property
             fee_usd = fee_alpha * alpha_price_usd if alpha_price_usd else 0.0
         
         # Consume ALPHA lots
@@ -1583,8 +1584,8 @@ class BittensorEmissionTracker:
         # No TAO involved, so tao_received=0, tao_price_usd=0, created_tao_lot_id=""
         expense = Expense(
             expense_id=expense_id,
-            timestamp=delegation['timestamp'],
-            block_number=delegation['block_number'],
+            timestamp=delegation.timestamp_unix,
+            block_number=delegation.block_number,
             transfer_address=transfer_address,
             category="",  # User must categorize
             alpha_disposed=alpha_disposed,
@@ -1602,7 +1603,7 @@ class BittensorEmissionTracker:
             network_fee_usd=fee_usd,
             consumed_lots=consumed_lots,
             created_tao_lot_id="",  # No TAO lot created
-            extrinsic_id=delegation.get('extrinsic_id'),
+            extrinsic_id=delegation.extrinsic_id,
             notes=f"Direct ALPHA transfer (no TAO involved)"
         )
         
