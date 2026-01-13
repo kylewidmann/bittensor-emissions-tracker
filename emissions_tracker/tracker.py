@@ -18,7 +18,7 @@ from emissions_tracker.clients.wallet import WalletClientInterface
 from emissions_tracker.config import TrackerSettings, WaveAccountSettings
 from emissions_tracker.exceptions import PriceNotAvailableError, InsufficientLotsError
 from emissions_tracker.models import (
-    AlphaLot, TaoLot, AlphaSale, TaoStatsDelegation, TaoTransfer, Expense, JournalEntry,
+    AlphaLot, TaoLot, AlphaSale, TaoStatsDelegation, TaoStatsTransfer, TaoTransfer, Expense, JournalEntry,
     LotConsumption, SourceType, LotStatus, GainType, CostBasisMethod, DailyBalance
 )
 
@@ -1648,12 +1648,12 @@ class BittensorEmissionTracker:
         )
 
         # Enforce window locally (some providers ignore filters)
-        all_transfers = [t for t in all_transfers if start_time <= t.get('timestamp', 0) <= end_time]
+        all_transfers = [t for t in all_transfers if start_time <= t.timestamp_unix <= end_time]
 
         # Group transfers by extrinsic_id when available, otherwise by (block_number, timestamp)
-        groups: Dict[Any, List[Dict[str, Any]]] = {}
+        groups: Dict[Any, List[TaoStatsTransfer]] = {}
         for t in all_transfers:
-            key = t.get('extrinsic_id') or t.get('transaction_hash') or (t.get('block_number'), t.get('timestamp'))
+            key = t.extrinsic_id or t.transaction_hash or (t.block_number, t.timestamp_unix)
             groups.setdefault(key, []).append(t)
 
         # Load TAO lots once into memory cache for batch processing
@@ -1664,17 +1664,17 @@ class BittensorEmissionTracker:
         new_transfers = []
         for key, group in groups.items():
             # Find if this group contains a transfer to the brokerage address
-            brokerage_amount = sum(g['amount'] for g in group if g.get('to') == self.brokerage_address or g.get('to') == self.brokerage_address)
+            brokerage_amount = sum(g.amount_tao for g in group if g.to_address.ss58 == self.brokerage_address)
             if brokerage_amount <= 0:
                 # Not a brokerage transfer group; skip
                 continue
 
             # Total outflow from the wallet in this group (brokerage + fees + other outs)
-            total_outflow = sum(g['amount'] for g in group if g.get('from') == self.wallet_address or g.get('from') == self.wallet_address)
+            total_outflow = sum(g.amount_tao for g in group if g.from_address.ss58 == self.wallet_address)
 
             # Prefer timestamp from brokerage transfer record
-            primary = next((g for g in group if g.get('to') == self.brokerage_address), group[0])
-            if primary['timestamp'] > self.last_transfer_timestamp:
+            primary = next((g for g in group if g.to_address.ss58 == self.brokerage_address), group[0])
+            if primary.timestamp_unix > self.last_transfer_timestamp:
                 transfer = self._process_tao_transfer(primary, brokerage_amount=brokerage_amount, total_outflow=total_outflow, related_transfers=group, tao_lots_cache=tao_lots_cache)
                 if transfer:
                     new_transfers.append(transfer)
@@ -1700,10 +1700,10 @@ class BittensorEmissionTracker:
     
     def _process_tao_transfer(
         self,
-        transfer: Dict[str, Any],
+        transfer: TaoStatsTransfer,
         brokerage_amount: Optional[float] = None,
         total_outflow: Optional[float] = None,
-        related_transfers: Optional[List[Dict[str, Any]]] = None,
+        related_transfers: Optional[List[TaoStatsTransfer]] = None,
         tao_lots_cache: Optional[List[Dict[str, Any]]] = None
     ) -> Optional[TaoTransfer]:
         """Process a TAO transfer to Kraken.
@@ -1714,19 +1714,19 @@ class BittensorEmissionTracker:
         total_outflow (brokerage + fees) and allocate cost basis proportionally.
         """
         # Determine amounts
-        brokerage_amount = brokerage_amount if brokerage_amount is not None else transfer.get('amount')
+        brokerage_amount = brokerage_amount if brokerage_amount is not None else transfer.amount_tao
         base_outflow = total_outflow if total_outflow is not None else brokerage_amount
         related_transfers = related_transfers or [transfer]
 
         # Fee is already in TAO (converted by the client), don't convert again
-        fee_tao = sum(rt.get('fee', 0) for rt in related_transfers)
+        fee_tao = sum(rt.fee_tao or 0 for rt in related_transfers)
         total_outflow_tao = (base_outflow or 0.0) + fee_tao
         tao_to_consume = total_outflow_tao if total_outflow_tao > 0 else (base_outflow or 0.0)
 
         # Get TAO price at transfer time (used for proceeds calculation only for brokerage amount)
-        tao_price = self.get_tao_price(transfer['timestamp'])
+        tao_price = self.get_tao_price(transfer.timestamp_unix)
         if not tao_price:
-            print(f"  Warning: Could not get TAO price for transfer at {transfer['timestamp']}")
+            print(f"  Warning: Could not get TAO price for transfer at {transfer.timestamp_unix}")
             return None
 
         usd_proceeds = brokerage_amount * tao_price
@@ -1736,7 +1736,7 @@ class BittensorEmissionTracker:
         try:
             if tao_lots_cache is not None:
                 consumed_lots, total_cost_basis, gain_type, lot_updates = self._consume_tao_lots_from_cache(
-                    tao_to_consume, tao_lots_cache, as_of_timestamp=transfer['timestamp']
+                    tao_to_consume, tao_lots_cache, as_of_timestamp=transfer.timestamp_unix
                 )
             else:
                 consumed_lots, total_cost_basis, gain_type, lot_updates = self.consume_tao_lots_fifo(tao_to_consume)
@@ -1752,8 +1752,8 @@ class BittensorEmissionTracker:
         # Prepare a note summarizing related fee transfers
         fee_parts = []
         for g in related_transfers:
-            to_addr = g.get('to')
-            amt = g.get('amount')
+            to_addr = g.to_address.ss58
+            amt = g.amount_tao
             if to_addr != self.brokerage_address:
                 fee_parts.append(f"{to_addr}:{amt:.4f}")
         notes_segments = []
@@ -1765,8 +1765,8 @@ class BittensorEmissionTracker:
 
         xfer = TaoTransfer(
             transfer_id=self._next_transfer_id(),
-            timestamp=transfer['timestamp'],
-            block_number=transfer.get('block_number'),
+            timestamp=transfer.timestamp_unix,
+            block_number=transfer.block_number,
             tao_amount=brokerage_amount,
             tao_price_usd=tao_price,
             usd_proceeds=usd_proceeds,
@@ -1774,8 +1774,8 @@ class BittensorEmissionTracker:
             realized_gain_loss=realized_gain_loss,
             gain_type=gain_type,
             consumed_tao_lots=consumed_lots,
-            transaction_hash=transfer.get('transaction_hash'),
-            extrinsic_id=transfer.get('extrinsic_id'),
+            transaction_hash=transfer.transaction_hash,
+            extrinsic_id=transfer.extrinsic_id,
             notes=notes,
             total_outflow_tao=total_outflow_tao,
             fee_tao=fee_tao,

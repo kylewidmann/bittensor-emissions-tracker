@@ -7,7 +7,6 @@ and filter it based on method arguments.
 
 import json
 import pytest
-from pathlib import Path
 from typing import List, Optional
 from datetime import datetime
 

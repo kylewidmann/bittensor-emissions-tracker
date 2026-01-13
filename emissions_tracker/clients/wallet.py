@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
 
-from emissions_tracker.models import TaoStatsDelegation
+from emissions_tracker.models import TaoStatsDelegation, TaoStatsTransfer
 
 
 class WalletClientInterface(ABC):
@@ -21,7 +21,7 @@ class WalletClientInterface(ABC):
         end_time: int,
         sender: Optional[str] = None,
         receiver: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
+    ) -> List[TaoStatsTransfer]:
         """
         Fetch TAO transfers for an account.
         
@@ -33,14 +33,7 @@ class WalletClientInterface(ABC):
             receiver: Optional receiver filter
             
         Returns:
-            List of transfer dicts with keys:
-                - timestamp: int
-                - from: str (SS58)
-                - to: str (SS58)
-                - amount: float (TAO)
-                - block_number: int
-                - transaction_hash: str
-                - tao_price_usd: Optional[float]
+            List of TaoStatsTransfer objects
         """
         pass
     

@@ -19,7 +19,7 @@ Usage:
 """
 
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import List, Dict, Any, Optional
 from unittest.mock import patch, MagicMock
 from dataclasses import dataclass, field
@@ -79,14 +79,25 @@ class MockWorksheet:
         """
         Get all rows as dictionaries (like gspread's get_all_records()).
         
+        Uses the first row as headers (matching gspread behavior).
+        
         Returns:
             List of dictionaries with header keys and row values
         """
         self.get_all_records_calls += 1
+        
+        # If no rows or only header row, return empty list
+        if len(self.rows) <= 1:
+            return []
+        
+        # Use first row as headers
+        headers = self.rows[0]
+        
+        # Convert remaining rows to dicts
         results = []
-        for row in self.rows:
+        for row in self.rows[1:]:
             record = {}
-            for idx, header in enumerate(self.headers):
+            for idx, header in enumerate(headers):
                 if idx < len(row):
                     record[header] = row[idx]
                 else:
@@ -103,8 +114,14 @@ class MockWorksheet:
             **kwargs: Additional arguments (ignored, for compatibility)
         """
         self.append_row_calls += 1
-        padded = list(row) + [""] * max(0, len(self.headers) - len(row))
-        self.rows.append(padded[:len(self.headers)])
+        
+        # Special handling for header rows (first row on empty sheet)
+        if not self.rows and len(row) > 1:
+            # This looks like a header row - set it as headers
+            self.headers = list(row)
+        
+        # Pad row to match current header length
+        self.rows.append(row)
         self.operations.append(WorksheetOperation(
             operation_type="append_row",
             data=row
@@ -234,8 +251,28 @@ class MockSpreadsheet:
             MockWorksheet instance
         """
         if name not in self.worksheets:
-            # Auto-create with basic headers
-            self.worksheets[name] = MockWorksheet(name, ["Column A"])
+            # Auto-create with appropriate headers based on sheet name
+            from emissions_tracker.models import AlphaLot, TaoLot, AlphaSale, Expense, TaoTransfer, JournalEntry
+            
+            if name == "Income":
+                headers = AlphaLot.sheet_headers()
+            elif name == "TAO Lots":
+                headers = TaoLot.sheet_headers()
+            elif name == "Sales":
+                headers = AlphaSale.sheet_headers()
+            elif name == "Expenses":
+                headers = Expense.sheet_headers()
+            elif name == "Transfers":
+                headers = TaoTransfer.sheet_headers()
+            elif name == "Journal Entries":
+                headers = JournalEntry.sheet_headers()
+            else:
+                raise AssertionError(f"Unknown sheet {name}")
+            
+            worksheet = MockWorksheet(name, headers)
+            # Add header row as first row
+            worksheet.append_row(headers)
+            self.worksheets[name] = worksheet
         return self.worksheets[name]
     
     def add_worksheet(self, title: str, rows: int = 100, cols: int = 20) -> MockWorksheet:
@@ -251,7 +288,28 @@ class MockSpreadsheet:
             MockWorksheet instance
         """
         if title not in self.worksheets:
-            self.worksheets[title] = MockWorksheet(title, ["Column A"])
+            # Auto-create with appropriate headers based on sheet name
+            from emissions_tracker.models import AlphaLot, TaoLot, AlphaSale, Expense, TaoTransfer, JournalEntry
+            
+            if title == "Income":
+                headers = AlphaLot.sheet_headers()
+            elif title == "TAO Lots":
+                headers = TaoLot.sheet_headers()
+            elif title == "Sales":
+                headers = AlphaSale.sheet_headers()
+            elif title == "Expenses":
+                headers = Expense.sheet_headers()
+            elif title == "Transfers":
+                headers = TaoTransfer.sheet_headers()
+            elif title == "Journal Entries":
+                headers = JournalEntry.sheet_headers()
+            else:
+                raise AssertionError(f"Unknown sheet {title}")
+            
+            worksheet = MockWorksheet(title, headers)
+            # Add header row as first row
+            worksheet.append_row(headers)
+            self.worksheets[title] = worksheet
         return self.worksheets[title]
     
     def values_batch_update(self, body: Dict[str, Any]):
@@ -511,9 +569,14 @@ def seed_historical_lots(mock_sheets, raw_stake_balance, raw_stake_events, raw_h
         
         # Get or create Income sheet
         income_sheet = spreadsheet.worksheet("Income")
-        if not income_sheet.headers or income_sheet.headers == ["Column A"]:
-            # Initialize with proper headers
+        
+        # Update headers attribute FIRST (before appending rows)
+        if not income_sheet.headers:
             income_sheet.headers = AlphaLot.sheet_headers()
+        
+        # Ensure header row exists (append if sheet is empty)
+        if not income_sheet.rows:
+            income_sheet.append_row(AlphaLot.sheet_headers())
         
         # Add opening lot if requested (represents actual ALPHA balance at start_date)
         if include_opening_lot:
