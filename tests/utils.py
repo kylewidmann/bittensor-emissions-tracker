@@ -194,6 +194,49 @@ def calculate_daily_emissions(
     return emission_lots, emission_count, total_alpha_emitted
 
 
+def filter_contract_income_events(
+    stake_events: List[dict],
+    start_ts: int,
+    end_ts: int,
+    contract_address: str,
+    netuid: int,
+    delegate: str,
+    nominator: str
+) -> List[dict]:
+    """Filter stake events for contract income by date range and contract address.
+    
+    Args:
+        stake_events: Raw stake event data
+        start_ts: Start timestamp (unix seconds)
+        end_ts: End timestamp (unix seconds)
+        contract_address: Filter events for this contract address
+        netuid: Subnet ID to filter by
+        delegate: Delegate (hotkey) address to filter by
+        nominator: Nominator (coldkey) address to filter by
+        
+    Returns:
+        List of stake events matching contract income criteria
+    """
+    filtered_events = []
+    for event in stake_events:
+        # Convert ISO timestamp to Unix timestamp for comparison
+        event_timestamp = int(datetime.fromisoformat(event['timestamp'].replace('Z', '+00:00')).timestamp())
+        
+        # Only include events that match ALL required filters:
+        # - Correct netuid, delegate, and nominator (API required params)
+        # - Transfer events to the contract address
+        # - Within the date range
+        if (event['netuid'] == netuid
+            and event['delegate']['ss58'] == delegate
+            and event['nominator']['ss58'] == nominator
+            and event.get('is_transfer') == True
+            and event.get('transfer_address', {}).get('ss58') == contract_address
+            and start_ts <= event_timestamp <= end_ts):
+            filtered_events.append(event)
+    
+    return filtered_events
+
+
 def create_emission_lots(
     balance_json_path: str,
     events_json_path: str,

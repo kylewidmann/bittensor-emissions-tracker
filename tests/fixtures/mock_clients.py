@@ -17,10 +17,7 @@ from emissions_tracker.models import (
     TaoStatsDelegation, TaoStatsTransfer, TaoStatsStakeBalance, TaoStatsAddress
 )
 from emissions_tracker.exceptions import PriceNotAvailableError
-
-
-# Test data directory
-TEST_DATA_DIR = Path(__file__).parent.parent / "data" / "all"
+from tests.fixtures.mock_data import TEST_DATA_DIR
 
 
 class MockTaoStatsClient(WalletClientInterface, PriceClient):

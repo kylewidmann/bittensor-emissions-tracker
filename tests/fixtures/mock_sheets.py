@@ -19,6 +19,7 @@ Usage:
 """
 
 import pytest
+from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 from unittest.mock import patch, MagicMock
 from dataclasses import dataclass, field
@@ -387,250 +388,213 @@ def mock_sheets():
             yield mock_env
 
 
-# # Legacy compatibility (to be removed after test migration)
-
-# def create_mock_sheets_for_tracker():
-#     """
-#     DEPRECATED: Legacy function for backward compatibility.
-#     Use patch_gspread_for_tracker() instead.
-#     """
-#     from emissions_tracker.models import AlphaLot, TaoLot
+@pytest.fixture
+def seed_historical_lots(mock_sheets, raw_stake_balance, raw_stake_events, raw_historical_prices):
+    """
+    Fixture that returns a function to seed historical ALPHA lots into mock sheets.
     
-#     income_sheet = InMemoryWorksheet(AlphaLot.sheet_headers())
-#     tao_lots_sheet = InMemoryWorksheet(TaoLot.sheet_headers())
-#     sales_sheet = InMemoryWorksheet([
-#         "Sale ID", "Date", "Timestamp", "Block", "Alpha Disposed",
-#         "TAO Received", "TAO Price USD", "USD Proceeds", "Cost Basis",
-#         "Realized Gain/Loss", "Gain Type", "TAO Expected", "TAO Slippage",
-#         "Slippage USD", "Slippage Ratio", "Network Fee (TAO)", "Network Fee (USD)",
-#         "Consumed Lots", "Created TAO Lot ID", "Extrinsic ID", "Notes"
-#     ])
-#     expenses_sheet = InMemoryWorksheet([
-#         "Expense ID", "Date", "Timestamp", "Block", "Transfer Address", "Category",
-#         "Alpha Disposed", "TAO Received", "TAO Price USD", "USD Proceeds", 
-#         "Cost Basis", "Realized Gain/Loss", "Gain Type", "TAO Expected", 
-#         "TAO Slippage", "Slippage USD", "Slippage Ratio",
-#         "Network Fee (TAO)", "Network Fee (USD)",
-#         "Consumed Lots", "Created TAO Lot ID", "Extrinsic ID", "Notes"
-#     ])
-#     transfers_sheet = InMemoryWorksheet([
-#         "Transfer ID", "Date", "Timestamp", "Block", "TAO Amount",
-#         "TAO Price USD", "USD Proceeds", "Cost Basis", "Realized Gain/Loss",
-#         "Gain Type", "Consumed TAO Lots", "Transaction Hash", "Extrinsic ID",
-#         "Notes", "Total Outflow TAO", "Fee TAO", "Fee Cost Basis USD"
-#     ])
-#     journal_sheet = InMemoryWorksheet([
-#         "Date", "Account", "Debit", "Credit", "Description", "Reference"
-#     ])
+    This pre-populates the Income sheet with ALPHA emission lots computed from
+    the test data using historical TAO prices, including both staking emissions
+    and contract income.
     
-#     spreadsheet = MockSpreadsheet()
-#     spreadsheet.register("Income", income_sheet)
-#     spreadsheet.register("TAO Lots", tao_lots_sheet)
-#     spreadsheet.register("Sales", sales_sheet)
-#     spreadsheet.register("Expenses", expenses_sheet)
-#     spreadsheet.register("Transfers", transfers_sheet)
-#     spreadsheet.register("Journal Entries", journal_sheet)
-    
-#     return (spreadsheet, income_sheet, tao_lots_sheet, sales_sheet, 
-#             expenses_sheet, transfers_sheet, journal_sheet)
-
-
-# class InMemoryWorksheet:
-#     """
-#     DEPRECATED: Legacy worksheet implementation.
-#     Use MockWorksheet with patch_gspread_for_tracker() instead.
-#     """
-    
-#     def __init__(self, headers: List[str]):
-#         """
-#         Initialize worksheet with headers.
-        
-#         Args:
-#             headers: List of column names for the first row
-#         """
-#         self.headers = headers
-#         self.rows = []
-#         self.pending_updates = []  # Staged updates for batch operations
-    
-#     def seed_records(self, records: List[Dict[str, Any]]):
-#         """
-#         Seed the worksheet with initial data records.
-        
-#         Args:
-#             records: List of dictionaries with keys matching headers
-#         """
-#         for record in records:
-#             row = [record.get(header, "") for header in self.headers]
-#             self.rows.append(row)
-    
-#     def get_all_records(self) -> List[Dict[str, Any]]:
-#         """
-#         Get all rows as dictionaries (like gspread's get_all_records()).
-        
-#         Returns:
-#             List of dictionaries with header keys and row values
-#         """
-#         results = []
-#         for row in self.rows:
-#             record = {}
-#             for idx, header in enumerate(self.headers):
-#                 if idx < len(row):
-#                     record[header] = row[idx]
-#                 else:
-#                     record[header] = ""
-#             results.append(record)
-#         return results
-    
-#     def append_row(self, row: List[Any]):
-#         """
-#         Append a single row to the worksheet.
-        
-#         Args:
-#             row: List of values to append
-#         """
-#         # Pad or truncate to match header count
-#         padded = list(row) + [""] * max(0, len(self.headers) - len(row))
-#         self.rows.append(padded[:len(self.headers)])
-    
-#     def append_rows(self, rows: List[List[Any]]):
-#         """
-#         Append multiple rows to the worksheet.
-        
-#         Args:
-#             rows: List of row value lists
-#         """
-#         for row in rows:
-#             self.append_row(row)
-    
-#     def update_cell(self, row_num: int, column_letters: str, value: Any):
-#         """
-#         Update a single cell (used for batch updates).
-        
-#         Args:
-#             row_num: 1-based row number
-#             column_letters: Excel-style column letter (e.g., "A", "B", "AA")
-#             value: New cell value
-#         """
-#         self.pending_updates.append({
-#             'row_num': row_num,
-#             'column_letters': column_letters,
-#             'value': value
-#         })
-    
-#     def batch_update(self, data: List[Dict[str, Any]]):
-#         """
-#         Apply batch updates to cells.
-        
-#         Args:
-#             data: List of update dictionaries with 'range' and 'values' keys
-#         """
-#         for update in data:
-#             range_str = update['range']
-#             values = update['values']
+    Usage:
+        def test_something(seed_historical_lots):
+            # Seed lots from Oct 1 through Nov 30 using historical TAO prices
+            seed_historical_lots(
+                sheet_id=tracker.sheet_id,
+                start_date=datetime(2025, 10, 1),
+                end_date=datetime(2025, 11, 30),
+                contract_address='5F...',  # Optional
+                netuid=0,  # Optional
+                delegate='5F...',  # Optional  
+                nominator='5F...'  # Optional
+            )
             
-#             # Parse range like "Sheet!A2:B2" or "A2" or "A2:A2"
-#             if '!' in range_str:
-#                 range_str = range_str.split('!')[1]
-            
-#             # Parse single cell or single-cell range (A2 or A2:A2)
-#             # Extract start cell
-#             if ':' in range_str:
-#                 start_cell = range_str.split(':')[0]
-#             else:
-#                 start_cell = range_str
-            
-#             # Parse cell address
-#             col_letters = ''.join(c for c in start_cell if c.isalpha())
-#             row_num = int(''.join(c for c in start_cell if c.isdigit()))
-#             col_index = column_letter_to_index(col_letters) - 1
-#             row_index = row_num - 2  # Skip header row, convert to 0-based
-            
-#             if 0 <= row_index < len(self.rows) and 0 <= col_index < len(self.headers):
-#                 self.rows[row_index][col_index] = values[0][0]
+            # Now tracker will see historical lots when it loads state
+            # ...rest of test
     
-#     def flush_pending_updates(self):
-#         """Apply all staged cell updates (for testing batch operations)."""
-#         for update in self.pending_updates:
-#             column_index = column_letter_to_index(update['column_letters']) - 1
-#             row_index = update['row_num'] - 2  # Skip header row, convert to 0-based
-            
-#             if 0 <= row_index < len(self.rows) and 0 <= column_index < len(self.headers):
-#                 self.rows[row_index][column_index] = update['value']
+    Args:
+        mock_sheets: The mock sheets environment fixture
+        raw_stake_balance: Fixture providing raw balance data
+        raw_stake_events: Fixture providing raw event data (includes contract income)
+        raw_historical_prices: Fixture providing historical TAO price data
+    
+    Returns:
+        Callable that takes (sheet_id, start_date, end_date, optional contract params) 
+        and seeds the Income sheet using historical TAO prices
+    """
+    from pathlib import Path
+    import json
+    from emissions_tracker.models import AlphaLot, SourceType
+    from tests.utils import (
+        filter_balances_by_date_range,
+        group_balances_by_day,
+        filter_delegation_events,
+        group_events_by_day,
+        calculate_daily_emissions
+    )
+    
+    def _seed_lots(
+        sheet_id: str,
+        start_date: datetime,
+        end_date: datetime,
+        include_opening_lot: bool = True,
+        contract_address: str = None,
+        netuid: int = None,
+        delegate: str = None,
+        nominator: str = None
+    ):
+        """
+        Seed historical ALPHA lots into the Income sheet using historical TAO prices.
+        Includes both staking emissions and contract income (if contract params provided).
         
-#         self.pending_updates.clear()
-    
-#     def sort(self, *args, **kwargs):
-#         """Mock sort operation (no-op for testing)."""
-#         pass
-    
-#     def clear(self):
-#         """Clear all rows (keeps headers)."""
-#         self.rows = []
-#         self.pending_updates = []
-
-
-# class MockSpreadsheet:
-#     """
-#     DEPRECATED: Legacy spreadsheet implementation.
-#     Use MockSpreadsheet (new version) with patch_gspread_for_tracker() instead.
-    
-#     Mock Google Spreadsheet that manages multiple worksheets.
-    
-#     Provides worksheet() to access sheets by name and supports
-#     batch updates across multiple sheets.
-#     """
-    
-#     def __init__(self):
-#         """Initialize empty spreadsheet."""
-#         self.worksheets_dict: Dict[str, InMemoryWorksheet] = {}
-    
-#     def register(self, name: str, worksheet: InMemoryWorksheet):
-#         """
-#         Register a worksheet with this spreadsheet.
+        Args:
+            sheet_id: Google Sheet ID (used to access the mock sheet)
+            start_date: Start date for computing emissions
+            end_date: End date for computing emissions
+            include_opening_lot: Whether to include an opening lot derived from account_history.json
+            contract_address: Smart contract address for filtering contract income (optional)
+            netuid: Subnet ID for filtering contract income (optional)
+            delegate: Delegate address for filtering contract income (optional)
+            nominator: Nominator address for filtering contract income (optional)
+        """
+        start_ts = int(start_date.timestamp())
+        end_ts = int(end_date.timestamp())
         
-#         Args:
-#             name: Sheet name
-#             worksheet: InMemoryWorksheet instance
-#         """
-#         self.worksheets_dict[name] = worksheet
-    
-#     def worksheet(self, name: str) -> InMemoryWorksheet:
-#         """
-#         Get a worksheet by name.
+        # Load account history to get actual opening balance
+        from pathlib import Path
+        from datetime import timezone
+        data_dir = Path(__file__).parent.parent / "data" / "all"
+        with open(data_dir / "account_history.json") as f:
+            account_history = json.load(f)['data']
         
-#         Args:
-#             name: Sheet name
-            
-#         Returns:
-#             InMemoryWorksheet instance
-            
-#         Raises:
-#             KeyError: If worksheet not found
-#         """
-#         if name not in self.worksheets_dict:
-#             raise KeyError(f"Worksheet '{name}' not found")
-#         return self.worksheets_dict[name]
-    
-#     def values_batch_update(self, body: Dict[str, Any]):
-#         """
-#         Apply batch updates across multiple sheets.
+        # Find balance on or before start_date
+        opening_alpha_amount = None
+        # Make start_date timezone-aware for comparison
+        start_date_aware = start_date.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
         
-#         Args:
-#             body: Batch update request body with 'data' key containing updates
-#         """
-#         for update in body.get("data", []):
-#             range_str = update["range"]
-#             values = update["values"]
+        for record in account_history:
+            record_dt = datetime.fromisoformat(record['timestamp'].replace('Z', '+00:00'))
+            record_date_only = record_dt.replace(hour=0, minute=0, second=0, microsecond=0)
             
-#             # Parse "SheetName!A2:B2" format
-#             if '!' in range_str:
-#                 sheet_name, cell_range = range_str.split('!')
-#                 if sheet_name in self.worksheets_dict:
-#                     self.worksheets_dict[sheet_name].batch_update([{
-#                         'range': cell_range,
-#                         'values': values
-#                     }])
+            # Use the balance from start_date if available, otherwise use the closest previous day
+            if record_date_only <= start_date_aware:
+                opening_alpha_amount = int(record['balance_staked']) / 1e9
+                break
+        
+        if opening_alpha_amount is None:
+            raise ValueError(f"No account balance found on or before {start_date.strftime('%Y-%m-%d')}")
+        
+        # Create a price lookup function for historical TAO prices
+        def price_lookup(day_str: str) -> float:
+            """Look up TAO price for a specific day."""
+            return raw_historical_prices.get(day_str, {}).get('price', 0.0)
+        
+        # Compute emissions using shared utilities and fixture data with historical prices
+        balances = filter_balances_by_date_range(raw_stake_balance, start_ts, end_ts)
+        daily_balances = group_balances_by_day(balances)
+        events = filter_delegation_events(raw_stake_events, start_ts, end_ts)
+        events_by_day = group_events_by_day(events)
+        
+        alpha_lots, _, _ = calculate_daily_emissions(
+            daily_balances,
+            events_by_day,
+            price_lookup=price_lookup,
+            emission_threshold=0.0001
+        )
+        
+        # Get the Income sheet from mock environment (create spreadsheet if needed)
+        spreadsheet = mock_sheets.client.spreadsheets.get(sheet_id)
+        if not spreadsheet:
+            spreadsheet = MockSpreadsheet(sheet_id)
+            mock_sheets.client.spreadsheets[sheet_id] = spreadsheet
+        
+        # Get or create Income sheet
+        income_sheet = spreadsheet.worksheet("Income")
+        if not income_sheet.headers or income_sheet.headers == ["Column A"]:
+            # Initialize with proper headers
+            income_sheet.headers = AlphaLot.sheet_headers()
+        
+        # Add opening lot if requested (represents actual ALPHA balance at start_date)
+        if include_opening_lot:
+            opening_lot_date_str = start_date.strftime('%Y-%m-%d')
+            opening_lot_ts = int(start_date.timestamp())
+            
+            # Get the actual TAO price from start_date (fail if not found)
+            opening_price_data = raw_historical_prices.get(opening_lot_date_str)
+            if not opening_price_data or 'price' not in opening_price_data:
+                raise ValueError(f"No TAO price data found for opening lot date {opening_lot_date_str}")
+            opening_tao_price = opening_price_data['price']
+            opening_usd = opening_alpha_amount * opening_tao_price
+            
+            # Create AlphaLot for opening balance
+            opening_lot = AlphaLot(
+                lot_id="ALPHA-0001",
+                timestamp=opening_lot_ts,
+                block_number=0,
+                source_type=SourceType.STAKING,
+                alpha_quantity=opening_alpha_amount,
+                alpha_remaining=opening_alpha_amount,
+                usd_fmv=opening_usd,
+                usd_per_alpha=opening_tao_price,
+                tao_equivalent=opening_alpha_amount * 0.08,  # Rough ratio
+                notes="Opening balance"
+            )
+            income_sheet.append_row(opening_lot.to_sheet_row())
+        
+        # Seed computed emission lots
+        lot_counter = 2 if include_opening_lot else 1
+        for lot_data in alpha_lots:
+            alpha_lot = AlphaLot(
+                lot_id=f"ALPHA-{lot_counter:04d}",
+                timestamp=lot_data['timestamp'],
+                block_number=lot_data.get('block_number', 0),
+                source_type=SourceType.STAKING,
+                alpha_quantity=lot_data['alpha_quantity'],
+                alpha_remaining=lot_data['alpha_remaining'],
+                usd_fmv=lot_data['usd_fmv'],
+                usd_per_alpha=lot_data['usd_fmv'] / lot_data['alpha_quantity'] if lot_data['alpha_quantity'] > 0 else 0,
+                tao_equivalent=lot_data.get('tao_equivalent', lot_data['alpha_quantity'] * 0.08),
+                notes=f"Staking emissions"
+            )
+            income_sheet.append_row(alpha_lot.to_sheet_row())
+            lot_counter += 1
+        
+        # Add contract income lots if contract parameters are provided
+        if all([contract_address, netuid is not None, delegate, nominator]):
+            from tests.utils import filter_contract_income_events
+            
+            contract_events = filter_contract_income_events(
+                raw_stake_events,
+                start_ts,
+                end_ts,
+                contract_address=contract_address,
+                netuid=netuid,
+                delegate=delegate,
+                nominator=nominator
+            )
+            
+            for event in contract_events:
+                event_ts = int(datetime.fromisoformat(event['timestamp'].replace('Z', '+00:00')).timestamp())
+                event_date = datetime.fromtimestamp(event_ts).strftime('%Y-%m-%d')
+                tao_price = raw_historical_prices.get(event_date, {}).get('price', 0.0)
+                
+                alpha_quantity = int(event['alpha']) / 1e9
+                usd_fmv = float(event.get('usd', 0))
+                
+                contract_lot = AlphaLot(
+                    lot_id=f"ALPHA-{lot_counter:04d}",
+                    timestamp=event_ts,
+                    block_number=event.get('block_number', 0),
+                    source_type=SourceType.CONTRACT,
+                    alpha_quantity=alpha_quantity,
+                    alpha_remaining=alpha_quantity,
+                    usd_fmv=usd_fmv,
+                    usd_per_alpha=usd_fmv / alpha_quantity if alpha_quantity > 0 else 0,
+                    tao_equivalent=float(event.get('amount', 0)) / 1e9,
+                    notes=f"Contract income"
+                )
+                income_sheet.append_row(contract_lot.to_sheet_row())
+                lot_counter += 1
     
-#     def batch_update(self, body: Dict[str, Any]):
-#         """Alias for values_batch_update."""
-#         self.values_batch_update(body)
+    return _seed_lots
