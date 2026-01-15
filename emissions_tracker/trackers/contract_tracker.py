@@ -520,10 +520,32 @@ class ContractTracker(BittensorTracker):
             # Calculate TAO received: delegation.amount - transfer.amount - transfer.fee
             tao_received_rao = int(undelegate.amount) - fee_transfer.amount_rao - fee_transfer.fee_rao
             tao_received = tao_received_rao / RAO_PER_TAO
+            
+            # Network fee is the total amount deducted (transfer amount + transfer fee)
+            # This equals undelegate.fee (the fee specified in the delegation event)
+            network_fee_tao = int(undelegate.fee) / RAO_PER_TAO
 
-            # Get TAO price (for now use 0, will need price lookup)
-            tao_price_usd = 0.0  # TODO: Implement price lookup
+            # Calculate slippage
+            slippage_ratio = undelegate.slippage or 0.0
+            if slippage_ratio and abs(slippage_ratio) > 1e-9:
+                # Calculate expected TAO before slippage: tao_received = tao_expected * (1 - slippage)
+                # Therefore: tao_expected = tao_received / (1 - slippage)
+                tao_expected = tao_received / (1 - slippage_ratio)
+            else:
+                # No slippage, so expected equals received
+                tao_expected = tao_received
+            
+            tao_slippage = tao_expected - tao_received
+
+            # Get TAO price for valuation
+            tao_price_usd = self.price_client.get_price_at_timestamp('TAO', undelegate.timestamp_unix)
+            if not tao_price_usd:
+                raise PriceNotAvailableError(
+                    f"Could not get TAO price for sale at block {undelegate.block_number} "
+                    f"(timestamp: {undelegate.timestamp_unix})"
+                )
             usd_proceeds = tao_received * tao_price_usd
+            slippage_usd = tao_slippage * tao_price_usd
 
             # Calculate gain/loss
             realized_gain_loss = usd_proceeds - total_basis
@@ -563,12 +585,12 @@ class ContractTracker(BittensorTracker):
                 gain_type=gain_type,
                 consumed_lots=consumed_lots,
                 created_tao_lot_id=tao_lot_id,
-                tao_expected=undelegate.amount / RAO_PER_TAO,
-                tao_slippage=(undelegate.amount - tao_received_rao) / RAO_PER_TAO,
-                slippage_usd=0.0,  # Will calculate with price
-                slippage_ratio=undelegate.slippage or 0.0,
-                network_fee_tao=fee_transfer.fee_tao,
-                network_fee_usd=fee_transfer.fee_tao * tao_price_usd,
+                tao_expected=tao_expected,
+                tao_slippage=tao_slippage,
+                slippage_usd=slippage_usd,
+                slippage_ratio=slippage_ratio,
+                network_fee_tao=network_fee_tao,
+                network_fee_usd=network_fee_tao * tao_price_usd,
                 extrinsic_id=undelegate.extrinsic_id,
                 notes=f"Alpha sale at block {undelegate.block_number}"
             )

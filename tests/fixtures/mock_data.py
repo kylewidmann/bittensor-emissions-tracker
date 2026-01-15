@@ -6,7 +6,7 @@ import pytest
 from emissions_tracker.models import CostBasisMethod
 from tests.fixtures.mock_config import TEST_SMART_CONTRACT_SS58
 from tests.utils import calculate_daily_emissions, filter_balances_by_date_range, filter_delegation_events, group_balances_by_day, group_events_by_day
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 # Test data directory
 TEST_DATA_DIR = Path(__file__).parent.parent / "data" / "all"
@@ -372,36 +372,38 @@ def compute_expected_sales(
             emission_threshold=0.0001
         )
         
-        # Add opening lot from actual ALPHA balance in account_history.json
-        data_dir = Path(__file__).parent.parent / "data" / "all"
-        with open(data_dir / "account_history.json") as f:
-            account_history = json.load(f)['data']
-        
-        # Find balance on or before start_date
+        # Add opening lot from actual ALPHA balance using raw_stake_balance fixture
+        # Find balance on or before start_date (use day before to get opening balance)
         opening_alpha = None
+        opening_tao_equivalent = None
         # Make start_date timezone-aware for comparison
         start_date_aware = start_date.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
+        day_before_start = start_date_aware - timedelta(days=1)
         
-        for record in account_history:
+        for record in raw_stake_balance:
             record_dt = datetime.fromisoformat(record['timestamp'].replace('Z', '+00:00'))
             record_date_only = record_dt.replace(hour=0, minute=0, second=0, microsecond=0)
             
-            if record_date_only <= start_date_aware:
-                opening_alpha = int(record['balance_staked']) / 1e9
+            if record_date_only == day_before_start:
+                opening_alpha = int(record['balance']) / 1e9
+                opening_tao_equivalent = int(record['balance_as_tao']) / 1e9
                 break
         
         if opening_alpha is None:
-            raise ValueError(f"No account balance found on or before {start_date.strftime('%Y-%m-%d')}")
+            raise ValueError(f"No balance found for day before start_date: {day_before_start.strftime('%Y-%m-%d')}")
         
-        opening_lot_date = start_date
-        opening_lot_date_str = opening_lot_date.strftime('%Y-%m-%d')
+        # Get TAO price for start_date
+        opening_lot_date_str = start_date.strftime('%Y-%m-%d')
         opening_tao_price = raw_historical_prices.get(opening_lot_date_str, {}).get('price', 459.702244010299)
         
+        # Calculate USD FMV using the TAO equivalent from balance data
+        opening_usd_fmv = opening_tao_equivalent * opening_tao_price
+        
         opening_lot = {
-            'timestamp': int(opening_lot_date.timestamp()),
+            'timestamp': int(start_date.timestamp()),
             'alpha_quantity': opening_alpha,
             'alpha_remaining': opening_alpha,
-            'usd_fmv': opening_alpha * opening_tao_price,
+            'usd_fmv': opening_usd_fmv,
             'status': 'Open'
         }
         alpha_lots.insert(0, opening_lot)
@@ -533,7 +535,8 @@ def compute_expected_sales(
                     lot['status'] = 'Partial'
             
             # Calculate realized gain/loss
-            realized_gain_loss = usd_proceeds - cost_basis - fee_usd
+            # usd_proceeds is already net of network fees (based on tao_amount which has fees deducted)
+            realized_gain_loss = usd_proceeds - cost_basis
             
             expected_sales.append({
                 'timestamp': timestamp,
