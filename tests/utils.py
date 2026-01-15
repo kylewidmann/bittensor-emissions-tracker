@@ -5,7 +5,7 @@ Contains common logic for processing balance history and delegation events
 that is used across multiple test modules.
 """
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from typing import List, Dict, Any, Tuple
 
@@ -48,19 +48,20 @@ def group_balances_by_day(balances: List[dict]) -> List[Dict[str, Any]]:
     """Group balance records by day, keeping last balance of each day.
     
     Args:
-        balances: List of balance records with 'timestamp' and 'balance' fields
+        balances: List of balance records with 'timestamp', 'balance', and 'balance_as_tao' fields
         
     Returns:
-        List of daily balance records with keys: day, timestamp, alpha, block
+        List of daily balance records with keys: day, timestamp, alpha_rao, rao, block
     """
     balances_by_day = defaultdict(list)
     for b in balances:
         ts = int(datetime.fromisoformat(b['timestamp'].replace('Z', '+00:00')).timestamp())
-        dt = datetime.fromtimestamp(ts)
+        dt = datetime.fromtimestamp(ts, tz=timezone.utc)
         day_key = dt.strftime('%Y-%m-%d')
         balances_by_day[day_key].append({
             'timestamp': ts,
-            'alpha': int(b['balance']) / 1e9,
+            'alpha_rao': int(b['balance']),
+            'rao': int(b['balance_as_tao']),
             'block': b['block_number']
         })
     
@@ -70,7 +71,8 @@ def group_balances_by_day(balances: List[dict]) -> List[Dict[str, Any]]:
         daily_balances.append({
             'day': day_key,
             'timestamp': day_balances[-1]['timestamp'],
-            'alpha': day_balances[-1]['alpha'],
+            'alpha_rao': day_balances[-1]['alpha_rao'],
+            'rao': day_balances[-1]['rao'],
             'block': day_balances[-1]['block']
         })
     
@@ -90,7 +92,7 @@ def filter_delegation_events(
         end_ts: End timestamp (unix seconds)
         
     Returns:
-        List of events with keys: timestamp, alpha, action
+        List of events with keys: timestamp, alpha_rao, action
     """
     events = []
     for e in event_data:
@@ -99,7 +101,7 @@ def filter_delegation_events(
             if e['action'] in ('DELEGATE', 'UNDELEGATE'):
                 events.append({
                     'timestamp': event_ts,
-                    'alpha': int(e['alpha']) / 1e9,
+                    'alpha_rao': int(e['alpha']),
                     'action': e['action']
                 })
     return sorted(events, key=lambda x: x['timestamp'])
@@ -116,7 +118,7 @@ def group_events_by_day(events: List[Dict[str, Any]]) -> Dict[str, List[Dict[str
     """
     events_by_day = defaultdict(list)
     for event in events:
-        dt = datetime.fromtimestamp(event['timestamp'])
+        dt = datetime.fromtimestamp(event['timestamp'], tz=timezone.utc)
         day_key = dt.strftime('%Y-%m-%d')
         events_by_day[day_key].append(event)
     return events_by_day
@@ -161,35 +163,54 @@ def calculate_daily_emissions(
         prev_day = daily_balances[i - 1]
         curr_day = daily_balances[i]
         
-        # Balance change from end of previous day to end of current day
-        balance_change = curr_day['alpha'] - prev_day['alpha']
+        # Balance change from end of previous day to end of current day (in RAO)
+        balance_change_rao = curr_day['alpha_rao'] - prev_day['alpha_rao']
         
         # Get all events for current day
         day_events = events_by_day.get(curr_day['day'], [])
         
-        delegate_inflow = sum(e['alpha'] for e in day_events if e['action'] == 'DELEGATE')
-        undelegate_outflow = sum(e['alpha'] for e in day_events if e['action'] == 'UNDELEGATE')
+        delegate_inflow_rao = sum(e['alpha_rao'] for e in day_events if e['action'] == 'DELEGATE')
+        undelegate_outflow_rao = sum(e['alpha_rao'] for e in day_events if e['action'] == 'UNDELEGATE')
         
-        # Calculate emissions
-        emissions = balance_change - delegate_inflow + undelegate_outflow
+        # Calculate emissions in RAO
+        emissions_rao = balance_change_rao - delegate_inflow_rao + undelegate_outflow_rao
         
-        if emissions > emission_threshold:
+        # Convert to ALPHA for threshold check
+        emissions_alpha = emissions_rao / 1e9
+        
+        if emissions_alpha > emission_threshold:
             # Get price for this day
             if price_lookup:
                 tao_price = price_lookup(curr_day['day'])
+                if not tao_price:
+                    raise ValueError(f"Could not get TAO price for {curr_day['day']}")
             else:
                 tao_price = price_per_tao
+                if not tao_price:
+                    raise ValueError(f"TAO price is required but was not provided")
+
+            # Calculate FMV using TAO equivalent ratio from current balance
+            # If alpha_rao is 0 (shouldn't happen with emissions), use previous day's ratio as fallback
+            if curr_day['alpha_rao'] > 0:
+                tao_ratio = curr_day['rao'] / curr_day['alpha_rao']
+            elif prev_day['alpha_rao'] > 0:
+                tao_ratio = prev_day['rao'] / prev_day['alpha_rao']
+            else:
+                raise ValueError(f"Cannot calculate TAO ratio for {curr_day['day']}: both current and previous balances are zero")
             
-            usd_fmv = emissions * tao_price
+            tao_equivalent = emissions_alpha * tao_ratio
+            usd_fmv = tao_equivalent * tao_price
+            usd_per_alpha = usd_fmv / emissions_alpha if emissions_alpha > 0 else 0
+
             emission_lots.append({
                 'timestamp': curr_day['timestamp'],
-                'alpha_quantity': emissions,
-                'alpha_remaining': emissions,
+                'alpha_quantity': emissions_alpha,
+                'alpha_remaining': emissions_alpha,
                 'usd_fmv': usd_fmv,
                 'status': 'Open'
             })
             emission_count += 1
-            total_alpha_emitted += emissions
+            total_alpha_emitted += emissions_alpha
     
     return emission_lots, emission_count, total_alpha_emitted
 

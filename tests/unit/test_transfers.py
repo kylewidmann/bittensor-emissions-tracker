@@ -20,48 +20,49 @@ from tests.fixtures.mock_config import (
     "emissions_start_date,transfers_start_date,transfers_end_date",
     [
         # Process emissions from Oct 15 to build up ALPHA lots, then test Nov transfers
-        (datetime(2025, 10, 15), datetime(2025, 11, 1), datetime(2025, 11, 30, 23, 59, 59)),
+        (datetime(2025, 10, 15), datetime(2025, 11, 1), datetime(2025, 11, 7, 23, 59, 59)),
     ]
 )
 def test_process_transfers(
     seed_contract_sheets,
-    contract_tracker,
+    get_contract_tracker,
     compute_expected_transfers,
     emissions_start_date,
     transfers_start_date,
     transfers_end_date,
 ):
-    """Test that process_transfers correctly processes TAO → Kraken transfer events."""
-    wallet_address = TEST_PAYOUT_COLDKEY_SS58  # Transfers come from coldkey
-    
+    """Test that process_transfers correctly processes TAO → Kraken transfer events."""    
     # Seed historical ALPHA lots into mock sheets BEFORE creating tracker
     seed_contract_sheets(emissions_start_date, transfers_end_date, TEST_TRACKER_SHEET_ID)
     
     # Now create tracker - it will load the pre-seeded data
-    tracker = contract_tracker
+    tracker = get_contract_tracker()
+
+    # Process sales first to create TAO lots
+    sales_start_date = datetime(2025, 11, 1)
+    with patch.object(tracker, '_resolve_time_window', return_value=(
+        int(sales_start_date.timestamp()),
+        int(transfers_end_date.timestamp())
+    )):
+        tracker.process_sales(lookback_days=(transfers_end_date - sales_start_date).days + 1)
     
-    # Update tracker state to reflect that income has been processed
-    tracker.last_staking_income_timestamp = int(transfers_end_date.timestamp())
-    tracker.last_contract_income_timestamp = int(transfers_end_date.timestamp())
-    tracker.last_sale_timestamp = int(transfers_start_date.timestamp()) - 1
-    tracker.last_transfer_timestamp = int(transfers_start_date.timestamp()) - 1
-    
-    # Compute expected transfers using the TAO lots that were just created
+    # Now compute expected transfers using the TAO lots that were just created
+    # Use same date range as tracker processed to ensure consistency
     expected_transfers = compute_expected_transfers(
         sheet_id=TEST_TRACKER_SHEET_ID,
         start_date=transfers_start_date,
         end_date=transfers_end_date,
-        wallet_address=wallet_address,
+        wallet_address=TEST_PAYOUT_COLDKEY_SS58,
         brokerage_address=TEST_BROKER_SS58,
-        cost_basis_method=CostBasisMethod.HIFO
+        cost_basis_method=CostBasisMethod.HIFO,
+        sales_start_date=sales_start_date  # Match tracker's sales date range
     )
     
-    # Process transfers (patch _resolve_time_window)
+    # Process transfers (with same time window patch)
     with patch.object(tracker, '_resolve_time_window', return_value=(
         int(transfers_start_date.timestamp()),
         int(transfers_end_date.timestamp())
     )):
-        tracker.process_sales(lookback_days=(transfers_end_date - transfers_start_date).days + 1)
         actual_transfers = tracker.process_transfers(lookback_days=(transfers_end_date - transfers_start_date).days + 1)
     
     # Verify we got the expected number of transfers

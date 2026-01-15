@@ -57,16 +57,18 @@ class MockWorksheet:
     - Current state of rows
     """
     
-    def __init__(self, name: str, headers: List[str]):
+    def __init__(self, name: str, headers: List[str], spreadsheet=None):
         """
         Initialize worksheet with name and headers.
         
         Args:
             name: Worksheet name
             headers: List of column names for the first row
+            spreadsheet: Parent MockSpreadsheet reference
         """
         self.name = name
         self.headers = headers
+        self.spreadsheet = spreadsheet
         self.rows: List[List[Any]] = []
         self.operations: List[WorksheetOperation] = []
         
@@ -272,7 +274,7 @@ class MockSpreadsheet:
             else:
                 raise AssertionError(f"Unknown sheet {name}")
             
-            worksheet = MockWorksheet(name, headers)
+            worksheet = MockWorksheet(name, headers, spreadsheet=self)
             # Add header row as first row
             worksheet.append_row(headers)
             self.worksheets[name] = worksheet
@@ -309,7 +311,7 @@ class MockSpreadsheet:
             else:
                 raise AssertionError(f"Unknown sheet {title}")
             
-            worksheet = MockWorksheet(title, headers)
+            worksheet = MockWorksheet(title, headers, spreadsheet=self)
             # Add header row as first row
             worksheet.append_row(headers)
             self.worksheets[title] = worksheet

@@ -69,6 +69,7 @@ def get_tao_price_for_date(raw_historical_prices) -> float:
 def compute_expected_staking_emissions(
     raw_stake_balance: list[dict],
     raw_stake_events: list[dict],
+    raw_historical_prices: dict,
 ) -> tuple[int, float]:
     """Compute expected staking emissions from raw data.
     
@@ -91,7 +92,7 @@ def compute_expected_staking_emissions(
     def _compute_expected_staking_emissions(
         start_date: datetime,
         end_date: datetime
-    ) -> tuple[int, float]:
+    ) -> list:
         """Compute expected staking emissions from raw data.
         
         This replicates the logic in process_staking_emissions:
@@ -107,7 +108,7 @@ def compute_expected_staking_emissions(
             end_date: End of date range
             
         Returns:
-            Tuple of (count of emission lots, total alpha emitted)
+            List of emission lot dictionaries with usd_fmv and other values
         """ 
         balance_history = raw_stake_balance
         delegation_events = raw_stake_events 
@@ -127,15 +128,20 @@ def compute_expected_staking_emissions(
         # Group events by day
         events_by_day = group_events_by_day(events)
         
+        # Create price lookup function from raw historical prices
+        def price_lookup(day_str: str) -> float:
+            """Look up TAO price for a specific day."""
+            return raw_historical_prices.get(day_str, {}).get('price', 0.0)
+        
         # Calculate emissions per day (comparing consecutive days)
-        _, emission_count, total_alpha_emitted = calculate_daily_emissions(
+        emission_lots, emission_count, total_alpha_emitted = calculate_daily_emissions(
             daily_balances, 
             events_by_day,
-            price_per_tao=20.0,  # Fixed price for emissions test
+            price_lookup=price_lookup,
             emission_threshold=0.0001
         )
         
-        return emission_count, total_alpha_emitted
+        return emission_lots
     
     return _compute_expected_staking_emissions
 

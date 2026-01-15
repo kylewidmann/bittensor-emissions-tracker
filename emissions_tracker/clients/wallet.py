@@ -45,7 +45,8 @@ class WalletClientInterface(ABC):
         nominator: str,
         start_time: int,
         end_time: int,
-        is_transfer: Optional[bool] = None
+        is_transfer: Optional[bool] = None,
+        action: Optional[str] = None
     ) -> List[TaoStatsDelegation]:
         """
         Fetch delegation events (DELEGATE/UNDELEGATE).
@@ -59,6 +60,7 @@ class WalletClientInterface(ABC):
             is_transfer: If True, only return DELEGATE events with transfers.
                         If False, only return events without transfers.
                         If None, return all events.
+            action: Optional action filter ('DELEGATE', 'UNDELEGATE', or None for all)
             
         Returns:
             List of delegation dicts with keys:

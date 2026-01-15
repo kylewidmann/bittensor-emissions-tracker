@@ -282,6 +282,12 @@ class AlphaLot:
 
 
 @dataclass
+class AlphaLotRow(AlphaLot):
+    """AlphaLot with sheet row number attached for batch updates."""
+    row: int = 0  # Sheet row number (1-indexed, where 1 is header)
+
+
+@dataclass
 class LotConsumption:
     """Records how much of a lot was consumed in a disposal."""
     lot_id: str

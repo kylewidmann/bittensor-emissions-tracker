@@ -51,26 +51,41 @@ def test_process_contract_income(contract_tracker, raw_stake_events, start_date,
     with patch.object(contract_tracker, '_resolve_time_window', return_value=(start_time, end_time)):
         new_lots = contract_tracker.process_contract_income(lookback_days=lookback_days)
     
-    # Get actual results from returned lots
+    # Verify count matches
     actual_count = len(new_lots)
-    actual_alpha_total = sum(lot.alpha_rao for lot in new_lots)
-    actual_usd_total = sum(lot.usd_fmv for lot in new_lots)
-    
-    # Verify totals match
     assert actual_count == expected_count, f"Expected {expected_count} lots, got {actual_count}"
-    assert actual_alpha_total == expected_alpha_total, \
-        f"Expected {expected_alpha_total} RAO alpha, got {actual_alpha_total}"
-    assert abs(actual_usd_total - expected_usd_total) < 0.01, \
-        f"Expected ${expected_usd_total} USD, got ${actual_usd_total}"
     
-    # Verify lot properties
-    for lot in new_lots:
-        assert lot.source_type == SourceType.CONTRACT
-        assert lot.alpha_rao > 0
-        assert lot.alpha_rao_remaining == lot.alpha_rao  # Should be open/unused
-        assert lot.usd_fmv > 0
-        assert lot.lot_id.startswith('ALPHA-')
+    # Sort both lists by timestamp for comparison
+    from datetime import datetime
+    expected_sorted = sorted(filtered_events, key=lambda x: int(datetime.fromisoformat(x['timestamp'].replace('Z', '+00:00')).timestamp()))
+    actual_sorted = sorted(new_lots, key=lambda x: x.timestamp)
     
-    print(f"✓ Processed {actual_count} contract income lots")
-    print(f"  Total ALPHA: {actual_alpha_total / 1e9:.4f} ({actual_alpha_total} RAO)")
-    print(f"  Total USD: ${actual_usd_total:.2f}")
+    # Compare each lot to expected values
+    for i, (expected, actual) in enumerate(zip(expected_sorted, actual_sorted)):
+        expected_ts = int(datetime.fromisoformat(expected['timestamp'].replace('Z', '+00:00')).timestamp())
+        expected_alpha_rao = int(expected['alpha'])
+        expected_usd_fmv = float(expected['usd'])
+        
+        # Verify timestamp matches exactly
+        assert actual.timestamp == expected_ts, \
+            f"Lot {i+1} timestamp mismatch: {actual.timestamp} != {expected_ts}"
+        
+        # Verify alpha RAO matches exactly
+        assert actual.alpha_rao == expected_alpha_rao, \
+            f"Lot {i+1} ALPHA RAO mismatch: {actual.alpha_rao} != {expected_alpha_rao}"
+        
+        # Verify alpha_rao_remaining equals alpha_rao (lot is open/unused)
+        assert actual.alpha_rao_remaining == actual.alpha_rao, \
+            f"Lot {i+1} should be fully open: {actual.alpha_rao_remaining} != {actual.alpha_rao}"
+        
+        # Verify USD FMV matches exactly
+        assert actual.usd_fmv == expected_usd_fmv, \
+            f"Lot {i+1} USD FMV mismatch: {actual.usd_fmv} != {expected_usd_fmv}"
+        
+        # Verify source type
+        assert actual.source_type == SourceType.CONTRACT, \
+            f"Lot {i+1} should have CONTRACT source type"
+        
+        # Verify lot ID format
+        assert actual.lot_id.startswith('ALPHA-'), \
+            f"Lot {i+1} ID should start with 'ALPHA-'"

@@ -67,7 +67,7 @@ def test_process_sales(
         int(sales_start_date.timestamp()),
         int(sales_end_date.timestamp())
     )):
-        sales = tracker.process_sales(lookback_days=sales_lookback)
+        sales = tracker.process_alpha_sales(lookback_days=sales_lookback)
     
     assert len(sales) == expected_count, f"Expected {expected_count} sales, got {len(sales)}"
     

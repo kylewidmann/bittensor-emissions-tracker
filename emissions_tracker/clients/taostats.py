@@ -124,7 +124,8 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
         nominator: str,
         start_time: int,
         end_time: int,
-        is_transfer: Optional[bool] = None
+        is_transfer: Optional[bool] = None,
+        action: Optional[str] = None
     ) -> List[TaoStatsDelegation]:
         """Fetch delegation/stake events via Taostats API.
         
@@ -132,11 +133,12 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
             is_transfer: If True, only return DELEGATE events with transfers to another address.
                         If False, only return events without transfers.
                         If None, return all events.
+            action: Optional action filter ('DELEGATE', 'UNDELEGATE', or None for all)
         """
         try:
             url = f"{self.base_url}/delegation/v1"
             params = {
-                "action": "all",
+                "action": action.lower() if action else "all",
                 "netuid": netuid,
                 "delegate": delegate,
                 "nominator": nominator,

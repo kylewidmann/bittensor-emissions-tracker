@@ -22,8 +22,8 @@ def test_process_staking_emissions(
     end_date
 ):
     """Test staking emissions processing for a given date range."""
-    # Compute expected values from raw data
-    expected_count, expected_alpha_total = compute_expected_staking_emissions(
+    # Compute expected emission lots from raw data
+    expected_lots = compute_expected_staking_emissions(
         start_date,
         end_date
     )
@@ -38,17 +38,44 @@ def test_process_staking_emissions(
     
     # Get actual results from returned lots
     actual_count = len(new_lots)
-    actual_alpha_total = sum(lot.alpha for lot in new_lots)
+    expected_count = len(expected_lots)
     
-    # Verify totals match
+    # Verify counts match
     assert actual_count == expected_count, \
         f"Expected {expected_count} emission lots, got {actual_count}"
     
-    # Allow small floating point tolerance
-    assert abs(actual_alpha_total - expected_alpha_total) < 0.001, \
-        f"Expected {expected_alpha_total:.6f} ALPHA emitted, got {actual_alpha_total:.6f}"
+    # Sort both lists by timestamp for comparison
+    expected_lots_sorted = sorted(expected_lots, key=lambda x: x['timestamp'])
+    actual_lots_sorted = sorted(new_lots, key=lambda x: x.timestamp)
     
-    # Verify all lots have positive alpha quantity
-    for lot in new_lots:
-        assert lot.alpha > 0, f"Lot {lot.lot_id} has non-positive alpha: {lot.alpha}"
-        assert lot.source_type == SourceType.STAKING
+    # Compare each lot
+    for i, (expected, actual) in enumerate(zip(expected_lots_sorted, actual_lots_sorted)):
+        # Verify timestamps are from the same day (not exact match due to different balance snapshot times)
+        from datetime import datetime
+        expected_date = datetime.fromtimestamp(expected['timestamp']).date()
+        actual_date = datetime.fromtimestamp(actual.timestamp).date()
+        assert actual_date == expected_date, \
+            f"Lot {i+1} date mismatch: {actual_date} != {expected_date}"
+        
+        # Verify alpha quantity matches exactly
+        assert abs(actual.alpha - expected['alpha_quantity']) < 0.001, \
+            f"Lot {i+1} ALPHA quantity mismatch: {actual.alpha:.6f} != {expected['alpha_quantity']:.6f}"
+        
+        # Verify USD values are positive and non-zero (validates calculation is working)
+        assert actual.usd_fmv > 0, \
+            f"Lot {i+1} has non-positive USD FMV: {actual.usd_fmv}"
+        assert actual.usd_per_alpha > 0, \
+            f"Lot {i+1} has non-positive USD per alpha: {actual.usd_per_alpha}"
+        
+        # Verify expected values are also positive
+        assert expected['usd_fmv'] > 0, \
+            f"Expected lot {i+1} has non-positive USD FMV: {expected['usd_fmv']}"
+        
+        # Verify source type
+        assert actual.source_type == SourceType.STAKING, \
+            f"Lot {i+1} should have STAKING source type"
+        
+        # Verify usd_fmv = alpha * usd_per_alpha (within floating point tolerance)
+        expected_fmv = actual.alpha * actual.usd_per_alpha
+        assert abs(actual.usd_fmv - expected_fmv) < 0.01, \
+            f"Lot {i+1} FMV consistency check: {actual.usd_fmv} != {actual.alpha} * {actual.usd_per_alpha}"

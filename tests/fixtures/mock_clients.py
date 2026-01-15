@@ -62,7 +62,8 @@ class MockTaoStatsClient(WalletClientInterface, PriceClient):
         nominator: str,
         start_time: int,
         end_time: int,
-        is_transfer: Optional[bool] = None
+        is_transfer: Optional[bool] = None,
+        action: Optional[str] = None
     ) -> List[TaoStatsDelegation]:
         """Filter and return delegation events matching criteria.
         
@@ -92,6 +93,11 @@ class MockTaoStatsClient(WalletClientInterface, PriceClient):
             # Apply nominator filter (required)
             if event['nominator']['ss58'] != nominator:
                 continue
+            
+            # Filter by action if specified
+            if action is not None:
+                if event['action'] != action.upper():
+                    continue
             
             # Filter by is_transfer if specified
             # NOTE: Only filter if is_transfer is explicitly True or False
