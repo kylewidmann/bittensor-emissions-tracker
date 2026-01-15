@@ -215,8 +215,9 @@ def compute_expected_expenses(
                 
                 expense_undelegates.append(normalized_event)
         
-        # DON'T sort - keep in raw JSON order to match how the mock wallet client returns them
-        # This ensures lot consumption order matches between expected and actual
+        # Sort expenses chronologically to match MockTaoStatsClient behavior
+        # The mock client now returns delegations in timestamp_asc order
+        expense_undelegates.sort(key=lambda x: x['timestamp'])
         
         # Process each expense
         expected_expenses = []
@@ -312,7 +313,8 @@ def compute_expected_expenses(
 def compute_expected_sales(
     raw_stake_balance: list[Dict[str, Any]],
     raw_stake_events: list[Dict[str, Any]],
-    raw_historical_prices: Dict[str, Any]
+    raw_historical_prices: Dict[str, Any],
+    raw_transfer_events: list[Dict[str, Any]]
 ) -> list[Dict[str, Any]]:
     """
     Compute expected sales from raw JSON data.
@@ -461,10 +463,27 @@ def compute_expected_sales(
         for event in undelegate_events:
             timestamp = int(datetime.fromisoformat(event['timestamp'].replace('Z', '+00:00')).timestamp())
             alpha_disposed = int(event['alpha']) / 1e9
-            tao_amount = float(event['amount']) / 1e9
-            fee_tao = float(event['fee']) / 1e9
+            tao_expected_rao = float(event['amount'])  # Expected TAO in RAO (before fees)
+            extrinsic_id = event['extrinsic_id']
+            fee_tao = float(event['fee']) / 1e9  # NOTE: This fee is NOT deducted from TAO received - it's ignored
             slippage_ratio = float(event.get('slippage', 0))
             usd_proceeds = float(event.get('usd', 0))
+            
+            # Find associated transfers in the same extrinsic (network fees to fee collector)
+            # These ARE deducted from the TAO received
+            associated_transfers = [
+                t for t in raw_transfer_events
+                if t.get('extrinsic_id') == extrinsic_id and
+                   t.get('to', {}).get('ss58') != 'Kraken_Brokerage_Address'  # Exclude brokerage transfers
+            ]
+            
+            # Calculate actual TAO received: expected TAO - associated transfers
+            tao_actual_rao = tao_expected_rao
+            for transfer in associated_transfers:
+                tao_actual_rao -= float(transfer.get('amount', 0))  # Transfer amount in RAO
+                tao_actual_rao -= float(transfer.get('fee', 0) or 0)  # Transfer fee in RAO
+            
+            tao_amount = tao_actual_rao / 1e9  # Convert to TAO for calculations
             
             # Calculate TAO price from USD proceeds (already in event data)
             tao_price = usd_proceeds / tao_amount if tao_amount > 0 else 0.0
@@ -532,18 +551,18 @@ def compute_expected_sales(
 def compute_expected_transfers(
     raw_transfer_events,
     raw_historical_prices,
-    mock_sheets,
+    raw_stake_events,
 ) -> list[Dict[str, Any]]:
     """
-    Compute expected transfers from raw JSON data using TAO lots from the tracker.
+    Compute expected transfers from raw JSON data.
     
-    This reads the TAO lots that the tracker created (from processing sales)
-    and simulates transfer processing to calculate expected values.
+    Calculates TAO lots from raw sales data (UNDELEGATE events),
+    then simulates transfer processing to calculate expected values.
     
     Args:
-        raw_transfer_data: Raw transfer events
+        raw_transfer_events: Raw transfer events
         raw_historical_prices: Historical TAO price data
-        mock_sheets: Mock sheets environment to read TAO lots
+        raw_stake_events: Raw stake events (to find sales)
     
     Returns:
         List of expected transfer dictionaries with computed values
@@ -555,35 +574,68 @@ def compute_expected_transfers(
         end_date: datetime,
         wallet_address: str,
         brokerage_address: str,
-        cost_basis_method: CostBasisMethod = CostBasisMethod.FIFO
+        cost_basis_method: CostBasisMethod = CostBasisMethod.FIFO,
+        sales_start_date: datetime = None
     ):
+        """
+        Compute expected transfers for a date range.
+        
+        Args:
+            sheet_id: Sheet ID (unused but kept for interface compatibility)
+            start_date: Start date for transfers to process
+            end_date: End date for transfers to process
+            wallet_address: Wallet address to filter transfers from
+            brokerage_address: Brokerage address to filter transfers to
+            cost_basis_method: FIFO or HIFO lot consumption method
+            sales_start_date: Start date for sales to include (if None, includes all sales before end_date)
+        """
         
         start_ts = int(start_date.timestamp())
         end_ts = int(end_date.timestamp())
+        sales_start_ts = int(sales_start_date.timestamp()) if sales_start_date else 0
         historical_prices = raw_historical_prices
         
         # Helper function to get price for a specific date string (YYYY-MM-DD)
         def price_lookup(date_str: str) -> float:
             return historical_prices[date_str]['price']
         
-        # Step 1: Read TAO lots from the tracker's TAO Lots sheet
-        # These were created by the tracker when processing sales
-        spreadsheet = mock_sheets.client.spreadsheets.get(sheet_id)
-        tao_lots_sheet = spreadsheet.worksheet("TAO Lots")
-        tao_lot_rows = tao_lots_sheet.get_all_records()
+        # Step 1: Calculate TAO lots from raw sales data (UNDELEGATE events with is_transfer=None)
+        # Filter for UNDELEGATE events (user-initiated sales) - these create TAO lots
+        # Include sales from sales_start_date up to end_date (transfer range)
+        sales_events = []
+        for e in raw_stake_events:
+            event_ts = int(datetime.fromisoformat(e['timestamp'].replace('Z', '+00:00')).timestamp())
+            if (e['action'] == 'UNDELEGATE' and 
+                e.get('is_transfer') is None and
+                event_ts >= sales_start_ts and
+                event_ts <= end_ts):  # Only include sales up to end of transfer range
+                sales_events.append({
+                    'timestamp': event_ts,
+                    'tao_received': float(e['amount']) / 1e9,
+                    'usd_value': float(e.get('usd', 0)),
+                    'block_number': e.get('block_number', 0),
+                    'extrinsic_id': e.get('extrinsic_id', '')
+                })
         
-        # Convert to dict format for consumption tracking
+        # Sort sales by timestamp
+        sales_events.sort(key=lambda x: x['timestamp'])
+        
+        # Create TAO lots from sales
         tao_lots = []
-        for row in tao_lot_rows:
+        for i, sale in enumerate(sales_events, start=1):
+            tao_quantity = sale['tao_received']
+            usd_basis = sale['usd_value']
+            usd_per_tao = usd_basis / tao_quantity if tao_quantity > 0 else 0
+            
             tao_lots.append({
-                'lot_id': row['TAO Lot ID'],
-                'timestamp': int(datetime.fromisoformat(row['Date']).timestamp()) if isinstance(row['Date'], str) else row['Date'],
-                'tao_quantity': float(row['TAO Quantity']),
-                'tao_remaining': float(row['TAO Remaining']),
-                'usd_basis': float(row['USD Basis']),
-                'usd_per_tao': float(row['USD Basis']) / float(row['TAO Quantity']) if float(row['TAO Quantity']) > 0 else 0,
-                'block_number': row.get('Block', 0),
-                'extrinsic_id': row.get('Extrinsic ID', '')
+                'lot_id': f'TAO-{i:04d}',
+                'timestamp': sale['timestamp'],
+                'tao_quantity': tao_quantity,
+                'tao_remaining': tao_quantity,
+                'usd_basis': usd_basis,
+                'usd_per_tao': usd_per_tao,
+                'block_number': sale['block_number'],
+                'extrinsic_id': sale['extrinsic_id']
             })
         
         # Step 2: Load and process transfer events
@@ -628,8 +680,10 @@ def compute_expected_transfers(
                     'extrinsic_id': t.get('extrinsic_id')
                 })
         
-        # DON'T sort - keep in raw JSON order to match how the mock wallet client returns them
-        # The tracker processes transfers in the order received from the API
+        # Sort transfers chronologically (oldest first)
+        # Note: We're reading from raw JSON which is in reverse chronological order
+        # The MockTaoStatsClient sorts its output, but this function reads raw JSON directly
+        brokerage_transfers.sort(key=lambda x: x['timestamp'])
         
         # Sort TAO lots for consumption based on cost basis method
         if cost_basis_method == CostBasisMethod.FIFO:
@@ -651,7 +705,27 @@ def compute_expected_transfers(
             available_lots = [lot for lot in sorted_tao_lots if lot['timestamp'] <= transfer_ts and lot['tao_remaining'] > 0]
             available_tao = sum(lot['tao_remaining'] for lot in available_lots)
             
+            # Debug: show available lots in consumption order
+            print(f"\n=== Transfer #{transfer_counter} at {datetime.fromtimestamp(transfer_ts)} ===")
+            print(f"Need: {total_outflow:.4f} TAO")
+            print(f"Available lots (HIFO order):")
+            for lot in available_lots:
+                print(f"  {lot['lot_id']}: {lot['tao_remaining']:.4f} TAO remaining @ ${lot['usd_per_tao']:.2f}/TAO")
+            print(f"Total available: {available_tao:.4f} TAO")
+            
             # Verify sufficient TAO lots exist - if not, this indicates bad data or preprocessing
+            if available_tao < total_outflow:
+                print(f"\n=== DEBUG: Insufficient TAO for transfer ===")
+                print(f"Transfer timestamp: {datetime.fromtimestamp(transfer_ts)} ({transfer_ts})")
+                print(f"Need: {total_outflow:.4f} TAO")
+                print(f"Available: {available_tao:.4f} TAO")
+                print(f"\nAll TAO lots created before transfer:")
+                for lot in [l for l in sorted_tao_lots if l['timestamp'] <= transfer_ts]:
+                    lot_dt = datetime.fromtimestamp(lot['timestamp'])
+                    print(f"  {lot['lot_id']}: {lot_dt} - {lot['tao_quantity']:.4f} TAO (remaining: {lot['tao_remaining']:.4f})")
+                print(f"\nTotal TAO lots: {len(tao_lots)}")
+                print(f"Sales start timestamp: {sales_start_ts} ({datetime.fromtimestamp(sales_start_ts) if sales_start_ts > 0 else 'ALL'})")
+                
             assert available_tao >= total_outflow, (
                 f"Insufficient TAO lots for transfer at {datetime.fromtimestamp(transfer_ts)}: "
                 f"need {total_outflow:.4f} TAO but only {available_tao:.4f} available. "

@@ -19,11 +19,12 @@ Usage:
 """
 
 import pytest
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
 from unittest.mock import patch, MagicMock
 from dataclasses import dataclass, field
 
+from emissions_tracker.models import TaoLot
 from tests.fixtures.mock_config import TEST_PAYOUT_COLDKEY_SS58, TEST_SMART_CONTRACT_SS58, TEST_SUBNET_ID, TEST_VALIDATOR_SS58
 
 
@@ -173,7 +174,7 @@ class MockWorksheet:
             col_letters = ''.join(c for c in start_cell if c.isalpha())
             row_num = int(''.join(c for c in start_cell if c.isdigit()))
             col_index = column_letter_to_index(col_letters) - 1
-            row_index = row_num - 2  # Skip header row, convert to 0-based
+            row_index = row_num - 1  # Convert to 0-based (header is at rows[0])
             
             # Ensure row exists
             while len(self.rows) <= row_index:
@@ -439,12 +440,12 @@ def mock_sheets():
     mock_env = MockSheetsEnvironment()
     
     # Patch gspread module in tracker
-    with patch('emissions_tracker.tracker.gspread', mock_env.gspread_module):
+    with patch('emissions_tracker.trackers.contract_tracker.gspread', mock_env.gspread_module):
         # Patch ServiceAccountCredentials (tracker checks if it's None)
         mock_creds_class = MagicMock()
         mock_creds_class.from_json_keyfile_name.return_value = MagicMock()
         
-        with patch('emissions_tracker.tracker.ServiceAccountCredentials', mock_creds_class):
+        with patch('emissions_tracker.trackers.contract_tracker.ServiceAccountCredentials', mock_creds_class):
             yield mock_env
 
 
@@ -521,29 +522,39 @@ def seed_historical_lots(mock_sheets, raw_stake_balance, raw_stake_events, raw_h
         start_ts = int(start_date.timestamp())
         end_ts = int(end_date.timestamp())
         
-        # Load account history to get actual opening balance
+        # Load stake_balance to get actual opening balance (raw ALPHA, not TAO-equivalent)
         from pathlib import Path
         from datetime import timezone
         data_dir = Path(__file__).parent.parent / "data" / "all"
-        with open(data_dir / "account_history.json") as f:
-            account_history = json.load(f)['data']
-        
-        # Find balance on or before start_date
+        with open(data_dir / "stake_balance.json") as f:
+            stake_balance_data = json.load(f)['data']
+
+        # Find balance on day BEFORE start_date (to get true opening balance)
         opening_alpha_amount = None
         # Make start_date timezone-aware for comparison
         start_date_aware = start_date.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
-        
-        for record in account_history:
+        # We want the balance from the day BEFORE start_date
+        day_before_start = start_date_aware - timedelta(days=1)
+
+        for record in stake_balance_data:
             record_dt = datetime.fromisoformat(record['timestamp'].replace('Z', '+00:00'))
             record_date_only = record_dt.replace(hour=0, minute=0, second=0, microsecond=0)
-            
-            # Use the balance from start_date if available, otherwise use the closest previous day
-            if record_date_only <= start_date_aware:
-                opening_alpha_amount = int(record['balance_staked']) / 1e9
+
+            # Use the last balance from the day before start_date
+            if record_date_only == day_before_start:
+                opening_alpha_amount = int(record['balance']) / 1e9
                 break
-        
+
         if opening_alpha_amount is None:
-            raise ValueError(f"No account balance found on or before {start_date.strftime('%Y-%m-%d')}")
+            # Fallback: find any balance before start_date
+            for record in stake_balance_data:
+                record_dt = datetime.fromisoformat(record['timestamp'].replace('Z', '+00:00'))
+                if record_dt < start_date_aware:
+                    opening_alpha_amount = int(record['balance']) / 1e9
+                    break
+
+        if opening_alpha_amount is None:
+            raise ValueError(f"No balance found before {start_date.strftime('%Y-%m-%d')}")
         
         # Create a price lookup function for historical TAO prices
         def price_lookup(day_str: str) -> float:
@@ -590,40 +601,43 @@ def seed_historical_lots(mock_sheets, raw_stake_balance, raw_stake_events, raw_h
             if not opening_price_data or 'price' not in opening_price_data:
                 raise ValueError(f"No TAO price data found for opening lot date {opening_lot_date_str}")
             opening_tao_price = opening_price_data['price']
-            opening_usd = opening_alpha_amount * opening_tao_price
+            # ALPHA price is ~8% of TAO price (1 ALPHA ~= 0.08 TAO)
+            tao_alpha_ratio = 0.08
+            opening_alpha_price = opening_tao_price * tao_alpha_ratio
+            opening_usd = opening_alpha_amount * opening_alpha_price
             
             # Create AlphaLot for opening balance
+            opening_alpha_rao = int(round(opening_alpha_amount * 1e9))
             opening_lot = AlphaLot(
                 lot_id="ALPHA-0001",
                 timestamp=opening_lot_ts,
                 block_number=0,
                 source_type=SourceType.STAKING,
-                alpha_quantity=opening_alpha_amount,
-                alpha_remaining=opening_alpha_amount,
+                alpha_rao=opening_alpha_rao,
+                alpha_rao_remaining=opening_alpha_rao,
                 usd_fmv=opening_usd,
-                usd_per_alpha=opening_tao_price,
-                tao_equivalent=opening_alpha_amount * 0.08,  # Rough ratio
+                usd_per_alpha=opening_alpha_price,
+                tao_equivalent=opening_alpha_amount * tao_alpha_ratio,
                 notes="Opening balance"
             )
             income_sheet.append_row(opening_lot.to_sheet_row())
         
-        # Seed computed emission lots
-        lot_counter = 2 if include_opening_lot else 1
+        # Collect all lots (staking emissions + contract income) and sort chronologically
+        all_lots = []
+        
+        # Add staking emission lots
         for lot_data in alpha_lots:
-            alpha_lot = AlphaLot(
-                lot_id=f"ALPHA-{lot_counter:04d}",
-                timestamp=lot_data['timestamp'],
-                block_number=lot_data.get('block_number', 0),
-                source_type=SourceType.STAKING,
-                alpha_quantity=lot_data['alpha_quantity'],
-                alpha_remaining=lot_data['alpha_remaining'],
-                usd_fmv=lot_data['usd_fmv'],
-                usd_per_alpha=lot_data['usd_fmv'] / lot_data['alpha_quantity'] if lot_data['alpha_quantity'] > 0 else 0,
-                tao_equivalent=lot_data.get('tao_equivalent', lot_data['alpha_quantity'] * 0.08),
-                notes=f"Staking emissions"
-            )
-            income_sheet.append_row(alpha_lot.to_sheet_row())
-            lot_counter += 1
+            all_lots.append({
+                'timestamp': lot_data['timestamp'],
+                'block_number': lot_data.get('block_number', 0),
+                'source_type': SourceType.STAKING,
+                'alpha_quantity': lot_data['alpha_quantity'],
+                'alpha_rao': int(round(lot_data['alpha_quantity'] * 1e9)),
+                'usd_fmv': lot_data['usd_fmv'],
+                'usd_per_alpha': lot_data['usd_fmv'] / lot_data['alpha_quantity'] if lot_data['alpha_quantity'] > 0 else 0,
+                'tao_equivalent': lot_data.get('tao_equivalent', lot_data['alpha_quantity'] * 0.08),
+                'notes': "Staking emissions"
+            })
         
         # Add contract income lots if contract parameters are provided
         if all([contract_address, netuid is not None, delegate, nominator]):
@@ -645,34 +659,59 @@ def seed_historical_lots(mock_sheets, raw_stake_balance, raw_stake_events, raw_h
                 tao_price = raw_historical_prices.get(event_date, {}).get('price', 0.0)
                 
                 alpha_quantity = int(event['alpha']) / 1e9
+                alpha_rao = int(event['alpha'])
                 usd_fmv = float(event.get('usd', 0))
                 
-                contract_lot = AlphaLot(
-                    lot_id=f"ALPHA-{lot_counter:04d}",
-                    timestamp=event_ts,
-                    block_number=event.get('block_number', 0),
-                    source_type=SourceType.CONTRACT,
-                    alpha_quantity=alpha_quantity,
-                    alpha_remaining=alpha_quantity,
-                    usd_fmv=usd_fmv,
-                    usd_per_alpha=usd_fmv / alpha_quantity if alpha_quantity > 0 else 0,
-                    tao_equivalent=float(event.get('amount', 0)) / 1e9,
-                    notes=f"Contract income"
-                )
-                income_sheet.append_row(contract_lot.to_sheet_row())
-                lot_counter += 1
+                all_lots.append({
+                    'timestamp': event_ts,
+                    'block_number': event.get('block_number', 0),
+                    'source_type': SourceType.CONTRACT,
+                    'alpha_quantity': alpha_quantity,
+                    'alpha_rao': alpha_rao,
+                    'usd_fmv': usd_fmv,
+                    'usd_per_alpha': usd_fmv / alpha_quantity if alpha_quantity > 0 else 0,
+                    'tao_equivalent': float(event.get('amount', 0)) / 1e9,
+                    'notes': "Contract income"
+                })
+        
+        # Sort all lots by timestamp to ensure true chronological order
+        all_lots_sorted = sorted(all_lots, key=lambda x: x['timestamp'])
+        
+        # Create and append all lots in chronological order
+        lot_counter = 2 if include_opening_lot else 1
+        for lot_data in all_lots_sorted:
+            lot = AlphaLot(
+                lot_id=f"ALPHA-{lot_counter:04d}",
+                timestamp=lot_data['timestamp'],
+                block_number=lot_data['block_number'],
+                source_type=lot_data['source_type'],
+                alpha_rao=lot_data['alpha_rao'],
+                alpha_rao_remaining=lot_data['alpha_rao'],
+                usd_fmv=lot_data['usd_fmv'],
+                usd_per_alpha=lot_data['usd_per_alpha'],
+                tao_equivalent=lot_data['tao_equivalent'],
+                notes=lot_data['notes']
+            )
+            income_sheet.append_row(lot.to_sheet_row())
+            lot_counter += 1
     
     return _seed_lots
 
 
 @pytest.fixture()
-def seed_contract_sheets(seed_historical_lots, mock_sheets):
+def seed_contract_sheets(
+    raw_account_history,
+    raw_stake_balance,
+    raw_historical_prices,
+    seed_historical_lots, 
+    mock_sheets
+):
     """
     Fixture that seeds mock sheets with historical data based on test parameters.
     Returns a function that takes test params and seeds the sheets.
     """
     def _seed_sheets(start_date, end_date, sheet_id):
-        """Seed the Income sheet with historical ALPHA lots for the test period."""
+        """Seed the Income sheet with historical ALPHA lots and TAO Lots sheet with opening balance."""
         
         # seed_historical_lots now uses historical TAO prices and derives opening balance from account_history.json
         # It also includes contract income when contract parameters are provided
@@ -686,13 +725,52 @@ def seed_contract_sheets(seed_historical_lots, mock_sheets):
             delegate=TEST_VALIDATOR_SS58,
             nominator=TEST_PAYOUT_COLDKEY_SS58
         )
+        
+        # Find balance_free from day before start_date
+        start_date_aware = start_date.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
+        day_before_start = start_date_aware - timedelta(days=1)
+        
+        opening_tao_rao = None
+        for record in raw_account_history:
+            record_dt = datetime.fromisoformat(record['timestamp'].replace('Z', '+00:00'))
+            record_date_only = record_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+            
+            if record_date_only == day_before_start:
+                opening_tao_rao = int(record['balance_free'])
+                break
+        
+        if opening_tao_rao and opening_tao_rao > 0:
+            # Get TAO price for the opening date
+            opening_date_str = start_date.strftime('%Y-%m-%d')
+            opening_tao_price = raw_historical_prices.get(opening_date_str, {}).get('price', 0.0)
+            
+            if opening_tao_price:
+                opening_tao_amount = opening_tao_rao / 1e9
+                opening_tao_usd = opening_tao_amount * opening_tao_price
+                
+                spreadsheet = mock_sheets.client.spreadsheets.get(sheet_id)
+                tao_lots_sheet = spreadsheet.worksheet("TAO Lots")
+                
+                opening_tao_lot = TaoLot(
+                    lot_id="TAO-0001",
+                    timestamp=int(start_date.timestamp()),
+                    block_number=0,
+                    rao=opening_tao_rao,
+                    rao_remaining=opening_tao_rao,
+                    usd_basis=opening_tao_usd,
+                    usd_per_tao=opening_tao_price,
+                    source_sale_id="",
+                    extrinsic_id="",
+                    notes="Opening balance"
+                )
+                tao_lots_sheet.append_row(opening_tao_lot.to_sheet_row())
 
-                # Read back the seeded lots from the Income sheet
+        # Read back the seeded lots from the Income sheet
         spreadsheet = mock_sheets.client.spreadsheets.get(sheet_id)
         income_sheet = spreadsheet.worksheet("Income")
         lot_rows = income_sheet.get_all_records()
         
-        # Convert to dict format for consumption tracking
+        # Convert to dict format for consumption tracking (using snake_case keys for compute fixtures)
         alpha_lots = []
         for row in lot_rows:
             alpha_lots.append({
@@ -702,6 +780,7 @@ def seed_contract_sheets(seed_historical_lots, mock_sheets):
                 'alpha_remaining': float(row['Alpha Remaining']),
                 'usd_fmv': float(row['USD FMV']),
                 'usd_per_alpha': float(row['USD FMV']) / float(row['Alpha Quantity']) if float(row['Alpha Quantity']) > 0 else 0,
+                'status': row['Status']
             })
         
         return alpha_lots

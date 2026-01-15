@@ -3,18 +3,29 @@ from datetime import datetime
 from unittest.mock import patch
 import pytest
 
-from emissions_tracker.tracker import BittensorEmissionTracker
 from emissions_tracker.models import SourceType
-from tests.fixtures.mock_config import TEST_PAYOUT_COLDKEY_SS58, TEST_SMART_CONTRACT_SS58, TEST_SUBNET_ID, TEST_TRACKER_SHEET_ID, TEST_VALIDATOR_SS58
+from tests.fixtures.mock_config import (
+    TEST_PAYOUT_COLDKEY_SS58, 
+    TEST_SMART_CONTRACT_SS58, 
+    TEST_SUBNET_ID, 
+    TEST_VALIDATOR_SS58
+)
 from tests.utils import filter_contract_income_events
 
 
 @pytest.mark.parametrize("start_date,end_date", [
+    (datetime(2025, 11, 1), datetime(2025, 11, 5, 23, 59, 59)),
     (datetime(2025, 11, 1), datetime(2025, 11, 30, 23, 59, 59)),
-    (datetime(2025, 10, 1), datetime(2025, 10, 31, 23, 59, 59)),
 ])
 def test_process_contract_income(contract_tracker, raw_stake_events, start_date, end_date):
-    """Test contract income processing for a given date range."""
+    """Test contract income processing for a given date range.
+    
+    This test verifies that the ContractTracker correctly:
+    1. Filters delegation events for contract income (is_transfer=True, transfer_address=smart_contract)
+    2. Creates ALPHA lots with correct amounts and cost basis
+    3. Writes lots to the Income sheet
+    4. Returns the created lots
+    """
     # Filter raw events for contract income in the date range
     # Must match the same filters that the API client uses
     filtered_events = filter_contract_income_events(
@@ -42,7 +53,7 @@ def test_process_contract_income(contract_tracker, raw_stake_events, start_date,
     
     # Get actual results from returned lots
     actual_count = len(new_lots)
-    actual_alpha_total = sum(lot.alpha_quantity for lot in new_lots)
+    actual_alpha_total = sum(lot.alpha_rao for lot in new_lots)
     actual_usd_total = sum(lot.usd_fmv for lot in new_lots)
     
     # Verify totals match
@@ -51,6 +62,15 @@ def test_process_contract_income(contract_tracker, raw_stake_events, start_date,
         f"Expected {expected_alpha_total} RAO alpha, got {actual_alpha_total}"
     assert abs(actual_usd_total - expected_usd_total) < 0.01, \
         f"Expected ${expected_usd_total} USD, got ${actual_usd_total}"
-
-    assert abs(actual_usd_total - expected_usd_total) < 0.01, \
-        f"Expected ${expected_usd_total} USD, got ${actual_usd_total}"
+    
+    # Verify lot properties
+    for lot in new_lots:
+        assert lot.source_type == SourceType.CONTRACT
+        assert lot.alpha_rao > 0
+        assert lot.alpha_rao_remaining == lot.alpha_rao  # Should be open/unused
+        assert lot.usd_fmv > 0
+        assert lot.lot_id.startswith('ALPHA-')
+    
+    print(f"✓ Processed {actual_count} contract income lots")
+    print(f"  Total ALPHA: {actual_alpha_total / 1e9:.4f} ({actual_alpha_total} RAO)")
+    print(f"  Total USD: ${actual_usd_total:.2f}")

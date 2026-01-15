@@ -12,6 +12,7 @@ def tracker(contract_tracker):
 
 @pytest.mark.parametrize("start_date,end_date", [
     (datetime(2025, 11, 1), datetime(2025, 11, 30, 23, 59, 59)),
+    (datetime(2025, 11, 1), datetime(2025, 11, 5, 23, 59, 59)),
     (datetime(2025, 10, 1), datetime(2025, 10, 31, 23, 59, 59)),
 ])
 def test_process_staking_emissions(
@@ -37,7 +38,7 @@ def test_process_staking_emissions(
     
     # Get actual results from returned lots
     actual_count = len(new_lots)
-    actual_alpha_total = sum(lot.alpha_quantity for lot in new_lots)
+    actual_alpha_total = sum(lot.alpha for lot in new_lots)
     
     # Verify totals match
     assert actual_count == expected_count, \
@@ -49,5 +50,5 @@ def test_process_staking_emissions(
     
     # Verify all lots have positive alpha quantity
     for lot in new_lots:
-        assert lot.alpha_quantity > 0, f"Lot {lot.lot_id} has non-positive quantity: {lot.alpha_quantity}"
-        assert lot.source_type == SourceType.CONTRACT
+        assert lot.alpha > 0, f"Lot {lot.lot_id} has non-positive alpha: {lot.alpha}"
+        assert lot.source_type == SourceType.STAKING

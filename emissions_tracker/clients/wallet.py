@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
 
-from emissions_tracker.models import TaoStatsDelegation, TaoStatsTransfer
+from emissions_tracker.models import TaoStatsDelegation, TaoStatsStakeBalance, TaoStatsTransfer
 
 
 class WalletClientInterface(ABC):
@@ -85,7 +85,7 @@ class WalletClientInterface(ABC):
         coldkey: str,
         start_time: int,
         end_time: int
-    ) -> List[Dict[str, Any]]:
+    ) -> List[TaoStatsStakeBalance]:
         """
         Fetch historical stake balance snapshots.
         

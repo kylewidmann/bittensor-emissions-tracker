@@ -39,6 +39,12 @@ class TaoStatsStakeBalance:
         return int(datetime.fromisoformat(self.timestamp.replace('Z', '+00:00')).timestamp())
     
     @property
+    def day(self) -> str:
+        """Extract day in 'YYYY-MM-DD' format from timestamp."""
+        dt = datetime.fromisoformat(self.timestamp.replace('Z', '+00:00'))
+        return dt.strftime('%Y-%m-%d')
+
+    @property
     def balance_rao(self) -> int:
         """Balance in RAO as integer."""
         return int(self.balance)
@@ -102,6 +108,12 @@ class TaoStatsDelegation:
         """Convert ISO timestamp to Unix timestamp."""
         return int(datetime.fromisoformat(self.timestamp.replace('Z', '+00:00')).timestamp())
     
+    @property
+    def day(self) -> str:
+        """Extract day in 'YYYY-MM-DD' format from timestamp."""
+        dt = datetime.fromisoformat(self.timestamp.replace('Z', '+00:00'))
+        return dt.strftime('%Y-%m-%d')
+
     @property
     def rao(self) -> int:
         """Amount in RAO as integer."""
@@ -191,13 +203,17 @@ class GainType(Enum):
 
 @dataclass
 class AlphaLot:
-    """Represents an ALPHA income lot for FIFO tracking."""
+    """Represents an ALPHA income lot for FIFO tracking.
+    
+    Uses RAO (integer) for all ALPHA amounts internally to avoid floating-point precision errors.
+    1 ALPHA = 1e9 RAO (1,000,000,000 RAO).
+    """
     lot_id: str
     timestamp: int
     block_number: int
     source_type: SourceType
-    alpha_quantity: float  # Original amount
-    alpha_remaining: float  # Remaining amount after partial consumption
+    alpha_rao: int  # Original ALPHA amount in RAO (integer)
+    alpha_rao_remaining: int  # Remaining ALPHA in RAO after consumption (integer)
     usd_fmv: float  # Total USD fair market value at receipt
     usd_per_alpha: float  # USD price per ALPHA at receipt
     tao_equivalent: float  # TAO equivalent at receipt
@@ -205,6 +221,16 @@ class AlphaLot:
     transfer_address: Optional[str] = None
     status: LotStatus = LotStatus.OPEN
     notes: str = ""
+    
+    @property
+    def alpha(self) -> float:
+        """Original ALPHA amount (converted from RAO)."""
+        return self.alpha_rao / 1e9
+    
+    @property
+    def alpha_remaining(self) -> float:
+        """Remaining ALPHA amount (converted from RAO)."""
+        return self.alpha_rao_remaining / 1e9
     
     @property
     def date(self) -> str:
@@ -218,9 +244,9 @@ class AlphaLot:
     @property
     def cost_basis_remaining(self) -> float:
         """Pro-rata cost basis for remaining ALPHA."""
-        if self.alpha_quantity == 0:
+        if self.alpha_rao == 0:
             return 0
-        return (self.alpha_remaining / self.alpha_quantity) * self.usd_fmv
+        return (self.alpha_rao_remaining / self.alpha_rao) * self.usd_fmv
     
     def to_sheet_row(self) -> List[Any]:
         """Convert to Google Sheets row."""
@@ -232,8 +258,10 @@ class AlphaLot:
             self.source_type.value,
             self.transfer_address or "",
             self.extrinsic_id or "",
-            self.alpha_quantity,
-            self.alpha_remaining,
+            self.alpha_rao,  # RAO for calculations (integer)
+            self.alpha_rao_remaining,  # RAO remaining for calculations (integer)
+            self.alpha,  # Display column (float)
+            self.alpha_remaining,  # Display column (float)
             self.usd_fmv,
             self.usd_per_alpha,
             self.tao_equivalent,
@@ -246,8 +274,9 @@ class AlphaLot:
     def sheet_headers(cls) -> List[str]:
         return [
             "Lot ID", "Date", "Timestamp", "Block", "Source Type", 
-            "Transfer Address", "Extrinsic ID", "Alpha Quantity", 
-            "Alpha Remaining", "USD FMV", "USD/Alpha", "TAO Equivalent",
+            "Transfer Address", "Extrinsic ID", "Alpha RAO",
+            "Alpha RAO Remaining", "Alpha Quantity", "Alpha Remaining",
+            "USD FMV", "USD/Alpha", "TAO Equivalent",
             "Long Term Date", "Status", "Notes"
         ]
 
@@ -271,12 +300,16 @@ class LotConsumption:
 
 @dataclass
 class TaoLot:
-    """Represents a TAO lot created from ALPHA disposal."""
+    """Represents a TAO lot created from ALPHA disposal.
+    
+    Uses RAO (integer) for all TAO amounts internally to avoid floating-point precision errors.
+    1 TAO = 1e9 RAO (1,000,000,000 RAO).
+    """
     lot_id: str
     timestamp: int
     block_number: int
-    tao_quantity: float
-    tao_remaining: float
+    rao: int  # Original TAO amount in RAO (integer)
+    rao_remaining: int  # Remaining TAO in RAO after consumption (integer)
     usd_basis: float  # Cost basis (proceeds from ALPHA disposal)
     usd_per_tao: float
     source_sale_id: str  # Link to the ALPHA disposal that created this
@@ -285,15 +318,25 @@ class TaoLot:
     notes: str = ""
     
     @property
+    def tao(self) -> float:
+        """Original TAO amount (converted from RAO)."""
+        return self.rao / 1e9
+    
+    @property
+    def tao_remaining(self) -> float:
+        """Remaining TAO amount (converted from RAO)."""
+        return self.rao_remaining / 1e9
+    
+    @property
     def date(self) -> str:
         return datetime.fromtimestamp(self.timestamp).strftime('%Y-%m-%d %H:%M:%S')
     
     @property
     def basis_remaining(self) -> float:
         """Pro-rata basis for remaining TAO."""
-        if self.tao_quantity == 0:
+        if self.rao == 0:
             return 0
-        return (self.tao_remaining / self.tao_quantity) * self.usd_basis
+        return (self.rao_remaining / self.rao) * self.usd_basis
     
     def to_sheet_row(self) -> List[Any]:
         return [
@@ -301,8 +344,10 @@ class TaoLot:
             self.date,
             self.timestamp,
             self.block_number,
-            self.tao_quantity,
-            self.tao_remaining,
+            self.rao,  # RAO for calculations (integer)
+            self.rao_remaining,  # RAO remaining for calculations (integer)
+            self.tao,  # Display column (float)
+            self.tao_remaining,  # Display column (float)
             self.usd_basis,
             self.usd_per_tao,
             self.source_sale_id,
@@ -314,8 +359,9 @@ class TaoLot:
     @classmethod
     def sheet_headers(cls) -> List[str]:
         return [
-            "TAO Lot ID", "Date", "Timestamp", "Block", "TAO Quantity",
-            "TAO Remaining", "USD Basis", "USD/TAO", "Source Sale ID",
+            "TAO Lot ID", "Date", "Timestamp", "Block", "TAO RAO",
+            "TAO RAO Remaining", "TAO Quantity", "TAO Remaining",
+            "USD Basis", "USD/TAO", "Source Sale ID",
             "Extrinsic ID", "Status", "Notes"
         ]
 

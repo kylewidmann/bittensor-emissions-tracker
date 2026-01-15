@@ -131,6 +131,8 @@ class MockTaoStatsClient(WalletClientInterface, PriceClient):
             )
             filtered.append(delegation)
         
+        # Sort by timestamp ascending to match real API behavior (order="timestamp_asc")
+        filtered.sort(key=lambda d: datetime.fromisoformat(d.timestamp.replace('Z', '+00:00')).timestamp())
         return filtered
     
     def get_transfers(
@@ -188,6 +190,8 @@ class MockTaoStatsClient(WalletClientInterface, PriceClient):
             )
             filtered.append(transfer_obj)
         
+        # Sort by timestamp ascending to match real API behavior (order="timestamp_asc")
+        filtered.sort(key=lambda t: datetime.fromisoformat(t.timestamp.replace('Z', '+00:00')).timestamp())
         return filtered
     
     def get_stake_balance_history(
