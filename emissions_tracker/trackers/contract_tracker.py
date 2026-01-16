@@ -8,7 +8,7 @@ from datetime import datetime
 from emissions_tracker.config import TrackerSettings, WaveAccountSettings
 from emissions_tracker.exceptions import PriceNotAvailableError
 from emissions_tracker.models import (
-    AlphaLot, AlphaLotRow, TaoLot, AlphaSale, Expense, TaoStatsStakeBalance, TaoTransfer,
+    AlphaLot, AlphaLotRow, TaoLot, TaoLotRow, AlphaSale, Expense, TaoStatsStakeBalance, TaoStatsTransfer, TaoTransfer,
     SourceType, LotStatus, CostBasisMethod, TaoStatsDelegation, LotConsumption, GainType
 )
 from emissions_tracker.trackers.bittensor_tracker import BittensorTracker, _is_rate_limit_error
@@ -526,6 +526,7 @@ class ContractTracker(BittensorTracker):
             network_fee_tao = int(undelegate.fee) / RAO_PER_TAO
 
             # Calculate slippage
+            # TODO: Look at moving a bunch of these calculations into the models
             slippage_ratio = undelegate.slippage or 0.0
             if slippage_ratio and abs(slippage_ratio) > 1e-9:
                 # Calculate expected TAO before slippage: tao_received = tao_expected * (1 - slippage)
@@ -738,7 +739,7 @@ class ContractTracker(BittensorTracker):
             self.income_sheet.spreadsheet.batch_update(body)
             print(f"  Updated {updated_count} income lots")
 
-    def process_expenses(self) -> list:
+    def process_expenses(self, lookback_days: int = 1) -> list:
         """Process expenses over the specified lookback period.
 
         Args:
@@ -747,8 +748,176 @@ class ContractTracker(BittensorTracker):
         Returns:
             list: List of processed expense lots.
         """
-        # Implementation for processing expenses
-        ...
+        start_time, end_time = self._resolve_time_window(
+            "expenses",
+            self.last_expense_timestamp,
+            lookback_days
+        )
+
+        # Get UNDELEGATE events with transfers (these are expenses)
+        undelegations = self.wallet_client.get_delegations(
+            netuid=self.subnet_id,
+            delegate=self.validator_ss58,
+            nominator=self.coldkey_ss58,
+            start_time=start_time,
+            end_time=end_time,
+            action='UNDELEGATE',
+            is_transfer=True
+        )
+
+        # Filter for expenses: transfer to address other than validator
+        expense_undelegations = [
+            u for u in undelegations
+            if u.transfer_address and u.transfer_address.ss58 != self.validator_ss58
+        ]
+
+        if not expense_undelegations:
+            print("ℹ️  No new expenses found")
+            return []
+
+        # Create expenses
+        expenses, alpha_lots = self._create_expenses(expense_undelegations)
+
+        if expenses:
+            # Write expenses to sheet
+            expense_rows = [expense.to_sheet_row() for expense in expenses]
+            self._append_rows_with_retry(self.expenses_sheet, expense_rows)
+
+            # Update income sheet with consumed lot amounts
+            self._update_consumed_alpha_lots_for_expenses(expenses, alpha_lots)
+
+            max_ts = max(expense.timestamp for expense in expenses)
+            self.last_expense_timestamp = max_ts
+
+            # Sort sheet
+            self._sort_sheet_by_timestamp(self.expenses_sheet, timestamp_col=3, label="Expenses", range_str="A2:O")
+
+            print(f"\n✓ Created {len(expenses)} expenses")
+        else:
+            print("ℹ️  No valid expenses to process")
+
+        return expenses
+
+    def _create_expenses(self, undelegations: list) -> tuple:
+        """Create Expense records from UNDELEGATE events with transfers.
+        
+        Args:
+            undelegations: List of UNDELEGATE events with is_transfer=True
+            
+        Returns:
+            Tuple of (expenses list, alpha_lots list)
+        """
+        # Load available ALPHA lots
+        alpha_lots = self._load_alpha_lots()
+
+        expenses = []
+        for undelegate in undelegations:
+            # Consume ALPHA lots for this expense
+            alpha_rao_needed = int(undelegate.alpha)
+            consumed_lots, total_basis = self._consume_alpha_lots(
+                alpha_lots,
+                alpha_rao_needed,
+                undelegate.timestamp_unix
+            )
+
+            if not consumed_lots:
+                raise ValueError(
+                    f"Insufficient ALPHA lots to cover expense of {alpha_rao_needed / RAO_PER_TAO:.4f} ALPHA "
+                    f"at block {undelegate.block_number}. This indicates missing income lots or incorrect lot consumption."
+                )
+
+            # Get ALPHA price for valuation (use the usd value from the event)
+            usd_proceeds = undelegate.usd or 0.0
+            
+            # Calculate network fee in USD
+            network_fee_tao = 0.0  # No TAO fees for direct ALPHA transfers
+            network_fee_usd = 0.0
+            if undelegate.fee:
+                # Fee is in ALPHA RAO
+                network_fee_alpha = int(undelegate.fee) / RAO_PER_TAO
+                # Calculate fee USD using alpha price
+                if undelegate.alpha_price_in_usd:
+                    network_fee_usd = network_fee_alpha * undelegate.alpha_price_in_usd
+
+            # Calculate gain/loss
+            realized_gain_loss = usd_proceeds - total_basis - network_fee_usd
+
+            # Determine gain type (short-term if held < 1 year)
+            oldest_lot_timestamp = min(c.acquisition_timestamp for c in consumed_lots)
+            holding_period_days = (undelegate.timestamp_unix - oldest_lot_timestamp) / (24 * 60 * 60)
+            gain_type = GainType.LONG_TERM if holding_period_days >= 365 else GainType.SHORT_TERM
+
+            # Create expense record
+            expense = Expense(
+                expense_id=self._next_expense_id(),
+                timestamp=undelegate.timestamp_unix,
+                block_number=undelegate.block_number,
+                transfer_address=undelegate.transfer_address.ss58 if undelegate.transfer_address else "",
+                alpha_disposed=alpha_rao_needed / RAO_PER_TAO,
+                tao_received=0.0,  # No TAO received for ALPHA expenses
+                tao_price_usd=0.0,
+                usd_proceeds=usd_proceeds,
+                cost_basis=total_basis,
+                realized_gain_loss=realized_gain_loss,
+                gain_type=gain_type,
+                consumed_lots=consumed_lots,
+                created_tao_lot_id="",  # No TAO lot created for direct ALPHA expenses
+                network_fee_tao=network_fee_tao,
+                network_fee_usd=network_fee_usd,
+                extrinsic_id=undelegate.extrinsic_id,
+                notes=f"Alpha expense to {undelegate.transfer_address.ss58[:8]}... at block {undelegate.block_number}"
+            )
+
+            expenses.append(expense)
+
+        return expenses, alpha_lots
+
+    def _update_consumed_alpha_lots_for_expenses(self, expenses: list, alpha_lots: list):
+        """Update income sheet with consumed lot amounts from expenses.
+        
+        Args:
+            expenses: List of Expense objects
+            alpha_lots: List of AlphaLotRow objects with updated remaining amounts and row numbers
+        """
+        # TODO: Possibly combine alpha lot consumption?
+        # Build lot lookup by ID for quick access
+        lots_by_id = {lot.lot_id: lot for lot in alpha_lots}
+        
+        # Collect updates from modified lots that have row numbers
+        updates = []
+        updated_count = 0
+        
+        for expense in expenses:
+            for consumption in expense.consumed_lots:
+                lot = lots_by_id.get(consumption.lot_id)
+                if lot and hasattr(lot, 'row') and lot.row > 0:
+                    # Use the updated values from the in-memory lot
+                    new_remaining_rao = lot.alpha_rao_remaining
+                    new_remaining = lot.alpha_remaining
+                    new_status = lot.status.value
+                    
+                    updates.append({
+                        'range': f'I{lot.row}',  # Alpha RAO Remaining
+                        'values': [[new_remaining_rao]]
+                    })
+                    updates.append({
+                        'range': f'K{lot.row}',  # Alpha Remaining (display)
+                        'values': [[new_remaining]]
+                    })
+                    updates.append({
+                        'range': f'P{lot.row}',  # Status
+                        'values': [[new_status]]
+                    })
+                    updated_count += 1
+
+        if updates:
+            body = {
+                "valueInputOption": "RAW",
+                "data": updates,
+            }
+            self.income_sheet.spreadsheet.batch_update(body)
+            print(f"  Updated {updated_count} income lots")
+
 
     def process_staking_emissions(self, lookback_days: int = 1) -> list:
         """Process staking emissions over the specified lookback period.
@@ -776,6 +945,7 @@ class ContractTracker(BittensorTracker):
             return []
 
         # Get all delegation events (DELEGATE and UNDELEGATE) in the same period
+        # TODO: Possibly just use stake balance differences without delegations?
         delegations = self.wallet_client.get_delegations(
             netuid=self.subnet_id,
             delegate=self.validator_ss58,
@@ -903,7 +1073,7 @@ class ContractTracker(BittensorTracker):
         
         return alpha_lots
 
-    def process_tao_transfers(self) -> list:
+    def process_tao_transfers(self, lookback_days: int = 1) -> list:
         """Process TAO transfers over the specified lookback period.
 
         Args:
@@ -912,5 +1082,264 @@ class ContractTracker(BittensorTracker):
         Returns:
             list: List of processed transfer lots.
         """
-        # Implementation for processing TAO transfers
-        ...
+        start_time, end_time = self._resolve_time_window(
+            "TAO transfers",
+            self.last_transfer_timestamp,
+            lookback_days
+        )
+
+        # Get transfers from wallet to brokerage (using receiver filter)
+        brokerage_transfers = self.wallet_client.get_transfers(
+            account_address=self.coldkey_ss58,
+            start_time=start_time,
+            end_time=end_time,
+            sender=self.coldkey_ss58,
+            receiver=self.brokerage_ss58
+        )
+
+        if not brokerage_transfers:
+            print("ℹ️  No new TAO transfers found")
+            return []
+
+        # Create transfers
+        tao_transfers, tao_lots = self._create_tao_transfers(brokerage_transfers)
+
+        if tao_transfers:
+            # Write transfers to sheet
+            transfer_rows = [transfer.to_sheet_row() for transfer in tao_transfers]
+            self._append_rows_with_retry(self.transfers_sheet, transfer_rows)
+
+            # Update TAO lots sheet with consumed lot amounts
+            self._update_consumed_tao_lots(tao_transfers, tao_lots)
+
+            max_ts = max(transfer.timestamp for transfer in tao_transfers)
+            self.last_transfer_timestamp = max_ts
+
+            # Sort sheet
+            self._sort_sheet_by_timestamp(self.transfers_sheet, timestamp_col=3, label="Transfers", range_str="A2:N")
+
+            print(f"\n✓ Created {len(tao_transfers)} TAO transfers")
+        else:
+            print("ℹ️  No valid TAO transfers to process")
+
+        return tao_transfers
+
+    def _create_tao_transfers(self, transfers: list[TaoStatsTransfer]) -> tuple[list[TaoTransfer], list[TaoLotRow]]:
+        """Create TaoTransfer records from transfer events.
+        
+        Args:
+            transfers: List of transfer events to brokerage
+            
+        Returns:
+            Tuple of (transfers list, tao_lots list)
+        """
+        # Load available TAO lots
+        tao_lots = self._load_tao_lots()
+
+        tao_transfers = []
+        for transfer in transfers:
+            # Total outflow = transfer amount + fee (work in RAO to avoid floating point errors)
+            tao_amount_rao = transfer.amount_rao  # Amount sent to brokerage in RAO
+            fee_rao = transfer.fee_rao
+            total_outflow_rao = tao_amount_rao + fee_rao
+
+            # Consume TAO lots for total outflow
+            consumed_lots, total_basis = self._consume_tao_lots(
+                tao_lots,
+                total_outflow_rao,
+                transfer.timestamp_unix
+            )
+
+            if not consumed_lots:
+                raise ValueError(
+                    f"Insufficient TAO lots to cover transfer of {total_outflow_rao / RAO_PER_TAO:.4f} TAO "
+                    f"at block {transfer.block_number}. This indicates missing TAO lots or incorrect lot consumption."
+                )
+
+            # Get TAO price for valuation
+            tao_price_usd = self.price_client.get_price_at_timestamp('TAO', transfer.timestamp_unix)
+            if not tao_price_usd:
+                raise PriceNotAvailableError(
+                    f"Could not get TAO price for transfer at block {transfer.block_number} "
+                    f"(timestamp: {transfer.timestamp_unix})"
+                )
+
+            # Convert to TAO for USD calculations and record keeping
+            tao_amount = tao_amount_rao / RAO_PER_TAO
+            fee_tao = fee_rao / RAO_PER_TAO
+            total_outflow = total_outflow_rao / RAO_PER_TAO
+
+            # Calculate proceeds (only for the amount transferred to brokerage, not fees)
+            usd_proceeds = tao_amount * tao_price_usd
+
+            # Calculate fee cost basis (proportional to total outflow)
+            fee_cost_basis = (total_basis * (fee_rao / total_outflow_rao)) if total_outflow_rao > 0 else 0.0
+            transfer_cost_basis = total_basis - fee_cost_basis
+
+            # Calculate gain/loss
+            realized_gain_loss = usd_proceeds - transfer_cost_basis
+
+            # Determine gain type (short-term if held < 1 year)
+            oldest_lot_timestamp = min(c.acquisition_timestamp for c in consumed_lots)
+            holding_period_days = (transfer.timestamp_unix - oldest_lot_timestamp) / (24 * 60 * 60)
+            gain_type = GainType.LONG_TERM if holding_period_days >= 365 else GainType.SHORT_TERM
+
+            # Create transfer record
+            tao_transfer = TaoTransfer(
+                transfer_id=self._next_transfer_id(),
+                timestamp=transfer.timestamp_unix,
+                block_number=transfer.block_number,
+                tao_amount=tao_amount,
+                tao_price_usd=tao_price_usd,
+                usd_proceeds=usd_proceeds,
+                cost_basis=transfer_cost_basis,
+                realized_gain_loss=realized_gain_loss,
+                gain_type=gain_type,
+                consumed_tao_lots=consumed_lots,
+                transaction_hash=transfer.transaction_hash or "",
+                extrinsic_id=transfer.extrinsic_id or "",
+                total_outflow_tao=total_outflow,
+                fee_tao=fee_tao,
+                fee_cost_basis_usd=fee_cost_basis,
+                notes=f"TAO transfer to brokerage at block {transfer.block_number}"
+            )
+
+            tao_transfers.append(tao_transfer)
+
+        return tao_transfers, tao_lots
+
+    def _load_tao_lots(self) -> list:
+        """Load available TAO lots from TAO Lots sheet.
+        
+        Returns:
+            List of TaoLotRow objects with remaining balance > 0 and row numbers attached
+        """
+        records = self.tao_lots_sheet.get_all_records()
+        tao_lots = []
+
+        for idx, record in enumerate(records, start=2):  # Start at 2 (row 1 is header)
+            rao_remaining = record.get('TAO RAO Remaining', 0)
+            if rao_remaining > 0:
+                lot = TaoLotRow(
+                    lot_id=record['TAO Lot ID'],
+                    timestamp=record['Timestamp'],
+                    block_number=record['Block'],
+                    rao=record['TAO RAO'],
+                    rao_remaining=rao_remaining,
+                    usd_basis=record['USD Basis'],
+                    usd_per_tao=record['USD/TAO'],
+                    source_sale_id=record.get('Source Sale ID') or "",
+                    extrinsic_id=record.get('Extrinsic ID') or "",
+                    status=LotStatus(record['Status']),
+                    notes=record.get('Notes', ''),
+                    row=idx
+                )
+                tao_lots.append(lot)
+
+        return tao_lots
+
+    def _consume_tao_lots(self, lots: list[TaoLotRow], amount_rao: int, disposal_timestamp: int) -> tuple:
+        """Consume TAO lots according to configured strategy.
+        
+        Args:
+            lots: List of available TaoLot objects
+            amount_rao: Amount to consume in RAO
+            disposal_timestamp: Timestamp of the disposal event
+            
+        Returns:
+            Tuple of (consumed_lots list, total_basis_consumed)
+        """
+        # Sort lots by strategy
+        if self.config.lot_strategy == CostBasisMethod.FIFO:
+            # First In First Out - oldest first
+            sorted_lots = sorted(lots, key=lambda x: x.timestamp)
+        else:  # HIFO
+            # Highest In First Out - highest basis first
+            sorted_lots = sorted(lots, key=lambda x: x.usd_per_tao, reverse=True)
+
+        consumed_lots = []
+        total_basis = 0.0
+        remaining_needed = amount_rao
+
+        for lot in sorted_lots:
+            if remaining_needed <= 0:
+                break
+
+            if lot.rao_remaining <= 0:
+                continue
+
+            # Consume from this lot
+            consume_amount = min(lot.rao_remaining, remaining_needed)
+            consume_tao = consume_amount / RAO_PER_TAO
+
+            # Calculate pro-rata basis
+            basis_consumed = (consume_amount / lot.rao) * lot.usd_basis
+
+            consumed_lots.append(LotConsumption(
+                lot_id=lot.lot_id,
+                alpha_consumed=consume_tao,  # Reusing alpha_consumed field for TAO amount
+                cost_basis_consumed=basis_consumed,
+                acquisition_timestamp=lot.timestamp
+            ))
+
+            # Update lot remaining
+            lot.rao_remaining -= consume_amount
+            if lot.rao_remaining == 0:
+                lot.status = LotStatus.CLOSED
+            else:
+                lot.status = LotStatus.PARTIAL
+
+            total_basis += basis_consumed
+            remaining_needed -= consume_amount
+
+        if remaining_needed > 0:
+            # Not enough lots available
+            return [], 0.0
+
+        return consumed_lots, total_basis
+
+    def _update_consumed_tao_lots(self, transfers: list[TaoTransfer], tao_lots: list[TaoLotRow]):
+        """Update TAO Lots sheet with consumed lot amounts.
+        
+        Args:
+            transfers: List of TaoTransfer objects
+            tao_lots: List of TaoLotRow objects with updated remaining amounts and row numbers
+        """
+        # Build lot lookup by ID for quick access
+        lots_by_id = {lot.lot_id: lot for lot in tao_lots}
+        
+        # Collect updates from modified lots that have row numbers
+        updates = []
+        updated_count = 0
+        
+        for transfer in transfers:
+            for consumption in transfer.consumed_tao_lots:
+                lot = lots_by_id.get(consumption.lot_id)
+                if lot and hasattr(lot, 'row') and lot.row > 0:
+                    # Use the updated values from the in-memory lot
+                    new_remaining_rao = lot.rao_remaining
+                    new_remaining = lot.tao_remaining
+                    new_status = lot.status.value
+                    
+                    updates.append({
+                        'range': f'F{lot.row}',  # TAO RAO Remaining
+                        'values': [[new_remaining_rao]]
+                    })
+                    updates.append({
+                        'range': f'H{lot.row}',  # TAO Remaining (display)
+                        'values': [[new_remaining]]
+                    })
+                    updates.append({
+                        'range': f'M{lot.row}',  # Status
+                        'values': [[new_status]]
+                    })
+                    updated_count += 1
+
+        if updates:
+            body = {
+                "valueInputOption": "RAW",
+                "data": updates,
+            }
+            self.tao_lots_sheet.spreadsheet.batch_update(body)
+            print(f"  Updated {updated_count} TAO lots")
+

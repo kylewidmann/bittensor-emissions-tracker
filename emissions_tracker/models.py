@@ -372,6 +372,12 @@ class TaoLot:
         ]
 
 
+@dataclass
+class TaoLotRow(TaoLot):
+    """TaoLot with sheet row number attached for batch updates."""
+    row: int = 0  # Sheet row number (1-indexed, where 1 is header)
+
+
 @dataclass 
 class AlphaSale:
     """Represents an ALPHA → TAO disposal event."""

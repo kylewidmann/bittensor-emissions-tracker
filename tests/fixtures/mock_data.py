@@ -602,11 +602,15 @@ def compute_expected_transfers(
         start_ts = int(start_date.timestamp())
         end_ts = int(end_date.timestamp())
         sales_start_ts = int(sales_start_date.timestamp()) if sales_start_date else 0
-        historical_prices = raw_historical_prices
         
-        # Helper function to get price for a specific date string (YYYY-MM-DD)
-        def price_lookup(date_str: str) -> float:
-            return historical_prices[date_str]['price']
+        # Convert historical prices dict to list for timestamp lookup (same as MockTaoStatsClient)
+        price_list = list(raw_historical_prices.values())
+        
+        # Helper function to get price at specific timestamp (replicates get_price_at_timestamp)
+        def price_lookup_by_timestamp(timestamp: int) -> float:
+            """Find closest price by timestamp, matching MockTaoStatsClient behavior."""
+            closest = min(price_list, key=lambda p: abs(p['timestamp'] - timestamp))
+            return float(closest['price'])
         
         # Step 1: Calculate TAO lots from raw sales data (UNDELEGATE events with is_transfer=None)
         # Filter for UNDELEGATE events (user-initiated sales) - these create TAO lots
@@ -621,7 +625,6 @@ def compute_expected_transfers(
                 sales_events.append({
                     'timestamp': event_ts,
                     'tao_received': float(e['amount']) / 1e9,
-                    'usd_value': float(e.get('usd', 0)),
                     'block_number': e.get('block_number', 0),
                     'extrinsic_id': e.get('extrinsic_id', '')
                 })
@@ -629,11 +632,13 @@ def compute_expected_transfers(
         # Sort sales by timestamp
         sales_events.sort(key=lambda x: x['timestamp'])
         
-        # Create TAO lots from sales
+        # Create TAO lots from sales (matching tracker logic)
         tao_lots = []
         for i, sale in enumerate(sales_events, start=1):
             tao_quantity = sale['tao_received']
-            usd_basis = sale['usd_value']
+            # Calculate USD basis using timestamp-based price (same as tracker)
+            tao_price_at_sale = price_lookup_by_timestamp(sale['timestamp'])
+            usd_basis = tao_quantity * tao_price_at_sale
             usd_per_tao = usd_basis / tao_quantity if tao_quantity > 0 else 0
             
             tao_lots.append({
@@ -775,9 +780,8 @@ def compute_expected_transfers(
             cost_basis_for_brokerage = (total_cost_basis * (brokerage_amount / total_outflow)) if total_outflow > 0 else 0.0
             fee_cost_basis = total_cost_basis - cost_basis_for_brokerage
             
-            # Get price for this transfer date
-            transfer_date = datetime.fromtimestamp(transfer['timestamp']).strftime('%Y-%m-%d')
-            tao_price_at_transfer = price_lookup(transfer_date)
+            # Get price at transfer timestamp (not daily price)
+            tao_price_at_transfer = price_lookup_by_timestamp(transfer['timestamp'])
             
             # Calculate proceeds (only for brokerage amount)
             usd_proceeds = brokerage_amount * tao_price_at_transfer
