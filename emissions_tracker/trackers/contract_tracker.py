@@ -11,7 +11,7 @@ from emissions_tracker.models import (
     AlphaLot, AlphaLotRow, TaoLot, TaoLotRow, AlphaSale, Expense, TaoStatsStakeBalance, TaoStatsTransfer, TaoTransfer,
     SourceType, LotStatus, CostBasisMethod, TaoStatsDelegation, LotConsumption, GainType
 )
-from emissions_tracker.trackers.bittensor_tracker import BittensorTracker, _is_rate_limit_error
+from emissions_tracker.trackers.bittensor_tracker import BittensorTracker, _is_rate_limit_error, SECONDS_PER_DAY
 from oauth2client.service_account import ServiceAccountCredentials
 
 RAO_PER_TAO = 10 ** 9
@@ -247,7 +247,7 @@ class ContractTracker(BittensorTracker):
         try:
             records = self.tao_lots_sheet.get_all_records()
             if records:
-                lot_ids = [r['Lot ID'] for r in records if r.get('Lot ID', '').startswith('TAO-')]
+                lot_ids = [r['TAO Lot ID'] for r in records if r.get('TAO Lot ID', '').startswith('TAO-')]
                 self.tao_lot_counter = max([int(lid.split('-')[1]) for lid in lot_ids], default=0) + 1
             else:
                 self.tao_lot_counter = 1
@@ -718,15 +718,15 @@ class ContractTracker(BittensorTracker):
                     new_status = lot.status.value
                     
                     updates.append({
-                        'range': f'I{lot.row}',  # Alpha RAO Remaining
+                        'range': f'Income!I{lot.row}',  # Alpha RAO Remaining
                         'values': [[new_remaining_rao]]
                     })
                     updates.append({
-                        'range': f'K{lot.row}',  # Alpha Remaining (display)
+                        'range': f'Income!K{lot.row}',  # Alpha Remaining (display)
                         'values': [[new_remaining]]
                     })
                     updates.append({
-                        'range': f'P{lot.row}',  # Status
+                        'range': f'Income!P{lot.row}',  # Status
                         'values': [[new_status]]
                     })
                     updated_count += 1
@@ -897,15 +897,15 @@ class ContractTracker(BittensorTracker):
                     new_status = lot.status.value
                     
                     updates.append({
-                        'range': f'I{lot.row}',  # Alpha RAO Remaining
+                        'range': f'Income!I{lot.row}',  # Alpha RAO Remaining
                         'values': [[new_remaining_rao]]
                     })
                     updates.append({
-                        'range': f'K{lot.row}',  # Alpha Remaining (display)
+                        'range': f'Income!K{lot.row}',  # Alpha Remaining (display)
                         'values': [[new_remaining]]
                     })
                     updates.append({
-                        'range': f'P{lot.row}',  # Status
+                        'range': f'Income!P{lot.row}',  # Status
                         'values': [[new_status]]
                     })
                     updated_count += 1
@@ -931,12 +931,16 @@ class ContractTracker(BittensorTracker):
             lookback_days
         )
 
-        # Get stake balance history for the date range
+        # For emission calculation, we need the previous day's balance to compute deltas
+        # Extend start_time backward by 1 day to get comparison baseline
+        extended_start_time = start_time - SECONDS_PER_DAY
+
+        # Get stake balance history for the extended date range
         stake_balances = self.wallet_client.get_stake_balance_history(
             netuid=self.subnet_id,
             hotkey=self.validator_ss58,
             coldkey=self.coldkey_ss58,
-            start_time=start_time,
+            start_time=extended_start_time,
             end_time=end_time
         )
 
@@ -1143,7 +1147,8 @@ class ContractTracker(BittensorTracker):
             fee_rao = transfer.fee_rao
             total_outflow_rao = tao_amount_rao + fee_rao
 
-            # Consume TAO lots for total outflow
+            # Consume TAO lots for total outflow (amount + fee)
+            # Both the transfer amount and fee reduce the wallet balance
             consumed_lots, total_basis = self._consume_tao_lots(
                 tao_lots,
                 total_outflow_rao,
@@ -1172,7 +1177,7 @@ class ContractTracker(BittensorTracker):
             # Calculate proceeds (only for the amount transferred to brokerage, not fees)
             usd_proceeds = tao_amount * tao_price_usd
 
-            # Calculate fee cost basis (proportional to total outflow)
+            # Split cost basis proportionally between transfer and fee
             fee_cost_basis = (total_basis * (fee_rao / total_outflow_rao)) if total_outflow_rao > 0 else 0.0
             transfer_cost_basis = total_basis - fee_cost_basis
 
@@ -1232,7 +1237,7 @@ class ContractTracker(BittensorTracker):
                     extrinsic_id=record.get('Extrinsic ID') or "",
                     status=LotStatus(record['Status']),
                     notes=record.get('Notes', ''),
-                    row=idx
+                    row=idx  # Use the actual enumeration index (row number in sheet)
                 )
                 tao_lots.append(lot)
 
@@ -1322,15 +1327,15 @@ class ContractTracker(BittensorTracker):
                     new_status = lot.status.value
                     
                     updates.append({
-                        'range': f'F{lot.row}',  # TAO RAO Remaining
+                        'range': f'TAO Lots!F{lot.row}',  # TAO RAO Remaining
                         'values': [[new_remaining_rao]]
                     })
                     updates.append({
-                        'range': f'H{lot.row}',  # TAO Remaining (display)
+                        'range': f'TAO Lots!H{lot.row}',  # TAO Remaining (display)
                         'values': [[new_remaining]]
                     })
                     updates.append({
-                        'range': f'M{lot.row}',  # Status
+                        'range': f'TAO Lots!M{lot.row}',  # Status
                         'values': [[new_status]]
                     })
                     updated_count += 1
