@@ -13,9 +13,9 @@ import argparse
 from datetime import datetime, timezone
 
 from emissions_tracker.clients.taostats import TaoStatsAPIClient
-from emissions_tracker.tracker import BittensorEmissionTracker
 from emissions_tracker.config import TrackerSettings
 from emissions_tracker.models import SourceType
+from emissions_tracker.trackers.contract_tracker import ContractTracker
 
 
 def parse_date(date_str: str) -> int:
@@ -128,15 +128,9 @@ Examples:
     
     # Initialize tracker for smart contract emissions
     print("Initializing Smart Contract tracker...")
-    tracker = BittensorEmissionTracker(
+    tracker = ContractTracker(
         price_client=taostats_client,
-        wallet_client=taostats_client,
-        tracking_hotkey=config.validator_ss58,
-        coldkey=config.payout_coldkey_ss58,
-        sheet_id=config.tracker_sheet_id,
-        label="Smart Contract",
-        smart_contract_address=config.smart_contract_ss58,
-        income_source=SourceType.STAKING
+        wallet_client=taostats_client
     )
     
     # Handle regeneration if requested
@@ -155,7 +149,7 @@ Examples:
     
     # Execute based on mode
     if args.mode == 'auto':
-        tracker.run_daily_check(start_time=start_time, end_time=end_time)
+        tracker.run(start_time=start_time, end_time=end_time)
         
     elif args.mode == 'income':
         window_desc = _describe_window(args.start_date, args.end_date)
@@ -166,12 +160,12 @@ Examples:
     elif args.mode == 'sales':
         window_desc = _describe_window(args.start_date, args.end_date)
         print(f"\nProcessing sales for {window_desc}...")
-        tracker.process_sales(start_time=start_time, end_time=end_time)
+        tracker.process_alpha_sales(start_time=start_time, end_time=end_time)
         
     elif args.mode == 'transfers':
         window_desc = _describe_window(args.start_date, args.end_date)
         print(f"\nProcessing transfers for {window_desc}...")
-        tracker.process_transfers(start_time=start_time, end_time=end_time)
+        tracker.process_tao_transfers(start_time=start_time, end_time=end_time)
         
     elif args.mode == 'journal':
         if args.year:

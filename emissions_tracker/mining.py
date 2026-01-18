@@ -24,7 +24,6 @@ import argparse
 from datetime import datetime
 
 from emissions_tracker.clients.taostats import TaoStatsAPIClient
-from emissions_tracker.tracker import BittensorEmissionTracker
 from emissions_tracker.config import TrackerSettings
 from emissions_tracker.models import SourceType
 

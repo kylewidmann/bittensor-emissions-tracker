@@ -1,7 +1,7 @@
 import math
 
 from emissions_tracker.config import WaveAccountSettings
-from emissions_tracker.tracker import _aggregate_monthly_journal_entries
+from emissions_tracker.journal import aggregate_monthly_journal_entries
 
 
 def _collect_totals(entries):
@@ -103,7 +103,7 @@ def test_aggregate_monthly_journal_entries_balances_double_entry():
         },
     ]
 
-    entries, summary = _aggregate_monthly_journal_entries(
+    entries, summary = aggregate_monthly_journal_entries(
         year_month,
         income_records,
         sales_records,
@@ -160,7 +160,7 @@ def test_rounding_adjustment_balances_totals_with_combined_accounts():
         }
     ]
 
-    entries, _ = _aggregate_monthly_journal_entries(
+    entries, _ = aggregate_monthly_journal_entries(
         "2025-11",
         income_records,
         sales_records,

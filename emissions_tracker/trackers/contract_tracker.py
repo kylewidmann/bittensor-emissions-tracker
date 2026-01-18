@@ -3,13 +3,14 @@ import backoff
 import time
 from collections import defaultdict
 from typing import List, Dict, Any, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from emissions_tracker.config import TrackerSettings, WaveAccountSettings
 from emissions_tracker.exceptions import PriceNotAvailableError
+from emissions_tracker.journal import JournalGenerator, aggregate_monthly_journal_entries
 from emissions_tracker.models import (
     AlphaLot, AlphaLotRow, TaoLot, TaoLotConsumption, TaoLotRow, AlphaSale, Expense, TaoDeposit, TaoStatsStakeBalance, TaoStatsTransfer, TaoTransfer,
-    SourceType, LotStatus, CostBasisMethod, TaoStatsDelegation, AlphaLotConsumption, GainType
+    SourceType, LotStatus, CostBasisMethod, TaoStatsDelegation, AlphaLotConsumption, GainType, JournalEntry
 )
 from emissions_tracker.trackers.bittensor_tracker import BittensorTracker, _is_rate_limit_error, SECONDS_PER_DAY
 from oauth2client.service_account import ServiceAccountCredentials
@@ -32,6 +33,7 @@ SHEET_CONFIGS = [
     (DEPOSITS_SHEET, TaoDeposit.sheet_headers()),
     (TAO_LOTS_SHEET, TaoLot.sheet_headers()),
     (TRANSFERS_SHEET, TaoTransfer.sheet_headers()),
+    (JOURNAL_SHEET, JournalEntry.sheet_headers()),
 ]
 class ContractTracker(BittensorTracker):
     """Tracker for smart contract emissions and related activities."""
@@ -108,6 +110,7 @@ class ContractTracker(BittensorTracker):
         self.deposits_sheet = self.sheet.worksheet(DEPOSITS_SHEET)
         self.tao_lots_sheet = self.sheet.worksheet(TAO_LOTS_SHEET)
         self.transfers_sheet = self.sheet.worksheet(TRANSFERS_SHEET)
+        self.journal_sheet = self.sheet.worksheet(JOURNAL_SHEET)
 
     def _load_state(self):
         """Load last processed timestamps from sheets."""
@@ -195,12 +198,8 @@ class ContractTracker(BittensorTracker):
         if not updates:
             return
 
-        body = {
-            "valueInputOption": "RAW",
-            "data": updates,
-        }
         try:
-            self.income_sheet.spreadsheet.batch_update(body)
+            self.income_sheet.batch_update(updates, value_input_option='RAW')
             print(f"  Reset {len(updates)//2} income lots to Open status")
         except Exception as e:
             print(f"  Warning: Could not reset income lots: {e}")
@@ -1472,3 +1471,180 @@ class ContractTracker(BittensorTracker):
             self.tao_lots_sheet.spreadsheet.batch_update(body)
             print(f"  Updated {updated_count} TAO lots")
 
+    # -------------------------------------------------------------------------
+    # Journal Entry Generation
+    # -------------------------------------------------------------------------
+
+    def generate_monthly_journal_entries(self, year_month: Optional[str] = None) -> List[JournalEntry]:
+        """Generate aggregated Wave journal entries for a given month."""
+        if not year_month:
+            today = datetime.now()
+            year_month = f"{today.year}-{today.month:02d}"
+
+        try:
+            period_start = datetime.strptime(year_month, "%Y-%m").replace(tzinfo=timezone.utc)
+        except ValueError as exc:
+            raise ValueError(f"Invalid month format '{year_month}', expected YYYY-MM") from exc
+
+        first_day_next_month = (period_start.replace(day=28) + timedelta(days=4)).replace(day=1)
+
+        start_ts = int(period_start.timestamp())
+        end_ts = int(first_day_next_month.timestamp())
+
+        print(f"\n{'='*60}")
+        print(f"Generating journal entries for {year_month}...")
+        print(f"{'='*60}")
+
+        # Load all records once
+        expense_records = self.expenses_sheet.get_all_records()
+        income_records = self.income_sheet.get_all_records()
+        sales_records = self.sales_sheet.get_all_records()
+        transfer_records = self.transfers_sheet.get_all_records()
+
+        # Check for uncategorized expenses
+        self._check_uncategorized_expenses(expense_records, start_ts, end_ts, year_month)
+
+        entries, summary = aggregate_monthly_journal_entries(
+            year_month,
+            income_records,
+            sales_records,
+            expense_records,
+            transfer_records,
+            self.wave_config,
+            start_ts,
+            end_ts,
+        )
+
+        for entry in entries:
+            self.journal_sheet.append_row(entry.to_sheet_row())
+
+        self._print_journal_summary(year_month, len(entries), summary)
+        return entries
+
+    def generate_yearly_journal_entries(self, year: int) -> List[JournalEntry]:
+        """Generate journal entries for all months in a given year."""
+        print(f"\n{'='*60}")
+        print(f"Generating journal entries for entire year {year}")
+        print(f"{'='*60}")
+
+        # Read all sheets once at the start
+        print("\nLoading data from sheets...")
+        expense_records = self.expenses_sheet.get_all_records()
+        income_records = self.income_sheet.get_all_records()
+        sales_records = self.sales_sheet.get_all_records()
+        transfer_records = self.transfers_sheet.get_all_records()
+        print("✓ Data loaded\n")
+
+        # Check for uncategorized expenses in the entire year
+        year_start = datetime(year, 1, 1, tzinfo=timezone.utc)
+        year_end = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
+        self._check_uncategorized_expenses(
+            expense_records,
+            int(year_start.timestamp()),
+            int(year_end.timestamp()),
+            str(year)
+        )
+
+        all_entries = []
+        all_rows = []
+
+        for month in range(1, 13):
+            year_month = f"{year}-{month:02d}"
+
+            try:
+                period_start = datetime.strptime(year_month, "%Y-%m").replace(tzinfo=timezone.utc)
+                first_day_next_month = (period_start.replace(day=28) + timedelta(days=4)).replace(day=1)
+                start_ts = int(period_start.timestamp())
+                end_ts = int(first_day_next_month.timestamp())
+            except ValueError:
+                continue
+
+            print(f"\n{'='*60}")
+            print(f"Generating journal entries for {year_month}...")
+            print(f"{'='*60}")
+
+            try:
+                entries, summary = aggregate_monthly_journal_entries(
+                    year_month,
+                    income_records,
+                    sales_records,
+                    expense_records,
+                    transfer_records,
+                    self.wave_config,
+                    start_ts,
+                    end_ts,
+                )
+
+                for entry in entries:
+                    all_rows.append(entry.to_sheet_row())
+                    all_entries.append(entry)
+
+                self._print_journal_summary(year_month, len(entries), summary)
+
+            except ValueError as e:
+                print(f"  Skipping {year_month}: {e}")
+                continue
+
+        # Batch write all journal entries
+        if all_rows:
+            print(f"\nWriting {len(all_rows)} journal entries to sheet...")
+            self._append_rows_with_retry(self.journal_sheet, all_rows)
+            print("✓ Journal entries written")
+
+        print(f"\n✓ Generated {len(all_entries)} total journal entries for {year}")
+        return all_entries
+
+    def clear_journal_sheet(self):
+        """Clear all journal entries (for regeneration)."""
+        print("  Clearing Journal Entries sheet...")
+        try:
+            all_values = self.journal_sheet.get_all_values()
+            if len(all_values) > 1:
+                last_row = len(all_values)
+                self.journal_sheet.batch_clear([f'A2:Z{last_row}'])
+            print("  ✓ Journal Entries sheet cleared")
+        except Exception as e:
+            print(f"  Warning: Could not clear journal sheet: {e}")
+
+    def _check_uncategorized_expenses(
+        self,
+        expense_records: List[Dict[str, Any]],
+        start_ts: int,
+        end_ts: int,
+        period_name: str
+    ):
+        """Check for uncategorized expenses and raise an error if found."""
+        uncategorized = [
+            exp for exp in expense_records
+            if start_ts <= exp['Timestamp'] < end_ts and not exp.get('Category', '').strip()
+        ]
+
+        if uncategorized:
+            print(f"\n❌ ERROR: Found {len(uncategorized)} uncategorized expense(s) in {period_name}")
+            print("Please categorize all expenses in the Expenses sheet before generating journal entries.")
+            print("\nUncategorized expenses:")
+            for exp in uncategorized:
+                exp_date = datetime.fromtimestamp(exp['Timestamp']).strftime('%Y-%m-%d %H:%M:%S')
+                exp_id = exp.get('Expense ID', 'unknown')
+                transfer_addr = exp.get('Transfer Address', 'unknown')
+                alpha = exp.get('Alpha Disposed', 0)
+                print(f"  - {exp_id} ({exp_date}): {alpha:.4f} ALPHA to {transfer_addr[:8]}...")
+            raise ValueError(
+                f"Cannot generate journal entries for {period_name}: "
+                f"{len(uncategorized)} uncategorized expense(s) found. "
+                "Please update the Category column in the Expenses sheet."
+            )
+
+    def _print_journal_summary(self, year_month: str, entry_count: int, summary: Dict[str, float]):
+        """Print a summary of generated journal entries."""
+        print(f"✓ Generated {entry_count} aggregated journal entries for {year_month}")
+        print(f"  Contract Income: ${summary['contract_income']:.2f}")
+        print(f"  Staking Income: ${summary['staking_income']:.2f}")
+        print(f"  Sales Proceeds: ${summary['sales_proceeds']:.2f}")
+        print(f"  Sales Gain/Loss: ${summary['sales_gain']:.2f}")
+        print(f"  Sales Slippage (USD): ${summary['sales_slippage']:.2f}")
+        print(f"  Sales Fees: ${summary['sales_fees']:.2f}")
+        print(f"  Expense Total: ${summary['expense_total']:.2f}")
+        print(f"  Expense Gain/Loss: ${summary['expense_gain']:.2f}")
+        print(f"  Transfer Gain/Loss: ${summary['transfer_gain']:.2f}")
+        print(f"  Transfer Fees (cost basis): ${summary['transfer_fees']:.2f}")
