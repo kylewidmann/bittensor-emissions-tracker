@@ -27,29 +27,41 @@ class BittensorTracker:
         ...
 
     @abstractmethod
-    def run(self, lookback_days: int = 1):
+    def run(self, start_time: int, end_time: Optional[int] = None):
         ...
 
     @staticmethod
     def _resolve_time_window(
         label: str,
         last_timestamp: int,
-        lookback_days: Optional[int],
-        now: Optional[int] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
     ) -> Tuple[int, int]:
-        """Determine the (start_time, end_time) timestamps for a processing window."""
+        """Determine the (start_time, end_time) timestamps for a processing window.
+        
+        Args:
+            label: Description of what's being processed (for error messages)
+            last_timestamp: Last processed timestamp from sheet state
+            start_time: Explicit start time (overrides last_timestamp if provided)
+            end_time: Explicit end time (defaults to now if not provided)
+            
+        Returns:
+            Tuple of (start_time, end_time) as Unix timestamps
+            
+        Raises:
+            ValueError: If no start_time provided and no last_timestamp exists
+        """
+        # End time defaults to now
+        resolved_end = end_time if end_time is not None else int(time.time())
 
-        end_time = now if now is not None else int(time.time())
+        # If explicit start_time provided, use it
+        if start_time is not None:
+            return start_time, resolved_end
 
-        if lookback_days is not None:
-            if lookback_days <= 0:
-                raise ValueError(f"lookback for {label} must be positive, got {lookback_days}")
-            start_time = end_time - (lookback_days * SECONDS_PER_DAY)
-            return start_time, end_time
-
+        # Otherwise, continue from last processed timestamp
         if last_timestamp > 0:
-            return last_timestamp + 1, end_time
+            return last_timestamp + 1, resolved_end
 
         raise ValueError(
-            f"No previous {label} timestamp found; please rerun with --lookback <days> to seed the tracker."
+            f"No previous {label} timestamp found; please provide --start-date to seed the tracker."
         )

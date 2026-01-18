@@ -139,8 +139,8 @@ def test_multiple_sales_consume_lots_sequentially():
         last_transfer_ts=0
     )
     
-    # Process all 3 sales in one batch (use lookback to process all)
-    sales = tracker.process_sales(lookback_days=365)
+    # Process all 3 sales in one batch (use start_time=0 to process all)
+    sales = tracker.process_sales(start_time=0)
     
     assert len(sales) == 3, "Should have created 3 sales"
     
@@ -259,8 +259,8 @@ def test_multiple_transfers_consume_tao_lots_sequentially():
     for lot in tao_lots:
         tracker.tao_lots_sheet.append_row(lot)
     
-    # Process all 3 transfers in one batch (use lookback to process all)
-    processed_transfers = tracker.process_transfers(lookback_days=365)
+    # Process all 3 transfers in one batch (use start_time=0 to process all)
+    processed_transfers = tracker.process_transfers(start_time=0)
     
     assert len(processed_transfers) == 3, "Should have created 3 transfers"
     
@@ -409,7 +409,7 @@ def test_partial_lot_consumption_across_multiple_sales():
         last_transfer_ts=0
     )
     
-    sales = tracker.process_sales(lookback_days=365)
+    sales = tracker.process_sales(start_time=0)
     assert len(sales) == 3
     
     # Sale 1: 5 ALPHA from LOT-1 (cost: 5 * $10 = $50)

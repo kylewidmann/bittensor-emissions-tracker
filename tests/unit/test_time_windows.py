@@ -1,43 +1,53 @@
 import pytest
 
-from emissions_tracker.tracker import SECONDS_PER_DAY, BittensorEmissionTracker
+from emissions_tracker.tracker import BittensorEmissionTracker
 
 
-def test_lookback_takes_priority_over_last_timestamp():
-    now = 10 * SECONDS_PER_DAY
+def test_explicit_start_takes_priority_over_last_timestamp():
+    """When start_time is provided, it overrides last_timestamp."""
     start, end = BittensorEmissionTracker._resolve_time_window(
         "contract income",
         last_timestamp=999999,
-        lookback_days=5,
-        now=now,
+        start_time=100,
+        end_time=1000,
     )
 
-    assert end == now
-    assert start == now - (5 * SECONDS_PER_DAY)
+    assert start == 100
+    assert end == 1000
 
 
-def test_prior_timestamp_used_when_lookback_missing():
+def test_end_time_defaults_to_now_when_not_provided():
+    """When end_time is None, it defaults to current time."""
+    import time
+    before = int(time.time())
+    start, end = BittensorEmissionTracker._resolve_time_window(
+        "contract income",
+        last_timestamp=999999,
+        start_time=100,
+        end_time=None,
+    )
+    after = int(time.time())
+
+    assert start == 100
+    assert before <= end <= after
+
+
+def test_prior_timestamp_used_when_start_time_missing():
+    """When no start_time provided, uses last_timestamp + 1."""
     start, end = BittensorEmissionTracker._resolve_time_window(
         "sales",
         last_timestamp=12345,
-        lookback_days=None,
-        now=20000,
+        start_time=None,
+        end_time=20000,
     )
 
     assert start == 12346
     assert end == 20000
 
 
-def test_requires_lookback_when_no_prior_timestamp():
-    with pytest.raises(ValueError):
+def test_requires_start_time_when_no_prior_timestamp():
+    """Raises ValueError when no start_time and no prior timestamp."""
+    with pytest.raises(ValueError, match="No previous transfers timestamp found"):
         BittensorEmissionTracker._resolve_time_window(
-            "transfers", last_timestamp=0, lookback_days=None, now=100
-        )
-
-
-@pytest.mark.parametrize("invalid", [0, -1])
-def test_rejects_non_positive_lookback_values(invalid):
-    with pytest.raises(ValueError):
-        BittensorEmissionTracker._resolve_time_window(
-            "income", last_timestamp=123, lookback_days=invalid, now=1000
+            "transfers", last_timestamp=0, start_time=None, end_time=100
         )

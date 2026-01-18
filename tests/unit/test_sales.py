@@ -48,14 +48,11 @@ def test_process_sales(
     tracker = get_contract_tracker()
     
     # Process sales (only for November)
-    sales_lookback = (end_date - start_date).days + 1
-    
     with patch.object(tracker, '_resolve_time_window', return_value=(
         int(start_date.timestamp()),
         int(end_date.timestamp())
     )):
-        sales: list[AlphaSale] = tracker.process_alpha_sales(lookback_days=sales_lookback)
-    
+        sales: list[AlphaSale] = tracker.process_alpha_sales()
     expected_count = len(expected_sales)
     assert len(sales) == expected_count, f"Expected {expected_count} sales, got {len(sales)}"
     

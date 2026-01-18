@@ -47,10 +47,9 @@ def test_process_contract_income(
     # Mock _resolve_time_window to return our test date range
     start_time = int(start_date.timestamp())
     end_time = int(end_date.timestamp())
-    lookback_days = (end_date - start_date).days + 1
     
     with patch.object(contract_tracker, '_resolve_time_window', return_value=(start_time, end_time)):
-        new_lots: list[AlphaLot] = contract_tracker.process_contract_income(lookback_days=lookback_days)
+        new_lots: list[AlphaLot] = contract_tracker.process_contract_income()
     
     # Verify count matches
     actual_count = len(new_lots)

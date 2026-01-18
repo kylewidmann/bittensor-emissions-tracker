@@ -32,10 +32,9 @@ def test_process_staking_emissions(
     # Mock _resolve_time_window to return our test date range
     start_time = int(start_date.timestamp())
     end_time = int(end_date.timestamp())
-    lookback_days = (end_date - start_date).days + 1
     
     with patch.object(tracker, '_resolve_time_window', return_value=(start_time, end_time)):
-        new_lots: list[AlphaLot] = tracker.process_staking_emissions(lookback_days=lookback_days)
+        new_lots: list[AlphaLot] = tracker.process_staking_emissions()
     
     # Get actual results from returned lots
     actual_count = len(new_lots)

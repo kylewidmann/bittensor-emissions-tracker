@@ -331,20 +331,22 @@ class ContractTracker(BittensorTracker):
     # Main Processing
     # -------------------------------------------------------------------------
 
-    def run(self, lookback_days: int = 1):
+    def run(self, start_time: Optional[int] = None, end_time: Optional[int] = None):
         """Run the contract tracker processing."""
         # Implementation for running the contract tracker
-        self.process_contract_income(lookback_days=lookback_days)
-        self.process_staking_emissions(lookback_days=lookback_days)
-        self.process_alpha_sales(lookback_days=lookback_days)
-        self.process_expenses(lookback_days=lookback_days)
-        self.process_tao_transfers(lookback_days=lookback_days)
+        self.process_contract_income(start_time=start_time, end_time=end_time)
+        self.process_staking_emissions(start_time=start_time, end_time=end_time)
+        self.process_alpha_sales(start_time=start_time, end_time=end_time)
+        self.process_expenses(start_time=start_time, end_time=end_time)
+        self.process_tao_deposits(start_time=start_time, end_time=end_time)
+        self.process_tao_transfers(start_time=start_time, end_time=end_time)
 
-    def process_contract_income(self, lookback_days: int = 1) -> list:
-        """Process contract income over the specified lookback period.
+    def process_contract_income(self, start_time: Optional[int] = None, end_time: Optional[int] = None) -> list:
+        """Process contract income over the specified time period.
 
         Args:
-            lookback_days (int): Number of days to look back for processing.
+            start_time: Start timestamp (uses last processed if None)
+            end_time: End timestamp (defaults to now if None)
 
         Returns:
             list: List of processed emission lots.
@@ -353,7 +355,8 @@ class ContractTracker(BittensorTracker):
         start_time, end_time = self._resolve_time_window(
             "contract income",
             self.last_contract_income_timestamp,
-            lookback_days
+            start_time,
+            end_time
         )
 
         # Implementation for processing contract income
@@ -414,11 +417,12 @@ class ContractTracker(BittensorTracker):
 
         return alpha_lots
 
-    def process_alpha_sales(self, lookback_days: int = 1) -> list:
-        """Process ALPHA sales over the specified lookback period.
+    def process_alpha_sales(self, start_time: Optional[int] = None, end_time: Optional[int] = None) -> list:
+        """Process ALPHA sales over the specified time period.
 
         Args:
-            lookback_days (int): Number of days to look back for processing.
+            start_time: Start timestamp (uses last processed if None)
+            end_time: End timestamp (defaults to now if None)
 
         Returns:
             list: List of processed sales.
@@ -426,7 +430,8 @@ class ContractTracker(BittensorTracker):
         start_time, end_time = self._resolve_time_window(
             "alpha sales",
             self.last_sale_timestamp,
-            lookback_days
+            start_time,
+            end_time
         )
 
         # Get UNDELEGATE events without transfers (these are alpha sales)
@@ -745,11 +750,12 @@ class ContractTracker(BittensorTracker):
             self.income_sheet.spreadsheet.batch_update(body)
             print(f"  Updated {updated_count} income lots")
 
-    def process_expenses(self, lookback_days: int = 1) -> list:
-        """Process expenses over the specified lookback period.
+    def process_expenses(self, start_time: Optional[int] = None, end_time: Optional[int] = None) -> list:
+        """Process expenses over the specified time period.
 
         Args:
-            lookback_days (int): Number of days to look back for processing.
+            start_time: Start timestamp (uses last processed if None)
+            end_time: End timestamp (defaults to now if None)
 
         Returns:
             list: List of processed expense lots.
@@ -757,7 +763,8 @@ class ContractTracker(BittensorTracker):
         start_time, end_time = self._resolve_time_window(
             "expenses",
             self.last_expense_timestamp,
-            lookback_days
+            start_time,
+            end_time
         )
 
         # Get UNDELEGATE events with transfers (these are expenses)
@@ -923,8 +930,12 @@ class ContractTracker(BittensorTracker):
             print(f"  Updated {updated_count} income lots")
 
 
-    def process_staking_emissions(self, lookback_days: int = 1) -> list:
-        """Process staking emissions over the specified lookback period.
+    def process_staking_emissions(self, start_time: Optional[int] = None, end_time: Optional[int] = None) -> list:
+        """Process staking emissions over the specified time period.
+
+        Args:
+            start_time: Start timestamp (uses last processed if None)
+            end_time: End timestamp (defaults to now if None)
 
         Returns:
             list: List of processed emission lots.
@@ -932,7 +943,8 @@ class ContractTracker(BittensorTracker):
         start_time, end_time = self._resolve_time_window(
             "staking emissions",
             self.last_staking_income_timestamp,
-            lookback_days
+            start_time,
+            end_time
         )
 
         # For emission calculation, we need the previous day's balance to compute deltas
@@ -1197,7 +1209,8 @@ class ContractTracker(BittensorTracker):
         start_time, end_time = self._resolve_time_window(
             "TAO transfers",
             self.last_transfer_timestamp,
-            lookback_days
+            start_time,
+            end_time
         )
 
         # Get transfers from wallet to brokerage (using receiver filter)

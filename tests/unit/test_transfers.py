@@ -42,7 +42,7 @@ def test_process_transfers(
         int(start_date.timestamp()),
         int(end_date.timestamp())
     )):
-        tracker.process_alpha_sales(lookback_days=(end_date - start_date).days + 1)
+        tracker.process_alpha_sales()
     
 
     # Now compute expected transfers using the TAO lots that were just created
@@ -62,7 +62,7 @@ def test_process_transfers(
         int(start_date.timestamp()),
         int(end_date.timestamp())
     )):
-        actual_transfers = tracker.process_tao_transfers(lookback_days=(end_date - start_date).days + 1)
+        actual_transfers = tracker.process_tao_transfers()
     
     # Verify we got the expected number of transfers
     assert len(actual_transfers) == len(expected_transfers), \
