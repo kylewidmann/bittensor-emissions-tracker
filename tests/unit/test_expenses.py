@@ -45,11 +45,10 @@ def test_process_expenses(
     )
     
     # Process expenses (only for November)
-    with patch.object(tracker, '_resolve_time_window', return_value=(
-        int(start_date.timestamp()),
-        int(end_date.timestamp())
-    )):
-        actual_expenses: list[Expense] = tracker.process_expenses()
+    actual_expenses: list[Expense] = tracker.process_expenses(
+        start_time=int(start_date.timestamp()),
+        end_time=int(end_date.timestamp())
+    )
     # Don't sort - keep expenses in the order they were processed
     # Both actual and expected should be in the same order (raw JSON order)
     

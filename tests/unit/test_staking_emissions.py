@@ -33,8 +33,7 @@ def test_process_staking_emissions(
     start_time = int(start_date.timestamp())
     end_time = int(end_date.timestamp())
     
-    with patch.object(tracker, '_resolve_time_window', return_value=(start_time, end_time)):
-        new_lots: list[AlphaLot] = tracker.process_staking_emissions()
+    new_lots: list[AlphaLot] = tracker.process_staking_emissions(start_time=start_time, end_time=end_time)
     
     # Get actual results from returned lots
     actual_count = len(new_lots)
