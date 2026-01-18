@@ -3,21 +3,25 @@ from datetime import datetime
 from unittest.mock import patch
 import pytest
 
-from emissions_tracker.models import SourceType
+from emissions_tracker.models import AlphaLot, SourceType
 from tests.fixtures.mock_config import (
     TEST_PAYOUT_COLDKEY_SS58, 
     TEST_SMART_CONTRACT_SS58, 
     TEST_SUBNET_ID, 
     TEST_VALIDATOR_SS58
 )
-from tests.utils import filter_contract_income_events
 
 
 @pytest.mark.parametrize("start_date,end_date", [
     (datetime(2025, 11, 1), datetime(2025, 11, 5, 23, 59, 59)),
     (datetime(2025, 11, 1), datetime(2025, 11, 30, 23, 59, 59)),
 ])
-def test_process_contract_income(contract_tracker, raw_stake_events, start_date, end_date):
+def test_process_contract_income(
+    contract_tracker,
+    compute_expected_contract_income_lots,
+    start_date, 
+    end_date
+):
     """Test contract income processing for a given date range.
     
     This test verifies that the ContractTracker correctly:
@@ -28,8 +32,7 @@ def test_process_contract_income(contract_tracker, raw_stake_events, start_date,
     """
     # Filter raw events for contract income in the date range
     # Must match the same filters that the API client uses
-    filtered_events = filter_contract_income_events(
-        raw_stake_events,
+    expected_lots = compute_expected_contract_income_lots(
         int(start_date.timestamp()),
         int(end_date.timestamp()),
         contract_address=TEST_SMART_CONTRACT_SS58,
@@ -39,9 +42,7 @@ def test_process_contract_income(contract_tracker, raw_stake_events, start_date,
     )
     
     # Compute expected totals from raw data (alpha is in RAO)
-    expected_count = len(filtered_events)
-    expected_alpha_total = sum(int(event['alpha']) for event in filtered_events)
-    expected_usd_total = sum(float(event['usd']) for event in filtered_events)
+    expected_count = len(expected_lots)
     
     # Mock _resolve_time_window to return our test date range
     start_time = int(start_date.timestamp())
@@ -49,22 +50,21 @@ def test_process_contract_income(contract_tracker, raw_stake_events, start_date,
     lookback_days = (end_date - start_date).days + 1
     
     with patch.object(contract_tracker, '_resolve_time_window', return_value=(start_time, end_time)):
-        new_lots = contract_tracker.process_contract_income(lookback_days=lookback_days)
+        new_lots: list[AlphaLot] = contract_tracker.process_contract_income(lookback_days=lookback_days)
     
     # Verify count matches
     actual_count = len(new_lots)
     assert actual_count == expected_count, f"Expected {expected_count} lots, got {actual_count}"
     
     # Sort both lists by timestamp for comparison
-    from datetime import datetime
-    expected_sorted = sorted(filtered_events, key=lambda x: int(datetime.fromisoformat(x['timestamp'].replace('Z', '+00:00')).timestamp()))
+    expected_sorted = sorted(expected_lots, key=lambda x: x.timestamp)
     actual_sorted = sorted(new_lots, key=lambda x: x.timestamp)
     
     # Compare each lot to expected values
     for i, (expected, actual) in enumerate(zip(expected_sorted, actual_sorted)):
-        expected_ts = int(datetime.fromisoformat(expected['timestamp'].replace('Z', '+00:00')).timestamp())
-        expected_alpha_rao = int(expected['alpha'])
-        expected_usd_fmv = float(expected['usd'])
+        expected_ts = expected.timestamp
+        expected_alpha_rao = expected.alpha_rao
+        expected_usd_fmv = expected.usd_fmv
         
         # Verify timestamp matches exactly
         assert actual.timestamp == expected_ts, \

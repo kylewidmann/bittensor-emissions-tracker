@@ -4,86 +4,40 @@ Shared utility functions for unit tests.
 Contains common logic for processing balance history and delegation events
 that is used across multiple test modules.
 """
-import json
-from datetime import datetime, timedelta, timezone
-from collections import defaultdict
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict
 
+from emissions_tracker.models import AlphaLot, AlphaSale, CostBasisMethod, Expense, GainType, AlphaLotConsumption, LotStatus, SourceType, TaoLot, TaoLotConsumption, TaoStatsDelegation, TaoStatsStakeBalance, TaoStatsTransfer, TaoTransfer
 
-def load_json_data(json_path: str) -> List[dict]:
-    """Load data array from JSON file.
-    
-    Args:
-        json_path: Path to JSON file with 'data' array
-        
-    Returns:
-        List of data records from the JSON file
-    """
-    with open(json_path) as f:
-        return json.load(f)['data']
 
 
 def filter_balances_by_date_range(
-    balance_data: List[dict],
+    daily_stake_balances: Dict[str, TaoStatsStakeBalance],
     start_ts: int,
     end_ts: int
-) -> List[dict]:
+) -> List[TaoStatsStakeBalance]:
     """Filter balance records to a date range.
     
     Args:
-        balance_data: List of balance records with 'timestamp' field
+        daily_stake_balances: Dict of daily stake balance records keyed by day string
         start_ts: Start timestamp (unix seconds)
         end_ts: End timestamp (unix seconds)
         
     Returns:
         Filtered list of balance records
     """
-    return [
-        b for b in balance_data
-        if start_ts <= int(datetime.fromisoformat(b['timestamp'].replace('Z', '+00:00')).timestamp()) <= end_ts
+    balances = [
+        b for b in daily_stake_balances.values()
+        if start_ts <= b.timestamp_unix <= end_ts
     ]
+    balances.sort(key=lambda x: x.timestamp_unix)
+    return balances
 
 
-def group_balances_by_day(balances: List[dict]) -> List[Dict[str, Any]]:
-    """Group balance records by day, keeping last balance of each day.
-    
-    Args:
-        balances: List of balance records with 'timestamp', 'balance', and 'balance_as_tao' fields
-        
-    Returns:
-        List of daily balance records with keys: day, timestamp, alpha_rao, rao, block
-    """
-    balances_by_day = defaultdict(list)
-    for b in balances:
-        ts = int(datetime.fromisoformat(b['timestamp'].replace('Z', '+00:00')).timestamp())
-        dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-        day_key = dt.strftime('%Y-%m-%d')
-        balances_by_day[day_key].append({
-            'timestamp': ts,
-            'alpha_rao': int(b['balance']),
-            'rao': int(b['balance_as_tao']),
-            'block': b['block_number']
-        })
-    
-    daily_balances = []
-    for day_key in sorted(balances_by_day.keys()):
-        day_balances = sorted(balances_by_day[day_key], key=lambda x: x['timestamp'])
-        daily_balances.append({
-            'day': day_key,
-            'timestamp': day_balances[-1]['timestamp'],
-            'alpha_rao': day_balances[-1]['alpha_rao'],
-            'rao': day_balances[-1]['rao'],
-            'block': day_balances[-1]['block']
-        })
-    
-    return daily_balances
-
-
-def filter_delegation_events(
-    event_data: List[dict],
+def filter_delegation_events_by_date_range(
+    event_data: List[TaoStatsDelegation],
     start_ts: int,
     end_ts: int
-) -> List[Dict[str, Any]]:
+) -> List[TaoStatsDelegation]:
     """Filter and convert delegation events to simplified format.
     
     Args:
@@ -94,260 +48,246 @@ def filter_delegation_events(
     Returns:
         List of events with keys: timestamp, alpha_rao, action
     """
-    events = []
-    for e in event_data:
-        event_ts = int(datetime.fromisoformat(e['timestamp'].replace('Z', '+00:00')).timestamp())
-        if start_ts <= event_ts <= end_ts:
-            if e['action'] in ('DELEGATE', 'UNDELEGATE'):
-                events.append({
-                    'timestamp': event_ts,
-                    'alpha_rao': int(e['alpha']),
-                    'action': e['action']
-                })
-    return sorted(events, key=lambda x: x['timestamp'])
+    events = [
+        e for e in event_data
+        if start_ts <= e.timestamp_unix <= end_ts
+    ]
+    return sorted(events, key=lambda x: x.timestamp_unix)
 
+def _consume_alpha_lots(
+    alpha_lots: list[AlphaLot], 
+    amount_rao: int,
+    timestamp: int,
+    cost_basis_method: CostBasisMethod = CostBasisMethod.HIFO,
+) -> tuple[list[AlphaLotConsumption], float]:
+    # Consume ALPHA lots FIFO to calculate cost basis
+    cost_basis = 0.0
+    remaining_need = amount_rao
+    
+    consumed_lots: list[AlphaLotConsumption] = []
+    available_lots = [
+        lot for lot in alpha_lots 
+        if lot.timestamp <= timestamp
+        and lot.alpha_rao_remaining > 0
+    ]
 
-def group_events_by_day(events: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
-    """Group events by day.
-    
-    Args:
-        events: List of events with 'timestamp' field
-        
-    Returns:
-        Dictionary mapping day string (YYYY-MM-DD) to list of events
-    """
-    events_by_day = defaultdict(list)
-    for event in events:
-        dt = datetime.fromtimestamp(event['timestamp'], tz=timezone.utc)
-        day_key = dt.strftime('%Y-%m-%d')
-        events_by_day[day_key].append(event)
-    return events_by_day
+    if not available_lots:
+        raise ValueError(f"No available ALPHA lots to consume at timestamp {timestamp}")
 
+    # Sort lots based on cost basis method
+    if cost_basis_method == CostBasisMethod.FIFO:
+        # First In First Out - consume oldest lots first
+        available_lots.sort(key=lambda x: x.timestamp)
+    elif cost_basis_method == CostBasisMethod.HIFO:
+        # Highest In First Out - consume highest cost basis lots first
+        available_lots.sort(key=lambda x: x.usd_per_alpha, reverse=True)
+    else:
+        raise ValueError(f"Invalid cost_basis_method: {cost_basis_method}. Must be CostBasisMethod.FIFO or CostBasisMethod.HIFO")
+    
 
-def calculate_daily_emissions(
-    daily_balances: List[Dict[str, Any]],
-    events_by_day: Dict[str, List[Dict[str, Any]]],
-    price_per_tao: float = None,
-    price_lookup: callable = None,
-    emission_threshold: float = 0.0001
-) -> Tuple[List[Dict[str, Any]], int, float]:
-    """Calculate daily emissions from balance changes and events.
-    
-    For each day (comparing to previous day):
-    - Calculate balance change
-    - Subtract DELEGATE inflows
-    - Add back UNDELEGATE outflows
-    - Result is emissions for that day
-    
-    Args:
-        daily_balances: List of daily balance records
-        events_by_day: Dictionary of events grouped by day
-        price_per_tao: Fixed price for calculating USD FMV (or None to use price_lookup)
-        price_lookup: Callable that takes day string and returns price (or None to use price_per_tao)
-        emission_threshold: Minimum emission amount to count
-        
-    Returns:
-        Tuple of (emission_lots, count, total_alpha)
-        - emission_lots: List of emission lot dicts
-        - count: Number of emission lots created
-        - total_alpha: Total ALPHA emitted
-    """
-    if price_per_tao is None and price_lookup is None:
-        raise ValueError("Must provide either price_per_tao or price_lookup")
-    
-    emission_lots = []
-    emission_count = 0
-    total_alpha_emitted = 0.0
-    
-    for i in range(1, len(daily_balances)):
-        prev_day = daily_balances[i - 1]
-        curr_day = daily_balances[i]
-        
-        # Balance change from end of previous day to end of current day (in RAO)
-        balance_change_rao = curr_day['alpha_rao'] - prev_day['alpha_rao']
-        
-        # Get all events for current day
-        day_events = events_by_day.get(curr_day['day'], [])
-        
-        delegate_inflow_rao = sum(e['alpha_rao'] for e in day_events if e['action'] == 'DELEGATE')
-        undelegate_outflow_rao = sum(e['alpha_rao'] for e in day_events if e['action'] == 'UNDELEGATE')
-        
-        # Calculate emissions in RAO
-        emissions_rao = balance_change_rao - delegate_inflow_rao + undelegate_outflow_rao
-        
-        # Convert to ALPHA for threshold check
-        emissions_alpha = emissions_rao / 1e9
-        
-        if emissions_alpha > emission_threshold:
-            # Get price for this day
-            if price_lookup:
-                tao_price = price_lookup(curr_day['day'])
-                if not tao_price:
-                    raise ValueError(f"Could not get TAO price for {curr_day['day']}")
-            else:
-                tao_price = price_per_tao
-                if not tao_price:
-                    raise ValueError(f"TAO price is required but was not provided")
+    for lot in available_lots:
+        if remaining_need == 0:
+            break
 
-            # Calculate FMV using TAO equivalent ratio from current balance
-            # If alpha_rao is 0 (shouldn't happen with emissions), use previous day's ratio as fallback
-            if curr_day['alpha_rao'] > 0:
-                tao_ratio = curr_day['rao'] / curr_day['alpha_rao']
-            elif prev_day['alpha_rao'] > 0:
-                tao_ratio = prev_day['rao'] / prev_day['alpha_rao']
-            else:
-                raise ValueError(f"Cannot calculate TAO ratio for {curr_day['day']}: both current and previous balances are zero")
-            
-            tao_equivalent = emissions_alpha * tao_ratio
-            usd_fmv = tao_equivalent * tao_price
-            usd_per_alpha = usd_fmv / emissions_alpha if emissions_alpha > 0 else 0
-
-            emission_lots.append({
-                'timestamp': curr_day['timestamp'],
-                'alpha_quantity': emissions_alpha,
-                'alpha_remaining': emissions_alpha,
-                'usd_fmv': usd_fmv,
-                'status': 'Open'
-            })
-            emission_count += 1
-            total_alpha_emitted += emissions_alpha
-    
-    return emission_lots, emission_count, total_alpha_emitted
-
-
-def filter_contract_income_events(
-    stake_events: List[dict],
-    start_ts: int,
-    end_ts: int,
-    contract_address: str,
-    netuid: int,
-    delegate: str,
-    nominator: str
-) -> List[dict]:
-    """Filter stake events for contract income by date range and contract address.
-    
-    Args:
-        stake_events: Raw stake event data
-        start_ts: Start timestamp (unix seconds)
-        end_ts: End timestamp (unix seconds)
-        contract_address: Filter events for this contract address
-        netuid: Subnet ID to filter by
-        delegate: Delegate (hotkey) address to filter by
-        nominator: Nominator (coldkey) address to filter by
+        if lot.alpha_rao_remaining == 0:
+            continue
         
-    Returns:
-        List of stake events matching contract income criteria
-    """
-    filtered_events = []
-    for event in stake_events:
-        # Convert ISO timestamp to Unix timestamp for comparison
-        event_timestamp = int(datetime.fromisoformat(event['timestamp'].replace('Z', '+00:00')).timestamp())
+        to_consume = min(lot.alpha_rao_remaining, remaining_need)
+        basis_consumed = (to_consume / lot.alpha_rao) * lot.usd_fmv
         
-        # Only include events that match ALL required filters:
-        # - Correct netuid, delegate, and nominator (API required params)
-        # - Transfer events to the contract address
-        # - Within the date range
-        if (event['netuid'] == netuid
-            and event['delegate']['ss58'] == delegate
-            and event['nominator']['ss58'] == nominator
-            and event.get('is_transfer') == True
-            and event.get('transfer_address', {}).get('ss58') == contract_address
-            and start_ts <= event_timestamp <= end_ts):
-            filtered_events.append(event)
-    
-    return filtered_events
-
-
-def create_emission_lots(
-    balance_json_path: str,
-    events_json_path: str,
-    start_date: datetime,
-    end_date: datetime,
-    price_per_tao: float = None,
-    price_lookup: callable = None,
-    opening_lot_alpha: float = 0.0,
-    opening_lot_usd_per_alpha: float = 20.0,
-    emission_threshold: float = 1e-6
-) -> List[Dict[str, Any]]:
-    """Create ALPHA emission lots from raw balance and event data.
-    
-    This is a shared utility that creates ALPHA lots in the same way across
-    all test modules. It:
-    1. Loads balance history and delegation events
-    2. Optionally creates an opening lot (1 day before start)
-    3. Calculates daily emissions from balance changes
-    4. Returns a list of lot dictionaries with lot_id, timestamp, quantities, etc.
-    
-    Args:
-        balance_json_path: Path to stake balance JSON file
-        events_json_path: Path to stake events JSON file (for DELEGATE/UNDELEGATE)
-        start_date: Start date for emission processing
-        end_date: End date for emission processing
-        price_per_tao: Fixed TAO price for USD FMV calculations (or None to use price_lookup)
-        price_lookup: Callable that takes day string (YYYY-MM-DD) and returns price
-        opening_lot_alpha: If > 0, create an opening lot with this amount
-        opening_lot_usd_per_alpha: USD cost basis per ALPHA for opening lot
-        emission_threshold: Minimum emission amount to count
+        cost_basis += basis_consumed
+        lot.alpha_rao_remaining -= to_consume
+        remaining_need -= to_consume
         
-    Returns:
-        List of ALPHA lot dictionaries with keys:
-        - lot_id: Formatted as 'ALPHA-0001', 'ALPHA-0002', etc.
-        - timestamp: Unix timestamp
-        - alpha_quantity: Original ALPHA amount
-        - alpha_remaining: Remaining ALPHA (starts same as quantity)
-        - usd_per_alpha: USD cost basis per ALPHA
-        - usd_fmv: Total USD FMV for the lot
-    """
-    start_ts = int(start_date.timestamp())
-    end_ts = int(end_date.timestamp())
+        if lot.alpha_rao_remaining == 0:
+            lot.status = LotStatus.CLOSED
+        else:
+            lot.status = LotStatus.PARTIAL
+
+        consumed_lots.append(AlphaLotConsumption(
+            lot_id=lot.lot_id,
+            alpha_consumed=to_consume / 1e9,
+            cost_basis_consumed=basis_consumed,
+            acquisition_timestamp=lot.timestamp,
+        ))
+
+    return consumed_lots, cost_basis
+
+def consume_alpha_lots_for_expense(
+    expense_id: str,
+    alpha_lots: list[AlphaLot], 
+    delegation: TaoStatsDelegation,
+    cost_basis_method: CostBasisMethod = CostBasisMethod.HIFO,
+) -> Expense:
     
-    # Load and process balance/event data
-    balance_data = load_json_data(balance_json_path)
-    event_data = load_json_data(events_json_path)
+    consumed_lots, cost_basis = _consume_alpha_lots(
+        alpha_lots,
+        delegation.alpha,
+        delegation.timestamp_unix,
+        cost_basis_method
+    )
+
+    # TODO: Add in slippage to this as well
+    realized_gain_loss = delegation.usd - cost_basis
+
+    # Determine gain type (short-term if held < 1 year)
+    newest_lot_timestamp = min(c.acquisition_timestamp for c in consumed_lots)
+    holding_period_days = (delegation.timestamp_unix - newest_lot_timestamp) / (24 * 60 * 60)
+    gain_type = GainType.LONG_TERM if holding_period_days >= 365 else GainType.SHORT_TERM
+
+    expense = Expense(
+        expense_id=expense_id,
+        timestamp=delegation.timestamp_unix,
+        block_number=delegation.block_number,
+        transfer_address=delegation.transfer_address.ss58 if delegation.transfer_address else "",
+        alpha_disposed=delegation.alpha_float,
+        tao_received=0.0,  # No TAO received for ALPHA expenses
+        tao_price_usd=0.0,
+        usd_proceeds=delegation.usd or 0.0,
+        cost_basis=cost_basis,
+        realized_gain_loss=realized_gain_loss,
+        gain_type=gain_type,
+        consumed_lots=consumed_lots,
+        created_tao_lot_id="",  # No TAO lot created for direct ALPHA expenses
+        network_fee_tao=0.0,
+        network_fee_usd=0.0,
+        extrinsic_id=delegation.extrinsic_id,
+        notes=f"Alpha expense to {delegation.transfer_address.ss58[:8]}... at block {delegation.block_number}"
+    )
+
+    return expense
+
+def consume_alpha_lots_for_sale(
+    sale_id: str,
+    tao_lot_id: str,
+    alpha_lots: list[AlphaLot], 
+    delegation: TaoStatsDelegation,
+    associated_transfers: list[TaoStatsTransfer],
+    cost_basis_method: CostBasisMethod = CostBasisMethod.HIFO
+) -> tuple[AlphaSale, TaoLot]:
     
-    balances = filter_balances_by_date_range(balance_data, start_ts, end_ts)
-    daily_balances = group_balances_by_day(balances)
+    tao_price = delegation.usd / (delegation.amount / 1e9)  
+    slippage_usd = delegation.slippage * tao_price
+    network_fee = sum([t.fee_rao + t.amount_rao for t in associated_transfers])
+    fee_usd = (network_fee / 1e9)* tao_price
     
-    delegations = filter_delegation_events(event_data, start_ts, end_ts)
-    events_by_day = group_events_by_day(delegations)
-    
-    # Calculate daily emissions
-    emission_lots, emission_count, total_alpha_emitted = calculate_daily_emissions(
-        daily_balances,
-        events_by_day,
-        price_per_tao=price_per_tao,
-        price_lookup=price_lookup,
-        emission_threshold=emission_threshold
+    consumed_lots, cost_basis = _consume_alpha_lots(
+        alpha_lots,
+        delegation.alpha,
+        delegation.timestamp_unix,
+        cost_basis_method
     )
     
-    # Create lot list with IDs
-    alpha_lots = []
-    lot_counter = 1
+    # Calculate realized gain/loss
+    # usd_proceeds is already net of network fees (based on tao_amount which has fees deducted)
+    realized_gain_loss = delegation.usd - cost_basis
+    lot_age = delegation.timestamp_unix - max([
+        lot.acquisition_timestamp for lot in consumed_lots
+    ])
+    gain_type = GainType.LONG_TERM if lot_age / 86400 >= 365 else GainType.SHORT_TERM,
     
-    # Add opening lot if requested
-    if opening_lot_alpha > 0:
-        opening_lot_date = start_date - timedelta(days=1)
-        alpha_lots.append({
-            'lot_id': 'ALPHA-OPENING',  # Use same ID as tracker
-            'timestamp': int(opening_lot_date.timestamp()),
-            'alpha_quantity': opening_lot_alpha,
-            'alpha_remaining': opening_lot_alpha,
-            'usd_per_alpha': opening_lot_usd_per_alpha,
-            'usd_fmv': opening_lot_alpha * opening_lot_usd_per_alpha,
-        })
-        # Don't increment counter for opening lot
+    alpha_sale = AlphaSale(
+        sale_id=sale_id,
+        timestamp=delegation.timestamp_unix,
+        block_number=delegation.block_number,
+        alpha_disposed=delegation.alpha_float,
+        tao_received=(delegation.amount - network_fee) / 1e9,
+        tao_price_usd=tao_price,
+        usd_proceeds=delegation.usd,
+        cost_basis=cost_basis,
+        realized_gain_loss=realized_gain_loss,
+        gain_type=gain_type,
+        consumed_lots=consumed_lots,
+        created_tao_lot_id=tao_lot_id,
+        tao_slippage=delegation.slippage,
+        slippage_usd=slippage_usd,
+        network_fee_tao=network_fee / 1e9,
+        network_fee_usd=fee_usd,
+        extrinsic_id=delegation.extrinsic_id,
+    )
+
+    # TAO lot is created with NET amount (gross - network fees)
+    # This matches the tracker's _create_alpha_sales logic
+    tao_received_rao = delegation.amount - network_fee
     
-    # Add emission lots with IDs
-    for emission in emission_lots:
-        usd_per_alpha = emission['usd_fmv'] / emission['alpha_quantity'] if emission['alpha_quantity'] > 0 else 0
-        alpha_lots.append({
-            'lot_id': f'ALPHA-{lot_counter:04d}',
-            'timestamp': emission['timestamp'],
-            'alpha_quantity': emission['alpha_quantity'],
-            'alpha_remaining': emission['alpha_remaining'],
-            'usd_per_alpha': usd_per_alpha,
-            'usd_fmv': emission['usd_fmv'],
-        })
-        lot_counter += 1
+    tao_lot = TaoLot(
+        lot_id=tao_lot_id,
+        timestamp=delegation.timestamp_unix,
+        block_number=delegation.block_number,
+        rao=tao_received_rao,
+        rao_remaining=tao_received_rao,
+        usd_basis=alpha_sale.usd_proceeds,  # Use proceeds as basis (matches tracker)
+        usd_per_tao=alpha_sale.tao_price_usd,
+        source_sale_id=alpha_sale.sale_id,
+        extrinsic_id=alpha_sale.extrinsic_id,
+        status=LotStatus.OPEN,
+        notes="TAO lot created from sale",
+    )
+
+    return alpha_sale, tao_lot
+
+def consume_tao_lots(
+    xfer_id: str, 
+    tao_lots: list[TaoLot], 
+    taostats_transfer: TaoStatsTransfer,
+    tao_price: float
+) -> TaoTransfer:
+
+    consumed_lots: list[TaoLotConsumption] = []
+
+    available_lots: list[TaoLot] = [
+        lot for lot in tao_lots 
+        if lot.timestamp <= taostats_transfer.timestamp_unix 
+        and lot.rao_remaining > 0
+    ]
+
+    # Total outflow includes both transfer amount and fee (both reduce wallet balance)
+    total_outflow_rao = taostats_transfer.amount_rao + taostats_transfer.fee_rao
+    remaining_to_consume = total_outflow_rao
+    total_cost_basis = 0.0
+    for lot in available_lots:
+        if remaining_to_consume == 0:
+            break
+        
+        consume_amount = min(remaining_to_consume, lot.rao_remaining)
+        
+        # Calculate pro-rata cost basis
+        cost_basis_consumed = (consume_amount / lot.rao) * lot.usd_basis
+        
+        consumed_lots.append(TaoLotConsumption(
+            lot_id=lot.lot_id,
+            tao_consumed=consume_amount / 1e9,
+            cost_basis_consumed=cost_basis_consumed,
+            acquisition_timestamp=lot.timestamp,
+        ))
+        
+        total_cost_basis += cost_basis_consumed
+        lot.rao_remaining -= consume_amount
+        remaining_to_consume -= consume_amount
     
-    return alpha_lots
+    newest_lot_timestamp = min(c.acquisition_timestamp for c in consumed_lots)
+    holding_period_days = (taostats_transfer.timestamp_unix - newest_lot_timestamp) / (24 * 60 * 60)
+    gain_type = GainType.LONG_TERM if holding_period_days >= 365 else GainType.SHORT_TERM
+
+    # Split cost basis proportionally between transfer and fee
+    fee_cost_basis = (total_cost_basis * (taostats_transfer.fee_rao / total_outflow_rao)) if total_outflow_rao > 0 else 0.0
+
+    transfer = TaoTransfer(
+        transfer_id=xfer_id,
+        timestamp=taostats_transfer.timestamp_unix,
+        block_number=taostats_transfer.block_number,
+        tao_amount=taostats_transfer.amount_tao,
+        tao_price_usd=tao_price,
+        usd_proceeds=taostats_transfer.amount_tao * tao_price,
+        cost_basis=total_cost_basis,
+        realized_gain_loss=taostats_transfer.amount_tao * tao_price - total_cost_basis,
+        gain_type=gain_type,
+        consumed_tao_lots=consumed_lots,
+        transaction_hash=taostats_transfer.transaction_hash,
+        extrinsic_id=taostats_transfer.extrinsic_id,
+        total_outflow_tao=total_outflow_rao / 1e9,
+        fee_tao=taostats_transfer.fee_rao / 1e9,
+        fee_cost_basis_usd=fee_cost_basis,
+    )
+
+    return transfer

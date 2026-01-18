@@ -13,7 +13,6 @@ class TaoStatsAddress:
     ss58: str
     hex: str
 
-
 @dataclass
 class DailyBalance:
     """Represents the last balance snapshot for a given day."""
@@ -45,12 +44,12 @@ class TaoStatsStakeBalance:
         return dt.strftime('%Y-%m-%d')
 
     @property
-    def balance_rao(self) -> int:
+    def balance_as_alpha_rao(self) -> int:
         """Balance in RAO as integer."""
         return int(self.balance)
     
     @property
-    def balance_tao(self) -> float:
+    def balance_as_alpha_float(self) -> float:
         """Balance in TAO (converted from RAO)."""
         return int(self.balance) / 1e9
     
@@ -64,6 +63,19 @@ class TaoStatsStakeBalance:
         """Balance as TAO equivalent (converted from RAO)."""
         return int(self.balance_as_tao) / 1e9
 
+    @classmethod
+    def from_json(cls, data: Dict[str, Any]) -> 'TaoStatsStakeBalance':
+        """Create a TaoStatsStakeBalance instance from JSON data."""
+        return cls(
+            block_number=data['block_number'],
+            timestamp=data['timestamp'],
+            hotkey_name=data['hotkey_name'],
+            hotkey=TaoStatsAddress(**data['hotkey']),
+            coldkey=TaoStatsAddress(**data['coldkey']),
+            netuid=int(data['netuid']),
+            balance=data['balance'],
+            balance_as_tao=data['balance_as_tao']
+        )
 
 @dataclass
 class TaoStatsDelegation:
@@ -74,8 +86,8 @@ class TaoStatsDelegation:
     nominator: TaoStatsAddress
     delegate: TaoStatsAddress
     netuid: int
-    amount: int  # RAO
-    alpha: int  # RAO
+    amount: int  # TAO RAO
+    alpha: int  # Alpha RAO
     usd: float
     alpha_price_in_usd: Optional[float]
     alpha_price_in_tao: Optional[float]
@@ -134,6 +146,28 @@ class TaoStatsDelegation:
         """Fee in TAO (converted from RAO)."""
         return int(self.fee) / 1e9 if self.fee else 0.0
 
+    @classmethod
+    def from_json(cls, data: Dict[str, Any]) -> 'TaoStatsDelegation':
+        """Create a TaoStatsDelegation instance from JSON data."""
+        return cls(
+            block_number=int(data['block_number']),
+            timestamp=data['timestamp'],
+            action=data['action'],
+            nominator=TaoStatsAddress(**data['nominator']),
+            delegate=TaoStatsAddress(**data['delegate']),
+            netuid=int(data['netuid']),
+            amount=int(data['amount']),
+            alpha=int(data['alpha']),
+            usd=float(data['usd']),
+            alpha_price_in_usd=data.get('alpha_price_in_usd'),
+            alpha_price_in_tao=data.get('alpha_price_in_tao'),
+            slippage=data.get('slippage'),
+            extrinsic_id=data['extrinsic_id'],
+            is_transfer=data.get('is_transfer'),
+            transfer_address=TaoStatsAddress(**data['transfer_address']) if data.get('transfer_address') else None,
+            fee=data.get('fee')
+        )
+
 
 @dataclass
 class TaoStatsTransfer:
@@ -171,6 +205,109 @@ class TaoStatsTransfer:
     def fee_tao(self) -> float:
         """Fee in TAO (converted from RAO)."""
         return int(self.fee) / 1e9 if self.fee else 0.0
+
+    @property
+    def total_outflow_rao(self) -> int:
+        """Total outflow (amount + fee) in RAO as integer."""
+        return self.amount_rao + self.fee_rao
+
+    @classmethod
+    def from_json(cls, data: Dict[str, Any]) -> 'TaoStatsTransfer':
+        """Create a TaoStatsTransfer instance from JSON data."""
+        return cls(
+            block_number=int(data['block_number']),
+            timestamp=data['timestamp'],
+            transaction_hash=data['transaction_hash'],
+            extrinsic_id=data['extrinsic_id'],
+            amount=data['amount'],
+            fee=data.get('fee'),
+            from_address=TaoStatsAddress(**data['from']),
+            to_address=TaoStatsAddress(**data['to'])
+        )
+
+
+@dataclass
+class TaoStatsAccountHistory:
+    """Represents an account history snapshot from TaoStats API."""
+    address: TaoStatsAddress
+    network: str
+    block_number: int
+    timestamp: str
+    rank: int
+    balance_free: str  # RAO as string
+    balance_reserved: str  # RAO as string
+    balance_staked: str  # RAO as string
+    balance_staked_alpha_as_tao: str  # RAO as string
+    balance_staked_root: str  # RAO as string
+    root_claim_type: str
+    balance_liquidity: str  # RAO as string
+    balance_total: str  # RAO as string
+    created_on_date: str
+    created_on_network: str
+    coldkey_swap: Optional[str]
+    
+    @property
+    def timestamp_unix(self) -> int:
+        """Convert ISO timestamp to Unix timestamp."""
+        return int(datetime.fromisoformat(self.timestamp.replace('Z', '+00:00')).timestamp())
+    
+    @property
+    def day(self) -> str:
+        """Extract day in 'YYYY-MM-DD' format from timestamp."""
+        dt = datetime.fromisoformat(self.timestamp.replace('Z', '+00:00'))
+        return dt.strftime('%Y-%m-%d')
+    
+    @property
+    def balance_free_rao(self) -> int:
+        """Free balance in RAO as integer."""
+        return int(self.balance_free)
+    
+    @property
+    def balance_free_tao(self) -> float:
+        """Free balance in TAO (converted from RAO)."""
+        return int(self.balance_free) / 1e9
+    
+    @property
+    def balance_staked_rao(self) -> int:
+        """Staked balance in RAO as integer."""
+        return int(self.balance_staked)
+    
+    @property
+    def balance_staked_tao(self) -> float:
+        """Staked balance in TAO (converted from RAO)."""
+        return int(self.balance_staked) / 1e9
+    
+    @property
+    def balance_total_rao(self) -> int:
+        """Total balance in RAO as integer."""
+        return int(self.balance_total)
+    
+    @property
+    def balance_total_tao(self) -> float:
+        """Total balance in TAO (converted from RAO)."""
+        return int(self.balance_total) / 1e9
+    
+    @classmethod
+    def from_json(cls, data: Dict[str, Any]) -> 'TaoStatsAccountHistory':
+        """Create a TaoStatsAccountHistory instance from JSON data."""
+        return cls(
+            address=TaoStatsAddress(**data['address']),
+            network=data['network'],
+            block_number=int(data['block_number']),
+            timestamp=data['timestamp'],
+            rank=int(data['rank']),
+            balance_free=data['balance_free'],
+            balance_reserved=data['balance_reserved'],
+            balance_staked=data['balance_staked'],
+            balance_staked_alpha_as_tao=data['balance_staked_alpha_as_tao'],
+            balance_staked_root=data['balance_staked_root'],
+            root_claim_type=data['root_claim_type'],
+            balance_liquidity=data['balance_liquidity'],
+            balance_total=data['balance_total'],
+            created_on_date=data['created_on_date'],
+            created_on_network=data['created_on_network'],
+            coldkey_swap=data.get('coldkey_swap')
+        )
 
 
 # Business Logic Models
@@ -288,7 +425,7 @@ class AlphaLotRow(AlphaLot):
 
 
 @dataclass
-class LotConsumption:
+class AlphaLotConsumption:
     """Records how much of a lot was consumed in a disposal."""
     lot_id: str
     alpha_consumed: float
@@ -299,6 +436,22 @@ class LotConsumption:
         return {
             "lot_id": self.lot_id,
             "alpha": self.alpha_consumed,
+            "basis": self.cost_basis_consumed,
+            "acquired": self.acquisition_timestamp
+        }
+    
+@dataclass
+class TaoLotConsumption:
+    """Records how much of a lot was consumed in a disposal."""
+    lot_id: str
+    tao_consumed: float
+    cost_basis_consumed: float
+    acquisition_timestamp: int
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "lot_id": self.lot_id,
+            "tao": self.tao_consumed,
             "basis": self.cost_basis_consumed,
             "acquired": self.acquisition_timestamp
         }
@@ -391,12 +544,10 @@ class AlphaSale:
     cost_basis: float  # Sum of consumed lot bases
     realized_gain_loss: float
     gain_type: GainType
-    consumed_lots: List[LotConsumption]
+    consumed_lots: List[AlphaLotConsumption]
     created_tao_lot_id: str  # Link to TAO lot created
-    tao_expected: float = 0.0
     tao_slippage: float = 0.0
     slippage_usd: float = 0.0
-    slippage_ratio: float = 0.0
     network_fee_tao: float = 0.0
     network_fee_usd: float = 0.0
     extrinsic_id: Optional[str] = None
@@ -427,10 +578,8 @@ class AlphaSale:
             self.cost_basis,
             self.realized_gain_loss,
             self.gain_type.value,
-            self.tao_expected,
             self.tao_slippage,
             self.slippage_usd,
-            self.slippage_ratio,
             self.network_fee_tao,
             self.network_fee_usd,
             self.consumed_lots_summary(),
@@ -463,7 +612,7 @@ class TaoTransfer:
     cost_basis: float  # From consumed TAO lots
     realized_gain_loss: float
     gain_type: GainType
-    consumed_tao_lots: List[LotConsumption]
+    consumed_tao_lots: List[TaoLotConsumption]
     transaction_hash: Optional[str] = None
     extrinsic_id: Optional[str] = None
     notes: str = ""
@@ -476,7 +625,7 @@ class TaoTransfer:
         return datetime.fromtimestamp(self.timestamp).strftime('%Y-%m-%d %H:%M:%S')
     
     def consumed_lots_summary(self) -> str:
-        return ", ".join([f"{c.lot_id}:{c.alpha_consumed:.4f}" for c in self.consumed_tao_lots])
+        return ", ".join([f"{c.lot_id}:{c.tao_consumed:.4f}" for c in self.consumed_tao_lots])
     
     def to_sheet_row(self) -> List[Any]:
         return [
@@ -523,7 +672,7 @@ class Expense:
     cost_basis: float  # Sum of consumed lot bases
     realized_gain_loss: float
     gain_type: GainType
-    consumed_lots: List[LotConsumption]
+    consumed_lots: List[AlphaLotConsumption]
     created_tao_lot_id: str  # Link to TAO lot created
     transfer_address: str  # Address the TAO was transferred to
     category: str = ""  # User fills this in (e.g., "Payment to Entity", "Distribution", etc.)

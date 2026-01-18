@@ -8,25 +8,31 @@ from datetime import datetime
 from emissions_tracker.config import TrackerSettings, WaveAccountSettings
 from emissions_tracker.exceptions import PriceNotAvailableError
 from emissions_tracker.models import (
-    AlphaLot, AlphaLotRow, TaoLot, TaoLotRow, AlphaSale, Expense, TaoStatsStakeBalance, TaoStatsTransfer, TaoTransfer,
-    SourceType, LotStatus, CostBasisMethod, TaoStatsDelegation, LotConsumption, GainType
+    AlphaLot, AlphaLotRow, TaoLot, TaoLotConsumption, TaoLotRow, AlphaSale, Expense, TaoStatsStakeBalance, TaoStatsTransfer, TaoTransfer,
+    SourceType, LotStatus, CostBasisMethod, TaoStatsDelegation, AlphaLotConsumption, GainType
 )
 from emissions_tracker.trackers.bittensor_tracker import BittensorTracker, _is_rate_limit_error, SECONDS_PER_DAY
 from oauth2client.service_account import ServiceAccountCredentials
 
+from emissions_tracker.utils import initialize_sheets
+
 RAO_PER_TAO = 10 ** 9
-
-
+# Sheet names
+INCOME_SHEET = "Income"
+SALES_SHEET = "Sales"
+EXPENSES_SHEET = "Expenses"
+TRANSFERS_SHEET = "Transfers"
+JOURNAL_SHEET = "Journal Entries"
+TAO_LOTS_SHEET = "TAO Lots"
+SHEET_CONFIGS = [
+    (INCOME_SHEET, AlphaLot.sheet_headers()),
+    (SALES_SHEET, AlphaSale.sheet_headers()),
+    (EXPENSES_SHEET, Expense.sheet_headers()),
+    (TAO_LOTS_SHEET, TaoLot.sheet_headers()),
+    (TRANSFERS_SHEET, TaoTransfer.sheet_headers()),
+]
 class ContractTracker(BittensorTracker):
     """Tracker for smart contract emissions and related activities."""
-    
-    # Sheet names
-    INCOME_SHEET = "Income"
-    SALES_SHEET = "Sales"
-    EXPENSES_SHEET = "Expenses"
-    TRANSFERS_SHEET = "Transfers"
-    JOURNAL_SHEET = "Journal Entries"
-    TAO_LOTS_SHEET = "TAO Lots"
 
     def _initialize(self):
         self.config = TrackerSettings()
@@ -90,39 +96,15 @@ class ContractTracker(BittensorTracker):
 
     def _init_sheets(self):
         """Initialize all tracking sheets with headers."""
-        sheet_configs = [
-            (self.INCOME_SHEET, AlphaLot.sheet_headers()),
-            (self.SALES_SHEET, AlphaSale.sheet_headers()),
-            (self.EXPENSES_SHEET, Expense.sheet_headers()),
-            (self.TAO_LOTS_SHEET, TaoLot.sheet_headers()),
-            (self.TRANSFERS_SHEET, TaoTransfer.sheet_headers()),
-        ]
         
-        for sheet_name, headers in sheet_configs:
-            try:
-                worksheet = self.sheet.worksheet(sheet_name)
-                self._ensure_sheet_headers(worksheet, headers, sheet_name)
-            except gspread.exceptions.WorksheetNotFound:
-                worksheet = self.sheet.add_worksheet(title=sheet_name, rows=1000, cols=20)
-                worksheet.append_row(headers)
-                print(f"  Created sheet: {sheet_name}")
-        
-        # Store worksheet references
-        self.income_sheet = self.sheet.worksheet(self.INCOME_SHEET)
-        self.sales_sheet = self.sheet.worksheet(self.SALES_SHEET)
-        self.expenses_sheet = self.sheet.worksheet(self.EXPENSES_SHEET)
-        self.tao_lots_sheet = self.sheet.worksheet(self.TAO_LOTS_SHEET)
-        self.transfers_sheet = self.sheet.worksheet(self.TRANSFERS_SHEET)
+        initialize_sheets(self.sheet, SHEET_CONFIGS)
 
-    def _ensure_sheet_headers(self, worksheet, expected_headers, label: str):
-        """Ensure worksheet header row matches expected schema."""
-        try:
-            existing_headers = worksheet.row_values(1)
-            if existing_headers != expected_headers:
-                worksheet.update('A1', [expected_headers])
-                print(f"  Updated {label} headers")
-        except Exception as e:
-            print(f"  Warning: Could not verify {label} headers: {e}")
+        # Store worksheet references
+        self.income_sheet = self.sheet.worksheet(INCOME_SHEET)
+        self.sales_sheet = self.sheet.worksheet(SALES_SHEET)
+        self.expenses_sheet = self.sheet.worksheet(EXPENSES_SHEET)
+        self.tao_lots_sheet = self.sheet.worksheet(TAO_LOTS_SHEET)
+        self.transfers_sheet = self.sheet.worksheet(TRANSFERS_SHEET)
 
     def _load_state(self):
         """Load last processed timestamps from sheets."""
@@ -477,7 +459,11 @@ class ContractTracker(BittensorTracker):
 
         return sales
 
-    def _create_alpha_sales(self, undelegations: list, transfers: list) -> list:
+    def _create_alpha_sales(
+        self, 
+        undelegations: list[TaoStatsDelegation], 
+        transfers: list[TaoStatsTransfer]
+    ) -> list[AlphaSale]:
         """Create AlphaSale records from UNDELEGATE events.
         
         Args:
@@ -523,30 +509,14 @@ class ContractTracker(BittensorTracker):
             
             # Network fee is the total amount deducted (transfer amount + transfer fee)
             # This equals undelegate.fee (the fee specified in the delegation event)
-            network_fee_tao = int(undelegate.fee) / RAO_PER_TAO
+            network_fee_tao = (fee_transfer.amount_rao + fee_transfer.fee_rao) / RAO_PER_TAO
 
             # Calculate slippage
             # TODO: Look at moving a bunch of these calculations into the models
-            slippage_ratio = undelegate.slippage or 0.0
-            if slippage_ratio and abs(slippage_ratio) > 1e-9:
-                # Calculate expected TAO before slippage: tao_received = tao_expected * (1 - slippage)
-                # Therefore: tao_expected = tao_received / (1 - slippage)
-                tao_expected = tao_received / (1 - slippage_ratio)
-            else:
-                # No slippage, so expected equals received
-                tao_expected = tao_received
-            
-            tao_slippage = tao_expected - tao_received
-
             # Get TAO price for valuation
-            tao_price_usd = self.price_client.get_price_at_timestamp('TAO', undelegate.timestamp_unix)
-            if not tao_price_usd:
-                raise PriceNotAvailableError(
-                    f"Could not get TAO price for sale at block {undelegate.block_number} "
-                    f"(timestamp: {undelegate.timestamp_unix})"
-                )
-            usd_proceeds = tao_received * tao_price_usd
-            slippage_usd = tao_slippage * tao_price_usd
+            tao_price_usd = undelegate.usd / (undelegate.amount / RAO_PER_TAO)
+            usd_proceeds = undelegate.usd
+            slippage_usd = undelegate.slippage * tao_price_usd
 
             # Calculate gain/loss
             realized_gain_loss = usd_proceeds - total_basis
@@ -586,10 +556,8 @@ class ContractTracker(BittensorTracker):
                 gain_type=gain_type,
                 consumed_lots=consumed_lots,
                 created_tao_lot_id=tao_lot_id,
-                tao_expected=tao_expected,
-                tao_slippage=tao_slippage,
+                tao_slippage=undelegate.slippage,
                 slippage_usd=slippage_usd,
-                slippage_ratio=slippage_ratio,
                 network_fee_tao=network_fee_tao,
                 network_fee_usd=network_fee_tao * tao_price_usd,
                 extrinsic_id=undelegate.extrinsic_id,
@@ -634,14 +602,18 @@ class ContractTracker(BittensorTracker):
 
         return alpha_lots
 
-    def _consume_alpha_lots(self, lots: list, amount_rao: int, disposal_timestamp: int) -> tuple:
+    def _consume_alpha_lots(
+        self, 
+        lots: list[AlphaLot], 
+        amount_rao: int,
+        timestamp: int
+    ) -> tuple[list[AlphaLotConsumption], float]:
         """Consume ALPHA lots according to configured strategy.
         
         Args:
             lots: List of available AlphaLot objects
             amount_rao: Amount to consume in RAO
-            disposal_timestamp: Timestamp of the disposal event
-            
+            timestamp: Timestamp of the consumption event
         Returns:
             Tuple of (consumed_lots list, total_basis_consumed)
         """
@@ -653,11 +625,17 @@ class ContractTracker(BittensorTracker):
             # Highest In First Out - highest basis first
             sorted_lots = sorted(lots, key=lambda x: x.usd_per_alpha, reverse=True)
 
+        available_lots = [
+            l for l in sorted_lots 
+            if l.alpha_rao_remaining > 0
+            and l.timestamp <= timestamp
+        ]
+
         consumed_lots = []
         total_basis = 0.0
         remaining_needed = amount_rao
 
-        for lot in sorted_lots:
+        for lot in available_lots:
             if remaining_needed <= 0:
                 break
 
@@ -671,7 +649,7 @@ class ContractTracker(BittensorTracker):
             # Calculate pro-rata basis
             basis_consumed = (consume_amount / lot.alpha_rao) * lot.usd_fmv
 
-            consumed_lots.append(LotConsumption(
+            consumed_lots.append(AlphaLotConsumption(
                 lot_id=lot.lot_id,
                 alpha_consumed=consume_alpha,
                 cost_basis_consumed=basis_consumed,
@@ -689,8 +667,10 @@ class ContractTracker(BittensorTracker):
             remaining_needed -= consume_amount
 
         if remaining_needed > 0:
-            # Not enough lots available
-            return [], 0.0
+            raise ValueError(
+                f"Insufficient ALPHA lots to consume {amount_rao / RAO_PER_TAO:.4f} ALPHA. "
+                f"Shortfall of {remaining_needed / RAO_PER_TAO:.4f} ALPHA."
+            )
 
         return consumed_lots, total_basis
 
@@ -798,7 +778,7 @@ class ContractTracker(BittensorTracker):
 
         return expenses
 
-    def _create_expenses(self, undelegations: list) -> tuple:
+    def _create_expenses(self, undelegations: list[TaoStatsDelegation]) -> tuple:
         """Create Expense records from UNDELEGATE events with transfers.
         
         Args:
@@ -825,10 +805,8 @@ class ContractTracker(BittensorTracker):
                     f"Insufficient ALPHA lots to cover expense of {alpha_rao_needed / RAO_PER_TAO:.4f} ALPHA "
                     f"at block {undelegate.block_number}. This indicates missing income lots or incorrect lot consumption."
                 )
-
-            # Get ALPHA price for valuation (use the usd value from the event)
-            usd_proceeds = undelegate.usd or 0.0
             
+            # TODO: I don't think this accounts for slippage, should this be included in gain/loss?
             # Calculate network fee in USD
             network_fee_tao = 0.0  # No TAO fees for direct ALPHA transfers
             network_fee_usd = 0.0
@@ -840,11 +818,11 @@ class ContractTracker(BittensorTracker):
                     network_fee_usd = network_fee_alpha * undelegate.alpha_price_in_usd
 
             # Calculate gain/loss
-            realized_gain_loss = usd_proceeds - total_basis - network_fee_usd
+            realized_gain_loss = undelegate.usd - total_basis - network_fee_usd
 
             # Determine gain type (short-term if held < 1 year)
-            oldest_lot_timestamp = min(c.acquisition_timestamp for c in consumed_lots)
-            holding_period_days = (undelegate.timestamp_unix - oldest_lot_timestamp) / (24 * 60 * 60)
+            newest_lot_timestamp = min(c.acquisition_timestamp for c in consumed_lots)
+            holding_period_days = (undelegate.timestamp_unix - newest_lot_timestamp) / (24 * 60 * 60)
             gain_type = GainType.LONG_TERM if holding_period_days >= 365 else GainType.SHORT_TERM
 
             # Create expense record
@@ -856,7 +834,7 @@ class ContractTracker(BittensorTracker):
                 alpha_disposed=alpha_rao_needed / RAO_PER_TAO,
                 tao_received=0.0,  # No TAO received for ALPHA expenses
                 tao_price_usd=0.0,
-                usd_proceeds=usd_proceeds,
+                usd_proceeds=undelegate.usd,
                 cost_basis=total_basis,
                 realized_gain_loss=realized_gain_loss,
                 gain_type=gain_type,
@@ -991,74 +969,55 @@ class ContractTracker(BittensorTracker):
             List of AlphaLot objects for days with positive emissions
         """
         # Group balances by day (using date at 23:59:59)
-        balances_by_day = defaultdict(list[TaoStatsStakeBalance])
+        balances_by_day: defaultdict[str, TaoStatsStakeBalance] = defaultdict(TaoStatsStakeBalance)
         for balance in stake_balances:
-            balances_by_day[balance.day].append(balance)
-        
-        # Get the last balance for each day (closest to 23:59:59)
-        daily_balances = dict[str, TaoStatsStakeBalance]()  
-        for day_key, balances in balances_by_day.items():
-            # Sort by timestamp descending to get the latest balance of the day
-            latest_balance = sorted(balances, key=lambda b: b.timestamp_unix, reverse=True)[0]
-            daily_balances[day_key] = latest_balance
+            if balance.day in balances_by_day:
+                if balance.timestamp_unix > balances_by_day[balance.day].timestamp_unix:
+                    balances_by_day[balance.day] = balance
+            else:
+                balances_by_day[balance.day] = balance      
         
         # Group delegation events by day
-        delegations_by_day = defaultdict(list[TaoStatsDelegation])
+        delegations_by_day: defaultdict[str, list[TaoStatsDelegation]] = defaultdict(list)
         for delegation in delegations:
             delegations_by_day[delegation.day].append(delegation)
         
         # Calculate emissions for each day
         alpha_lots = []
-        sorted_days = sorted(daily_balances.keys())
+        sorted_days = sorted(balances_by_day.keys())
         
         for i in range(1, len(sorted_days)):
             prev_day = sorted_days[i - 1]
             current_day = sorted_days[i]
             
-            prev_balance = daily_balances[prev_day]
-            current_balance = daily_balances[current_day]
+            prev_balance = balances_by_day[prev_day]
+            current_balance = balances_by_day[current_day]
+            day_events = delegations_by_day.get(current_day, [])
             
             # Balance change in RAO
-            balance_change_rao = int(current_balance.balance) - int(prev_balance.balance)
+            balance_change_alpha_rao = current_balance.balance_as_alpha_rao - prev_balance.balance_as_alpha_rao
             
             # Adjust for DELEGATE (outflows - reduce emissions) and UNDELEGATE (inflows - already in balance)
-            day_delegations = delegations_by_day.get(current_day, [])
-            
-            delegate_alpha_rao = sum(
-                int(d.alpha) for d in day_delegations 
-                if d.action == 'DELEGATE'
-            )
-            
-            undelegate_alpha_rao = sum(
-                int(d.alpha) for d in day_delegations 
-                if d.action == 'UNDELEGATE'
-            )
+            alpha_inflow_rao = sum(e.alpha for e in day_events if e.action == 'DELEGATE')
+            alpha_outflow_rao = sum(e.alpha for e in day_events if e.action == 'UNDELEGATE')
             
             # Calculate net emissions
             # emissions = balance_change - delegates + undelegates
-            emissions_rao = balance_change_rao - delegate_alpha_rao + undelegate_alpha_rao
+            emissions_alpha_rao = balance_change_alpha_rao - alpha_inflow_rao + alpha_outflow_rao
+            alpha_price_tao_rao = current_balance.balance_as_tao_rao / current_balance.balance_as_alpha_rao           
             
             # Only create lots for positive emissions
-            if emissions_rao > 0:
+            if emissions_alpha_rao > 0:
                 # Get TAO price for FMV calculation
                 tao_price = self.price_client.get_price_at_timestamp('TAO', current_balance.timestamp_unix)
                 if not tao_price:
                     raise PriceNotAvailableError(f"Could not get TAO price for {current_day} (timestamp: {current_balance.timestamp_unix})")
-                
-                # Calculate FMV using TAO equivalent ratio from current balance
-                # If balance_rao is 0 (shouldn't happen with emissions), use previous day's ratio as fallback
-                if int(current_balance.balance) > 0:
-                    tao_ratio = int(current_balance.balance_as_tao) / int(current_balance.balance)
-                elif int(prev_balance.balance) > 0:
-                    tao_ratio = int(prev_balance.balance_as_tao) / int(prev_balance.balance)
-                else:
-                    raise ValueError(f"Cannot calculate TAO ratio for {current_day}: both current and previous balances are zero")
-                
+
                 # Convert emissions to ALPHA float for calculations
-                emissions_alpha = emissions_rao / RAO_PER_TAO
-                tao_equivalent = emissions_alpha * tao_ratio
-                usd_fmv = tao_equivalent * tao_price
-                usd_per_alpha = usd_fmv / emissions_alpha if emissions_alpha > 0 else 0.0
+                emissions_tao = (emissions_alpha_rao * alpha_price_tao_rao) / 1e9  # Convert new Alpha RAO to TAO RAO
+                emissions_alpha = emissions_alpha_rao / 1e9  # Convert to TAO
+                usd_fmv = emissions_tao * tao_price
+                usd_per_alpha = usd_fmv / emissions_alpha if emissions_tao > 0 else 0
                 
                 # Use the current day's balance timestamp (latest timestamp of the day)
                 lot = AlphaLot(
@@ -1066,11 +1025,11 @@ class ContractTracker(BittensorTracker):
                     timestamp=current_balance.timestamp_unix,
                     block_number=current_balance.block_number,
                     source_type=SourceType.STAKING,
-                    alpha_rao=emissions_rao,
-                    alpha_rao_remaining=emissions_rao,
+                    alpha_rao=emissions_alpha_rao,
+                    alpha_rao_remaining=emissions_alpha_rao,
                     usd_fmv=usd_fmv,
                     usd_per_alpha=usd_per_alpha,
-                    tao_equivalent=tao_equivalent,
+                    tao_equivalent=emissions_tao,
                     notes=f"Staking emissions for {current_day}"
                 )
                 alpha_lots.append(lot)
@@ -1143,9 +1102,7 @@ class ContractTracker(BittensorTracker):
         tao_transfers = []
         for transfer in transfers:
             # Total outflow = transfer amount + fee (work in RAO to avoid floating point errors)
-            tao_amount_rao = transfer.amount_rao  # Amount sent to brokerage in RAO
-            fee_rao = transfer.fee_rao
-            total_outflow_rao = tao_amount_rao + fee_rao
+            total_outflow_rao = transfer.amount_rao + transfer.fee_rao
 
             # Consume TAO lots for total outflow (amount + fee)
             # Both the transfer amount and fee reduce the wallet balance
@@ -1169,20 +1126,14 @@ class ContractTracker(BittensorTracker):
                     f"(timestamp: {transfer.timestamp_unix})"
                 )
 
-            # Convert to TAO for USD calculations and record keeping
-            tao_amount = tao_amount_rao / RAO_PER_TAO
-            fee_tao = fee_rao / RAO_PER_TAO
-            total_outflow = total_outflow_rao / RAO_PER_TAO
-
             # Calculate proceeds (only for the amount transferred to brokerage, not fees)
-            usd_proceeds = tao_amount * tao_price_usd
+            usd_proceeds = transfer.amount_tao * tao_price_usd
 
             # Split cost basis proportionally between transfer and fee
-            fee_cost_basis = (total_basis * (fee_rao / total_outflow_rao)) if total_outflow_rao > 0 else 0.0
-            transfer_cost_basis = total_basis - fee_cost_basis
+            fee_cost_basis = (total_basis * (transfer.fee_rao / total_outflow_rao)) if total_outflow_rao > 0 else 0.0
 
             # Calculate gain/loss
-            realized_gain_loss = usd_proceeds - transfer_cost_basis
+            realized_gain_loss = usd_proceeds - total_basis
 
             # Determine gain type (short-term if held < 1 year)
             oldest_lot_timestamp = min(c.acquisition_timestamp for c in consumed_lots)
@@ -1194,17 +1145,17 @@ class ContractTracker(BittensorTracker):
                 transfer_id=self._next_transfer_id(),
                 timestamp=transfer.timestamp_unix,
                 block_number=transfer.block_number,
-                tao_amount=tao_amount,
+                tao_amount=transfer.amount_tao,
                 tao_price_usd=tao_price_usd,
                 usd_proceeds=usd_proceeds,
-                cost_basis=transfer_cost_basis,
+                cost_basis=total_basis,
                 realized_gain_loss=realized_gain_loss,
                 gain_type=gain_type,
                 consumed_tao_lots=consumed_lots,
                 transaction_hash=transfer.transaction_hash or "",
                 extrinsic_id=transfer.extrinsic_id or "",
-                total_outflow_tao=total_outflow,
-                fee_tao=fee_tao,
+                total_outflow_tao=transfer.amount_tao + transfer.fee_tao,
+                fee_tao=transfer.fee_tao,
                 fee_cost_basis_usd=fee_cost_basis,
                 notes=f"TAO transfer to brokerage at block {transfer.block_number}"
             )
@@ -1243,7 +1194,12 @@ class ContractTracker(BittensorTracker):
 
         return tao_lots
 
-    def _consume_tao_lots(self, lots: list[TaoLotRow], amount_rao: int, disposal_timestamp: int) -> tuple:
+    def _consume_tao_lots(
+        self, 
+        lots: list[TaoLotRow], 
+        amount_rao: int, 
+        disposal_timestamp: int
+    ) -> tuple[list[TaoLotConsumption], float]:
         """Consume TAO lots according to configured strategy.
         
         Args:
@@ -1266,7 +1222,13 @@ class ContractTracker(BittensorTracker):
         total_basis = 0.0
         remaining_needed = amount_rao
 
-        for lot in sorted_lots:
+        available_lots = [
+            l for l in sorted_lots
+            if l.rao_remaining > 0 
+            and l.timestamp <= disposal_timestamp
+        ]
+
+        for lot in available_lots:
             if remaining_needed <= 0:
                 break
 
@@ -1280,9 +1242,9 @@ class ContractTracker(BittensorTracker):
             # Calculate pro-rata basis
             basis_consumed = (consume_amount / lot.rao) * lot.usd_basis
 
-            consumed_lots.append(LotConsumption(
+            consumed_lots.append(TaoLotConsumption(
                 lot_id=lot.lot_id,
-                alpha_consumed=consume_tao,  # Reusing alpha_consumed field for TAO amount
+                tao_consumed=consume_tao,  # Reusing alpha_consumed field for TAO amount
                 cost_basis_consumed=basis_consumed,
                 acquisition_timestamp=lot.timestamp
             ))

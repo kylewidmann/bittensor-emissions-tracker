@@ -1,15 +1,101 @@
+from collections import defaultdict
 import json
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Callable, Dict, List, Optional
+from annotated_types import T
 import pytest
 
-from emissions_tracker.models import CostBasisMethod
-from tests.fixtures.mock_config import TEST_SMART_CONTRACT_SS58
-from tests.utils import calculate_daily_emissions, filter_balances_by_date_range, filter_delegation_events, group_balances_by_day, group_events_by_day
+from emissions_tracker.models import AlphaLot, AlphaSale, CostBasisMethod, Expense, GainType, AlphaLotConsumption, LotStatus, SourceType, TaoLot, TaoStatsStakeBalance, TaoStatsDelegation, TaoStatsTransfer, TaoStatsAccountHistory, TaoTransfer
+from tests.fixtures.mock_config import TEST_BROKER_SS58, TEST_PAYOUT_COLDKEY_SS58, TEST_SMART_CONTRACT_SS58, TEST_SUBNET_ID, TEST_VALIDATOR_SS58
+from tests.utils import consume_alpha_lots_for_expense, consume_alpha_lots_for_sale, consume_tao_lots, filter_balances_by_date_range, filter_delegation_events_by_date_range
 from datetime import datetime, timezone, timedelta
 
 # Test data directory
 TEST_DATA_DIR = Path(__file__).parent.parent / "data" / "all"
+SECONDS_PER_DAY = 86400
+
+
+class HistoricalPrices:
+    """Helper class to manage historical TAO price data for tests.
+    
+    Provides convenient methods to look up prices by date or datetime,
+    avoiding duplicated price lookup logic throughout tests.
+    """
+    
+    def __init__(self, price_data: Dict[str, Any]):
+        """Initialize with raw price data dict.
+        
+        Args:
+            price_data: Dict with date strings as keys (YYYY-MM-DD) and price dicts as values.
+                       Each price dict should have: date, timestamp, price
+        """
+        self._data = price_data
+    
+    def get_price_for_date(self, date: str) -> float:
+        """Get price for a specific date string.
+        
+        Args:
+            date: Date string in 'YYYY-MM-DD' format
+            
+        Returns:
+            Price as float
+            
+        Raises:
+            ValueError: If date not found in historical data
+        """
+        if date in self._data:
+            return float(self._data[date]['price'])
+        raise ValueError(f"No historical price data for {date}")
+    
+    def get_price_for_datetime(self, dt: datetime) -> float:
+        """Get price for a datetime object.
+        
+        Args:
+            dt: Datetime object
+            
+        Returns:
+            Price as float
+            
+        Raises:
+            ValueError: If date not found in historical data
+        """
+        date_str = dt.strftime('%Y-%m-%d')
+        return self.get_price_for_date(date_str)
+    
+    def get_price_for_timestamp(self, timestamp: int) -> float:
+        """Get price for a Unix timestamp.
+        
+        Args:
+            timestamp: Unix timestamp (seconds since epoch)
+            
+        Returns:
+            Price as float
+            
+        Raises:
+            ValueError: If date not found in historical data
+        """
+        dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        return self.get_price_for_datetime(dt)
+    
+    def get_all_prices(self) -> Dict[str, Any]:
+        """Get the raw price data dict.
+        
+        Returns:
+            Dict with date strings as keys and price dicts as values
+        """
+        return self._data
+    
+    def __contains__(self, date: str) -> bool:
+        """Check if a date exists in the historical data.
+        
+        Args:
+            date: Date string in 'YYYY-MM-DD' format
+            
+        Returns:
+            True if date exists, False otherwise
+        """
+        return date in self._data
+
 
 @pytest.fixture
 def raw_account_history():
@@ -45,32 +131,371 @@ def raw_historical_prices():
     data_path = TEST_DATA_DIR / "historical_tao_prices.json"
     with open(data_path) as f:
         return json.load(f)
-    
-def get_tao_price_for_date(raw_historical_prices) -> float:
-    """Get the historical TAO price for a given date.
-    
-    Args:
-        dt: Datetime object
-        
-    Returns:
-        TAO price in USD for that date
-    """
-    def _get_tao_price_for_date(dt: datetime) -> float:
-        date_str = dt.strftime('%Y-%m-%d')
-        if date_str in raw_historical_prices:
-            return raw_historical_prices[date_str]['price']
-        else:
-            # Fallback to nearest available price
-            raise ValueError(f"No historical price data for {date_str}")
-        
-    return _get_tao_price_for_date
 
 @pytest.fixture
-def compute_expected_staking_emissions(
-    raw_stake_balance: list[dict],
-    raw_stake_events: list[dict],
-    raw_historical_prices: dict,
-) -> tuple[int, float]:
+def account_histories(raw_account_history):
+    """Load account history data from test data.
+    
+    Returns list of TaoStatsAccountHistory objects.
+    """
+    account_histories = []
+    for record in raw_account_history:
+        account_histories.append(TaoStatsAccountHistory.from_json(record))
+    return account_histories
+
+@pytest.fixture
+def stake_events(raw_stake_events):
+    """Load stake events data from test data."""
+    stake_events = []
+    for event in raw_stake_events:
+        stake_events.append(TaoStatsDelegation.from_json(event))
+    return stake_events
+
+@pytest.fixture
+def stake_balances(raw_stake_balance):
+    """Load stake balance data from test data."""
+    stake_balances = []
+    for balance in raw_stake_balance:
+        stake_balances.append(TaoStatsStakeBalance.from_json(balance))
+    return stake_balances
+    
+@pytest.fixture
+def transfer_events(raw_transfer_events):
+    """Load transfer events data from test data."""
+    transfer_events = []
+    for transfer in raw_transfer_events:
+        transfer_events.append(TaoStatsTransfer.from_json(transfer))
+    return transfer_events
+
+@pytest.fixture
+def historical_prices(raw_historical_prices):
+    """Load historical price data from test data.
+    
+    Returns HistoricalPrices instance with convenient lookup methods.
+    """
+    return HistoricalPrices(raw_historical_prices)
+
+@pytest.fixture
+def daily_stake_balances(stake_balances: list[TaoStatsStakeBalance]) -> Dict[str, TaoStatsStakeBalance]:
+    """Group stake balances by day, keeping only the last balance of each day.
+    
+    Returns list of TaoStatsStakeBalance objects, one per day.
+    """
+    balances_by_day: Dict[str,TaoStatsStakeBalance] = {}
+    for b in stake_balances:
+        if b.day in balances_by_day:
+            if b.timestamp > balances_by_day[b.day].timestamp:
+                balances_by_day[b.day] = b
+        else:
+            balances_by_day[b.day] = b
+    
+    return balances_by_day
+
+@pytest.fixture
+def daily_stake_events(stake_events: list[TaoStatsDelegation]) -> Dict[str, list[TaoStatsDelegation]]:
+    """Group stake events by day.
+    
+    Returns dict mapping day string to list of TaoStatsDelegation objects for that day.
+    """
+    events_by_day = defaultdict(list[TaoStatsDelegation])
+    for e in stake_events:
+        events_by_day[e.day].append(e)
+    return events_by_day
+
+# @pytest.fixture
+# def get_tao_price_for_date(raw_historical_prices) -> float:
+#     """Get the historical TAO price for a given date.
+    
+#     Args:
+#         dt: Datetime object
+        
+#     Returns:
+#         TAO price in USD for that date
+#     """
+#     def _get_tao_price_for_date(dt: datetime) -> float:
+#         date_str = dt.strftime('%Y-%m-%d')
+#         if date_str in raw_historical_prices:
+#             return raw_historical_prices[date_str]['price']
+#         else:
+#             # Fallback to nearest available price
+#             raise ValueError(f"No historical price data for {date_str}")
+        
+#     return _get_tao_price_for_date
+
+@pytest.fixture
+def get_alpha_lot_id():
+    """Generate unique ALPHA lot IDs for tests with optional reset capability.
+    
+    Usage:
+        # Normal usage - counter keeps incrementing
+        lot_id = get_alpha_lot_id()  # "ALPHA-0001"
+        lot_id2 = get_alpha_lot_id()  # "ALPHA-0002"
+        
+        # Temporarily reset counter within a context
+        with get_alpha_lot_id.fresh():
+            lot_id = get_alpha_lot_id()  # "ALPHA-0001" (reset)
+            lot_id2 = get_alpha_lot_id()  # "ALPHA-0002"
+        # Counter restored to previous value after context exits
+        lot_id3 = get_alpha_lot_id()  # "ALPHA-0003" (continues from before context)
+    """
+    from contextlib import contextmanager
+    
+    state = {'counter': 0}
+
+    def _get_alpha_lot_id():
+        state['counter'] += 1
+        return f"ALPHA-{state['counter']:04d}"
+    
+    @contextmanager
+    def context():
+        """Context manager that temporarily resets counter, then restores it."""
+        original = state['counter']
+        state['counter'] = 0
+        try:
+            yield
+        finally:
+            state['counter'] = original
+    
+    _get_alpha_lot_id.context = context
+    return _get_alpha_lot_id
+
+@pytest.fixture
+def get_tao_lot_id():
+    """Generate unique TAO lot IDs for tests with optional reset capability.
+    
+    Usage:
+        # Normal usage - counter keeps incrementing
+        lot_id = get_tao_lot_id()  # "TAO-0001"
+        lot_id2 = get_tao_lot_id()  # "TAO-0002"
+        
+        # Temporarily reset counter within a context
+        with get_tao_lot_id.context():
+            lot_id = get_tao_lot_id()  # "TAO-0001" (reset)
+            lot_id2 = get_tao_lot_id()  # "TAO-0002"
+        # Counter restored to previous value after context exits
+    """
+    from contextlib import contextmanager
+    
+    state = {'counter': 0}
+
+    def _get_tao_lot_id():
+        state['counter'] += 1
+        return f"TAO-{state['counter']:04d}"
+    
+    @contextmanager
+    def context():
+        """Context manager that temporarily resets counter, then restores it."""
+        original = state['counter']
+        state['counter'] = 0
+        try:
+            yield
+        finally:
+            state['counter'] = original
+    
+    _get_tao_lot_id.context = context
+    return _get_tao_lot_id
+
+@pytest.fixture
+def id_context(get_alpha_lot_id, get_tao_lot_id):
+    """Reentrant context manager to reset lot ID counters for both ALPHA and TAO lot ID generators.
+    
+    If already inside an id_context, nested calls simply yield without resetting counters.
+    This allows functions to safely wrap themselves in id_context() whether called
+    directly or from within another context.
+    """
+    from contextlib import contextmanager
+    
+    state = {'depth': 0}
+
+    @contextmanager
+    def _id_context():
+        if state['depth'] > 0:
+            # Already inside a context, just yield without resetting
+            state['depth'] += 1
+            try:
+                yield
+            finally:
+                state['depth'] -= 1
+        else:
+            # First entry, reset counters
+            state['depth'] += 1
+            try:
+                with get_alpha_lot_id.context():
+                    with get_tao_lot_id.context():
+                        yield
+            finally:
+                state['depth'] -= 1
+
+    return _id_context
+
+@pytest.fixture
+def get_expense_id():
+    """Generate unique TAOcompute_expected_sales lot IDs for tests."""
+    lot_counter = 0
+
+    def _get_expense_id():
+        nonlocal lot_counter
+        lot_counter += 1
+        return f"EXP-{lot_counter:04d}"
+
+    return _get_expense_id
+
+@pytest.fixture
+def get_sale_id():
+    """Generate unique Sale IDs for tests."""
+    lot_counter = 0
+
+    def _get_sale_id():
+        nonlocal lot_counter
+        lot_counter += 1
+        return f"SALE-{lot_counter:04d}"
+
+    return _get_sale_id
+
+@pytest.fixture
+def get_transfer_id():
+    """Generate unique XFER IDs for tests."""
+    lot_counter = 0
+
+    def _get_transfer_id():
+        nonlocal lot_counter
+        lot_counter += 1
+        return f"XFER-{lot_counter:04d}"
+
+    return _get_transfer_id
+
+@pytest.fixture
+def get_opening_tao_lot(
+    get_tao_lot_id: Callable[[], str],
+    account_histories: List[TaoStatsAccountHistory],
+    historical_prices: HistoricalPrices,
+):
+
+    def _get_opening_tao_lot(
+        date: datetime  
+    ):
+        # Get balance from previous day
+        target_date_str = (date - timedelta(days=1)).strftime('%Y-%m-%d')
+        account_history = next(ah for ah in account_histories if ah.day == target_date_str)
+        tao_balance_rao = account_history.balance_free_rao
+        tao_price = historical_prices.get_price_for_date(target_date_str)
+
+        return TaoLot(
+            lot_id=get_tao_lot_id(),
+            timestamp=int(datetime.combine(date.date(), datetime.min.time(), tzinfo=timezone.utc).timestamp()),
+            block_number=0,
+            rao=tao_balance_rao,
+            rao_remaining=tao_balance_rao,
+            usd_basis=tao_balance_rao / 1e9 * tao_price,
+            usd_per_tao=tao_price,
+            source_sale_id="",
+            extrinsic_id="",
+            status=LotStatus.OPEN,
+            notes="Opening balance lot",
+
+        )
+
+    return _get_opening_tao_lot
+
+@pytest.fixture
+def get_opening_alpha_lot(
+    get_alpha_lot_id: Callable[[], str],
+    daily_stake_balances: Dict[str, TaoStatsStakeBalance],
+    historical_prices: HistoricalPrices,
+):
+
+    def _get_opening_alpha_lot(
+        date: datetime  
+    ):
+        # Get balance from previous day
+        target_date_str = (date - timedelta(days=1)).strftime('%Y-%m-%d')
+        balance = next(b for b in daily_stake_balances.values() if b.day == target_date_str)
+        tao_price = historical_prices.get_price_for_date(target_date_str)
+        usd_fmv = balance.balance_as_tao_float * tao_price
+        usd_per_alpha = (balance.balance_as_tao_float* tao_price) / balance.balance_as_alpha_float if balance.balance_as_alpha_rao > 0 else 0
+
+
+        return AlphaLot(
+                lot_id=get_alpha_lot_id(),
+                timestamp=balance.timestamp_unix,
+                block_number=balance.block_number,
+                alpha_rao=balance.balance_as_alpha_rao,
+                alpha_rao_remaining=balance.balance_as_alpha_rao,
+                usd_per_alpha=usd_per_alpha,
+                usd_fmv=usd_fmv,
+                tao_equivalent=balance.balance_as_tao,
+                extrinsic_id="",
+                transfer_address='',
+                status=LotStatus.OPEN,
+                source_type=SourceType.CONTRACT
+        )
+
+    return _get_opening_alpha_lot
+
+@pytest.fixture
+def compute_expected_contract_income_lots(
+    stake_events: List[TaoStatsDelegation],
+    get_alpha_lot_id: Callable[[], str],
+) -> Callable[[int, int, str, int, str, str], List[AlphaLot]]:
+    """Filter stake events for contract income by date range and contract address.
+    
+    Args:
+        stake_events: Raw stake event data
+        start_ts: Start timestamp (unix seconds)
+        end_ts: End timestamp (unix seconds)
+        contract_address: Filter events for this contract address
+        netuid: Subnet ID to filter by
+        delegate: Delegate (hotkey) address to filter by
+        nominator: Nominator (coldkey) address to filter by
+        
+    Returns:
+        List of stake events matching contract income criteria
+    """
+    
+    def _compute_expected_contract_income_lots(
+        start_ts: int,
+        end_ts: int,
+        contract_address: str = TEST_SMART_CONTRACT_SS58,
+        netuid: int = TEST_SUBNET_ID,
+        delegate: str = TEST_VALIDATOR_SS58,
+        nominator: str = TEST_PAYOUT_COLDKEY_SS58
+    ) -> List[AlphaLot]:
+        filtered_events = filter_delegation_events_by_date_range(stake_events, start_ts, end_ts)
+        contract_income_events = [
+            event for event in filtered_events
+            if (event.netuid == netuid
+                and event.delegate.ss58 == delegate
+                and event.nominator.ss58 == nominator
+                and event.is_transfer == True
+                and event.transfer_address.ss58 == contract_address)
+        ]
+        lots = []
+        for e in contract_income_events:
+            lots.append(AlphaLot(
+                lot_id=get_alpha_lot_id(),
+                timestamp=e.timestamp_unix,
+                block_number=e.block_number,
+                alpha_rao=int(e.alpha),
+                alpha_rao_remaining=int(e.alpha),
+                usd_per_alpha=float(e.usd) / (int(e.alpha) / 1e9) if int(e.alpha) > 0 else 0,
+                usd_fmv=float(e.usd),
+                tao_equivalent=e.tao,
+                extrinsic_id=e.extrinsic_id,
+                transfer_address=e.transfer_address.ss58 if e.transfer_address else '',
+                status=LotStatus.OPEN,
+                source_type=SourceType.CONTRACT
+            ))
+        
+        return lots
+    return _compute_expected_contract_income_lots
+
+@pytest.fixture
+def compute_expected_staking_emission_lots(
+    daily_stake_balances: Dict[str, TaoStatsStakeBalance],
+    daily_stake_events: Dict[str, list[TaoStatsDelegation]],
+    historical_prices: HistoricalPrices,
+    get_alpha_lot_id: Callable[[], str],
+) -> Callable[[datetime, datetime], list[AlphaLot]]:
     """Compute expected staking emissions from raw data.
     
     This replicates the logic in process_staking_emissions:
@@ -92,7 +517,7 @@ def compute_expected_staking_emissions(
     def _compute_expected_staking_emissions(
         start_date: datetime,
         end_date: datetime
-    ) -> list:
+    ) -> list[AlphaLot]:
         """Compute expected staking emissions from raw data.
         
         This replicates the logic in process_staking_emissions:
@@ -110,36 +535,52 @@ def compute_expected_staking_emissions(
         Returns:
             List of emission lot dictionaries with usd_fmv and other values
         """ 
-        balance_history = raw_stake_balance
-        delegation_events = raw_stake_events 
-
-        start_ts = int(start_date.timestamp())
+        # Extend window back by 1 day to get previous day's balance (matches tracker behavior)
+        start_ts = int(start_date.timestamp()) - SECONDS_PER_DAY
         end_ts = int(end_date.timestamp())
         
         # Filter balance history to date range
-        balances = filter_balances_by_date_range(balance_history, start_ts, end_ts)
-        
-        # Convert and filter delegation events
-        events = filter_delegation_events(delegation_events, start_ts, end_ts)
-        
-        # Group balances by day, keeping only the last balance of each day
-        daily_balances = group_balances_by_day(balances)
-        
-        # Group events by day
-        events_by_day = group_events_by_day(events)
-        
-        # Create price lookup function from raw historical prices
-        def price_lookup(day_str: str) -> float:
-            """Look up TAO price for a specific day."""
-            return raw_historical_prices.get(day_str, {}).get('price', 0.0)
-        
-        # Calculate emissions per day (comparing consecutive days)
-        emission_lots, emission_count, total_alpha_emitted = calculate_daily_emissions(
-            daily_balances, 
-            events_by_day,
-            price_lookup=price_lookup,
-            emission_threshold=0.0001
-        )
+        daily_balances = filter_balances_by_date_range(daily_stake_balances, start_ts, end_ts)
+
+        emission_lots = []
+        for i in range(1, len(daily_balances)):
+            prev_day = daily_balances[i - 1]
+            curr_day = daily_balances[i]
+
+            # Get all events for current day
+            day_events = daily_stake_events.get(curr_day.day, [])
+            
+            alpha_inflow_rao = sum(e.alpha for e in day_events if e.action == 'DELEGATE')
+            alpha_outflow_rao = sum(e.alpha for e in day_events if e.action == 'UNDELEGATE')
+            
+            # Calculate alpha emissions in RAO
+            # Balance change from end of previous day to end of current day (in RAO)
+            balance_change_alpha_rao = curr_day.balance_as_alpha_rao - prev_day.balance_as_alpha_rao
+            
+            alpha_price_tao_rao = curr_day.balance_as_tao_rao / curr_day.balance_as_alpha_rao           
+ 
+            emissions_alpha_rao = balance_change_alpha_rao - alpha_inflow_rao + alpha_outflow_rao
+
+            # Get TAO price for current day
+            timestamp = curr_day.timestamp_unix + SECONDS_PER_DAY - 1  # End of day timestamp
+            tao_price = historical_prices.get_price_for_timestamp(timestamp)
+            emissions_tao = (emissions_alpha_rao * alpha_price_tao_rao) / 1e9  # Convert new Alpha RAO to TAO RAO
+            emissions_alpha = emissions_alpha_rao / 1e9  # Convert to TAO
+            usd_fmv = emissions_tao * tao_price
+            usd_per_alpha = usd_fmv / emissions_alpha if emissions_tao > 0 else 0
+
+
+            emission_lots.append(AlphaLot(
+                lot_id=get_alpha_lot_id(),
+                timestamp=curr_day.timestamp_unix,
+                block_number=curr_day.block_number,
+                alpha_rao=emissions_alpha_rao,
+                alpha_rao_remaining=emissions_alpha_rao,
+                tao_equivalent=emissions_tao,
+                usd_per_alpha=usd_per_alpha,
+                usd_fmv=usd_fmv,
+                source_type=SourceType.STAKING
+            ))
         
         return emission_lots
     
@@ -147,7 +588,8 @@ def compute_expected_staking_emissions(
 
 @pytest.fixture
 def compute_expected_expenses(
-    raw_stake_events: list[Dict[str, Any]],
+    stake_events: List[TaoStatsDelegation],
+    get_expense_id: Callable[[], str],
 ):
     """
     Compute expected expenses from raw JSON data using seeded ALPHA lots.
@@ -169,7 +611,7 @@ def compute_expected_expenses(
     """
 
     def _compute_expected_expenses(
-        alpha_lots: list[Dict[str, Any]],
+        alpha_lots: list[AlphaLot],
         start_date: datetime,
         end_date: datetime,
         cost_basis_method: CostBasisMethod = CostBasisMethod.HIFO
@@ -182,146 +624,104 @@ def compute_expected_expenses(
         import copy
         alpha_lots = copy.deepcopy(alpha_lots)
         
-        # Sort lots for consumption based on method
-        if cost_basis_method == CostBasisMethod.FIFO:
-            # FIFO: Sort by timestamp (oldest first)
-            sorted_lots = sorted(alpha_lots, key=lambda x: x['timestamp'])
-        else:  # HIFO
-            # HIFO: Sort by USD per ALPHA descending (highest cost first)
-            sorted_lots = sorted(alpha_lots, key=lambda x: -x['usd_per_alpha'])
-        
         # Load expense events from the same file (UNDELEGATE with is_transfer=True to non-smart-contract)
-        expense_undelegates = []
-        for e in raw_stake_events:
-            # Convert ISO timestamp string to Unix timestamp if needed
-            if isinstance(e.get('timestamp'), str):
-                from datetime import datetime
-                timestamp = int(datetime.fromisoformat(e['timestamp'].replace('Z', '+00:00')).timestamp())
-            else:
-                timestamp = e['timestamp']
-            
-            if (e['action'] == 'UNDELEGATE' and 
-                e.get('is_transfer') == True and
-                e.get('transfer_address', {}).get('ss58') != TEST_SMART_CONTRACT_SS58 and
-                start_ts <= timestamp <= end_ts):
-                # Store normalized data
-                normalized_event = e.copy()
-                normalized_event['timestamp'] = timestamp
-                # Convert RAO to ALPHA if needed
-                if isinstance(e.get('alpha'), str):
-                    normalized_event['alpha'] = int(e['alpha']) / 1e9
-                else:
-                    normalized_event['alpha'] = e['alpha']
-                # Convert string USD to float if needed
-                if isinstance(e.get('usd'), str):
-                    normalized_event['usd'] = float(e['usd'])
-                # Convert string fee to float if needed
-                if isinstance(e.get('fee'), str):
-                    normalized_event['fee'] = int(e['fee']) / 1e9 if e['fee'] != "0" else 0.0
-                
-                expense_undelegates.append(normalized_event)
+        expense_undelegates: list[TaoStatsDelegation] = []
+        for e in stake_events:
+            if (e.action == 'UNDELEGATE' and 
+                e.is_transfer == True and
+                e.transfer_address is not None and
+                e.transfer_address.ss58 != TEST_SMART_CONTRACT_SS58 and
+                start_ts <= e.timestamp_unix <= end_ts
+            ):
+                expense_undelegates.append(e)
         
         # Sort expenses chronologically to match MockTaoStatsClient behavior
         # The mock client now returns delegations in timestamp_asc order
-        expense_undelegates.sort(key=lambda x: x['timestamp'])
+        expense_undelegates.sort(key=lambda x: x.timestamp_unix)
         
         # Process each expense
         expected_expenses = []
         
         for event in expense_undelegates:
-            alpha_disposed = event['alpha']
+            expense = consume_alpha_lots_for_expense(
+                get_expense_id(),
+                alpha_lots,
+                event,
+                cost_basis_method
+            )
             
-            # Extract transfer address
-            transfer_address_data = event.get('transfer_address')
-            if isinstance(transfer_address_data, dict):
-                transfer_address = transfer_address_data.get('ss58', '')
-            else:
-                transfer_address = transfer_address_data or ''
-            
-            # Calculate USD proceeds based on ALPHA's FMV
-            usd_proceeds = event.get('usd', 0.0)
-            
-            # Network fee (in USD if available, otherwise 0)
-            fee_usd = event.get('fee_usd', 0.0)
-            if not fee_usd and event.get('fee'):
-                # If fee is in RAO, convert to ALPHA then to USD
-                fee_alpha = event['fee'] if isinstance(event['fee'], float) else float(event['fee'])
-                alpha_price_usd = event.get('alpha_price_in_usd', 0.0)
-                if isinstance(alpha_price_usd, str):
-                    alpha_price_usd = float(alpha_price_usd)
-                if alpha_price_usd:
-                    fee_usd = fee_alpha * alpha_price_usd
-            
-            # Consume ALPHA lots
-            remaining_to_consume = alpha_disposed
-            consumed_lots = []
-            total_cost_basis = 0.0
-            oldest_acquisition_ts = None
-            
-            for lot in sorted_lots:
-                if remaining_to_consume <= 0:
-                    break
-                
-                if lot['alpha_remaining'] > 0:
-                    consume_amount = min(remaining_to_consume, lot['alpha_remaining'])
-                    
-                    # Calculate pro-rata cost basis
-                    cost_basis_consumed = (consume_amount / lot['alpha_quantity']) * lot['usd_fmv']
-                    
-                    consumed_lots.append({
-                        'lot_id': lot['lot_id'],
-                        'alpha_consumed': consume_amount,
-                        'cost_basis_consumed': cost_basis_consumed,
-                        'acquisition_timestamp': lot['timestamp']
-                    })
-                    
-                    total_cost_basis += cost_basis_consumed
-                    lot['alpha_remaining'] -= consume_amount
-                    remaining_to_consume -= consume_amount
-                    
-                    if oldest_acquisition_ts is None:
-                        oldest_acquisition_ts = lot['timestamp']
-            
-            if remaining_to_consume > 0:
-                raise ValueError(f"Insufficient ALPHA lots: need {alpha_disposed}, only have {alpha_disposed - remaining_to_consume}")
-            
-            # Determine gain type based on holding period (1 year)
-            holding_period_days = (event['timestamp'] - oldest_acquisition_ts) / 86400
-            gain_type = 'Long-term' if holding_period_days >= 365 else 'Short-term'
-            
-            # Calculate realized gain/loss: FMV - cost basis - fees
-            realized_gain_loss = usd_proceeds - total_cost_basis - fee_usd
-            
-            expected_expense = {
-                'timestamp': event['timestamp'],
-                'block_number': event['block_number'],
-                'transfer_address': transfer_address,
-                'alpha_disposed': alpha_disposed,
-                'tao_received': 0.0,  # No TAO involved in direct ALPHA transfers
-                'tao_price_usd': 0.0,
-                'usd_proceeds': usd_proceeds,
-                'cost_basis': total_cost_basis,
-                'realized_gain_loss': realized_gain_loss,
-                'gain_type': gain_type,
-                'network_fee_tao': 0.0,
-                'network_fee_usd': fee_usd,
-                'consumed_lots': consumed_lots,
-                'extrinsic_id': event.get('extrinsic_id'),
-            }
-            
-            expected_expenses.append(expected_expense)
+            expected_expenses.append(expense)
         
         return expected_expenses
 
     return _compute_expected_expenses
 
+
+@pytest.fixture
+def compute_expected_deposit_lots(
+    transfer_events: list[TaoStatsTransfer],
+    historical_prices: HistoricalPrices,
+    get_tao_lot_id: Callable[[], str],
+) -> Callable[[datetime, datetime, str], list[TaoLot]]:
+    """
+    Compute TAO lots from incoming deposits (transfers TO the wallet).
+    
+    These are TAO transfers from external sources that increase the wallet's
+    TAO balance but aren't from ALPHA sales.
+    """
+    
+    def _compute_expected_deposit_lots(
+        start_date: datetime,
+        end_date: datetime,
+        wallet_address: str,
+    ) -> list[TaoLot]:
+        start_ts = int(start_date.timestamp())
+        end_ts = int(end_date.timestamp())
+        
+        # Find incoming transfers TO the wallet (deposits)
+        deposits = [
+            t for t in transfer_events
+            if t.to_address is not None
+            and t.to_address.ss58 == wallet_address
+            and start_ts <= t.timestamp_unix <= end_ts
+        ]
+        
+        deposit_lots = []
+        for deposit in deposits:
+            # Get TAO price for the deposit date
+            timestamp = ((deposit.timestamp_unix + SECONDS_PER_DAY // 2) // SECONDS_PER_DAY) * SECONDS_PER_DAY
+            tao_price = historical_prices.get_price_for_timestamp(timestamp)
+            
+            deposit_lots.append(TaoLot(
+                lot_id=get_tao_lot_id(),
+                timestamp=deposit.timestamp_unix,
+                block_number=deposit.block_number,
+                rao=deposit.amount_rao,
+                rao_remaining=deposit.amount_rao,
+                usd_basis=deposit.amount_rao / 1e9 * tao_price,
+                usd_per_tao=tao_price,
+                source_sale_id="",
+                extrinsic_id=deposit.extrinsic_id or "",
+                status=LotStatus.OPEN,
+                notes=f"Deposit from {deposit.from_address.ss58[:8]}..." if deposit.from_address else "Deposit",
+            ))
+        
+        return deposit_lots
+    
+    return _compute_expected_deposit_lots
+
+
 @pytest.fixture
 def compute_expected_sales(
-    raw_stake_balance: list[Dict[str, Any]],
-    raw_stake_events: list[Dict[str, Any]],
-    raw_historical_prices: Dict[str, Any],
-    raw_transfer_events: list[Dict[str, Any]]
-) -> list[Dict[str, Any]]:
+    stake_events: list[TaoStatsDelegation],
+    transfer_events: list[TaoStatsTransfer],
+    compute_expected_contract_income_lots,
+    compute_expected_staking_emission_lots,
+    get_opening_alpha_lot,
+    get_sale_id,
+    get_tao_lot_id,
+    id_context,
+) -> Callable[[datetime, datetime, Optional[CostBasisMethod]], tuple[list[AlphaSale], list[TaoLot]]]:
     """
     Compute expected sales from raw JSON data.
     
@@ -347,221 +747,87 @@ def compute_expected_sales(
     def _compute_expected_sales(
         start_date: datetime,
         end_date: datetime,
-        cost_basis_method: CostBasisMethod = CostBasisMethod.HIFO
-    ):
+        cost_basis_method: Optional[CostBasisMethod] = CostBasisMethod.HIFO,
+        opening_lot_date: datetime = None,
+    ) -> tuple[list[AlphaSale], list[TaoLot]]:
         
-        start_ts = int(start_date.timestamp())
-        end_ts = int(end_date.timestamp())
-        
-        # Step 1: Build ALPHA lots from emissions using shared utilities
-        balances = filter_balances_by_date_range(raw_stake_balance, start_ts, end_ts)
-        daily_balances = group_balances_by_day(balances)
-        events = filter_delegation_events(raw_stake_events, start_ts, end_ts)
-        events_by_day = group_events_by_day(events)
-        
-        # Create a price lookup function for historical TAO prices
-        def price_lookup(day_str: str) -> float:
-            """Look up TAO price for a specific day."""
-            return raw_historical_prices.get(day_str, {}).get('price', 0.0)
-        
-        # Create ALPHA lots from daily emissions using historical TAO prices
-        alpha_lots, _, _ = calculate_daily_emissions(
-            daily_balances,
-            events_by_day,
-            price_lookup=price_lookup,
-            emission_threshold=0.0001
-        )
-        
-        # Add opening lot from actual ALPHA balance using raw_stake_balance fixture
-        # Find balance on or before start_date (use day before to get opening balance)
-        opening_alpha = None
-        opening_tao_equivalent = None
-        # Make start_date timezone-aware for comparison
-        start_date_aware = start_date.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
-        day_before_start = start_date_aware - timedelta(days=1)
-        
-        for record in raw_stake_balance:
-            record_dt = datetime.fromisoformat(record['timestamp'].replace('Z', '+00:00'))
-            record_date_only = record_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        # Use reentrant id_context - resets counters if called directly,
+        # reuses existing context if called from compute_expected_transfers
+        with id_context():
+            start_ts = int(start_date.timestamp())
+            end_ts = int(end_date.timestamp())
             
-            if record_date_only == day_before_start:
-                opening_alpha = int(record['balance']) / 1e9
-                opening_tao_equivalent = int(record['balance_as_tao']) / 1e9
-                break
-        
-        if opening_alpha is None:
-            raise ValueError(f"No balance found for day before start_date: {day_before_start.strftime('%Y-%m-%d')}")
-        
-        # Get TAO price for start_date
-        opening_lot_date_str = start_date.strftime('%Y-%m-%d')
-        opening_tao_price = raw_historical_prices.get(opening_lot_date_str, {}).get('price', 459.702244010299)
-        
-        # Calculate USD FMV using the TAO equivalent from balance data
-        opening_usd_fmv = opening_tao_equivalent * opening_tao_price
-        
-        opening_lot = {
-            'timestamp': int(start_date.timestamp()),
-            'alpha_quantity': opening_alpha,
-            'alpha_remaining': opening_alpha,
-            'usd_fmv': opening_usd_fmv,
-            'status': 'Open'
-        }
-        alpha_lots.insert(0, opening_lot)
-        
-        # Add contract income lots
-        from tests.utils import filter_contract_income_events
-        from tests.fixtures.mock_config import (
-            TEST_SMART_CONTRACT_SS58,
-            TEST_SUBNET_ID,
-            TEST_VALIDATOR_SS58,
-            TEST_PAYOUT_COLDKEY_SS58
-        )
-        
-        contract_events = filter_contract_income_events(
-            raw_stake_events,
-            start_ts,
-            end_ts,
-            contract_address=TEST_SMART_CONTRACT_SS58,
-            netuid=TEST_SUBNET_ID,
-            delegate=TEST_VALIDATOR_SS58,
-            nominator=TEST_PAYOUT_COLDKEY_SS58
-        )
-        
-        for event in contract_events:
-            event_ts = int(datetime.fromisoformat(event['timestamp'].replace('Z', '+00:00')).timestamp())
-            event_date = datetime.fromtimestamp(event_ts).strftime('%Y-%m-%d')
+            # Use opening_lot_date for ALPHA lots if provided, otherwise fall back to start_date
+            alpha_start_date = opening_lot_date if opening_lot_date is not None else start_date
+            alpha_start_ts = int(alpha_start_date.timestamp())
             
-            alpha_quantity = int(event['alpha']) / 1e9
-            usd_fmv = float(event.get('usd', 0))
+            # Build ALPHA lots for sale consumption
+            opening_alpha_lot = get_opening_alpha_lot(alpha_start_date)
+            income_lots: list[AlphaLot] = compute_expected_contract_income_lots(
+                alpha_start_ts,
+                end_ts
+            )
+            staking_lots: list[AlphaLot] = compute_expected_staking_emission_lots(
+                alpha_start_date,
+                end_date
+            )
             
-            contract_lot = {
-                'timestamp': event_ts,
-                'alpha_quantity': alpha_quantity,
-                'alpha_remaining': alpha_quantity,
-                'usd_fmv': usd_fmv,
-                'status': 'Open'
-            }
-            alpha_lots.append(contract_lot)
-        
-        # Sort lots based on cost basis method
-        if cost_basis_method == CostBasisMethod.FIFO:
-            # First In First Out - consume oldest lots first
-            alpha_lots.sort(key=lambda x: x['timestamp'])
-        elif cost_basis_method == CostBasisMethod.HIFO:
-            # Highest In First Out - consume highest cost basis lots first
-            alpha_lots.sort(key=lambda x: x['usd_fmv'] / x['alpha_quantity'], reverse=True)
-        else:
-            raise ValueError(f"Invalid cost_basis_method: {cost_basis_method}. Must be CostBasisMethod.FIFO or CostBasisMethod.HIFO")
-        
-        # Step 2: Process UNDELEGATE events as sales
-        # Filter for UNDELEGATE events with is_transfer=None (user-initiated sales)
-        undelegate_events = []
-        for e in raw_stake_events:
-            event_ts = int(datetime.fromisoformat(e['timestamp'].replace('Z', '+00:00')).timestamp())
-            if (start_ts <= event_ts <= end_ts and 
-                e['action'] == 'UNDELEGATE' and 
-                e.get('is_transfer') is None):
-                undelegate_events.append(e)
-        
-        # Sort by timestamp
-        undelegate_events.sort(key=lambda x: datetime.fromisoformat(x['timestamp'].replace('Z', '+00:00')).timestamp())
-        
-        expected_sales = []
-        
-        for event in undelegate_events:
-            timestamp = int(datetime.fromisoformat(event['timestamp'].replace('Z', '+00:00')).timestamp())
-            alpha_disposed = int(event['alpha']) / 1e9
-            tao_expected_rao = float(event['amount'])  # Expected TAO in RAO (before fees)
-            extrinsic_id = event['extrinsic_id']
-            fee_tao = float(event['fee']) / 1e9  # NOTE: This fee is NOT deducted from TAO received - it's ignored
-            slippage_ratio = float(event.get('slippage', 0))
-            usd_proceeds = float(event.get('usd', 0))
+            # Combine and sort by timestamp to match seed_historical_lots behavior
+            alpha_lots = [opening_alpha_lot] + income_lots + staking_lots
+            alpha_lots.sort(key=lambda x: x.timestamp)
             
-            # Find associated transfers in the same extrinsic (network fees to fee collector)
-            # These ARE deducted from the TAO received
-            associated_transfers = [
-                t for t in raw_transfer_events
-                if t.get('extrinsic_id') == extrinsic_id and
-                   t.get('to', {}).get('ss58') != 'Kraken_Brokerage_Address'  # Exclude brokerage transfers
+            # Reassign lot IDs sequentially after sorting, matching seed_historical_lots
+            for i, lot in enumerate(alpha_lots, start=1):
+                lot.lot_id = f"ALPHA-{i:04d}"
+                
+            # Step 2: Process UNDELEGATE events as sales
+            # Filter for UNDELEGATE events with is_transfer=None (user-initiated sales)
+            sales = [
+                e for e in stake_events
+                if e.action == 'UNDELEGATE' 
+                and e.is_transfer is None
+                and start_ts <= e.timestamp_unix <= end_ts
             ]
             
-            # Calculate actual TAO received: expected TAO - associated transfers
-            tao_actual_rao = tao_expected_rao
-            for transfer in associated_transfers:
-                tao_actual_rao -= float(transfer.get('amount', 0))  # Transfer amount in RAO
-                tao_actual_rao -= float(transfer.get('fee', 0) or 0)  # Transfer fee in RAO
+            # Sort by timestamp
+            sales.sort(key=lambda x: x.timestamp_unix)
             
-            tao_amount = tao_actual_rao / 1e9  # Convert to TAO for calculations
+            expected_sales = []
+            tao_lots = []
+            for sale in sales:
+                # Find associated transfers in the same extrinsic (network fees to fee collector)
+                # These ARE deducted from the TAO received
+                associated_transfers = [
+                    t for t in transfer_events
+                    if t.extrinsic_id == sale.extrinsic_id
+                ]
+
+                alpha_sale, tao_lot = consume_alpha_lots_for_sale(
+                    get_sale_id(),
+                    get_tao_lot_id(),
+                    alpha_lots,
+                    sale,
+                    associated_transfers,
+                    cost_basis_method
+                )
+
+                expected_sales.append(alpha_sale)
+                tao_lots.append(tao_lot)
             
-            # Calculate TAO price from USD proceeds (already in event data)
-            tao_price = usd_proceeds / tao_amount if tao_amount > 0 else 0.0
-            
-            # Calculate expected TAO (before slippage)
-            if slippage_ratio and abs(1 - slippage_ratio) > 1e-9:
-                tao_expected = tao_amount / (1 - slippage_ratio)
-            else:
-                # Fallback: use alpha_price_in_tao if available
-                alpha_price_in_tao = event.get('alpha_price_in_tao')
-                if alpha_price_in_tao:
-                    tao_expected = alpha_disposed * float(alpha_price_in_tao)
-                else:
-                    tao_expected = tao_amount
-            
-            tao_slippage = tao_expected - tao_amount
-            slippage_usd = tao_slippage * tao_price
-            fee_usd = fee_tao * tao_price
-            
-            # Consume ALPHA lots FIFO to calculate cost basis
-            cost_basis = 0.0
-            remaining_need = alpha_disposed
-            
-            for lot in alpha_lots:
-                if remaining_need <= 0:
-                    break
-                
-                if lot['alpha_remaining'] <= 0:
-                    continue
-                
-                to_consume = min(lot['alpha_remaining'], remaining_need)
-                basis_consumed = (to_consume / lot['alpha_quantity']) * lot['usd_fmv']
-                
-                cost_basis += basis_consumed
-                lot['alpha_remaining'] -= to_consume
-                remaining_need -= to_consume
-                
-                if lot['alpha_remaining'] == 0:
-                    lot['status'] = 'Closed'
-                else:
-                    lot['status'] = 'Partial'
-            
-            # Calculate realized gain/loss
-            # usd_proceeds is already net of network fees (based on tao_amount which has fees deducted)
-            realized_gain_loss = usd_proceeds - cost_basis
-            
-            expected_sales.append({
-                'timestamp': timestamp,
-                'alpha_disposed': alpha_disposed,
-                'tao_received': tao_amount,
-                'cost_basis': cost_basis,
-                'tao_expected': tao_expected,
-                'tao_slippage': tao_slippage,
-                'slippage_usd': slippage_usd,
-                'network_fee_tao': fee_tao,
-                'network_fee_usd': fee_usd,
-                'usd_proceeds': usd_proceeds,
-                'realized_gain_loss': realized_gain_loss
-            })
-        
-        return expected_sales
+            return expected_sales, tao_lots
     
     return _compute_expected_sales
 
 @pytest.fixture
 def compute_expected_transfers(
-    raw_transfer_events,
-    raw_historical_prices,
-    raw_stake_events,
-) -> list[Dict[str, Any]]:
+    transfer_events: list[TaoStatsTransfer],
+    compute_expected_sales: Callable[[datetime, datetime, Optional[CostBasisMethod]], tuple[list[AlphaSale], list[TaoLot]]],
+    compute_expected_deposit_lots: Callable[[datetime, datetime, str], list[TaoLot]],
+    get_transfer_id: Callable[[], str],
+    id_context,
+    get_opening_tao_lot: Callable[[datetime], TaoLot],
+    historical_prices: HistoricalPrices,
+) -> Callable[[datetime, datetime, str, str, Optional[CostBasisMethod], Optional[datetime]], tuple[list[AlphaSale], list[TaoLot]]]:
     """
     Compute expected transfers from raw JSON data.
     
@@ -569,251 +835,93 @@ def compute_expected_transfers(
     then simulates transfer processing to calculate expected values.
     
     Args:
-        raw_transfer_events: Raw transfer events
-        raw_historical_prices: Historical TAO price data
-        raw_stake_events: Raw stake events (to find sales)
+        transfer_events: Transfer events
     
     Returns:
         List of expected transfer dictionaries with computed values
     """
 
     def _compute_expected_transfers(
-        sheet_id: str,
         start_date: datetime,
         end_date: datetime,
         wallet_address: str,
         brokerage_address: str,
-        cost_basis_method: CostBasisMethod = CostBasisMethod.FIFO,
-        sales_start_date: datetime = None
-    ):
+        cost_basis_method: CostBasisMethod = CostBasisMethod.HIFO,
+        opening_lot_date: datetime = None,
+    ) -> tuple[list[AlphaSale], list[TaoLot]]:
         """
         Compute expected transfers for a date range.
         
         Args:
-            sheet_id: Sheet ID (unused but kept for interface compatibility)
             start_date: Start date for transfers to process
             end_date: End date for transfers to process
             wallet_address: Wallet address to filter transfers from
             brokerage_address: Brokerage address to filter transfers to
             cost_basis_method: FIFO or HIFO lot consumption method
-            sales_start_date: Start date for sales to include (if None, includes all sales before end_date)
+            opening_lot_date: Date to use for opening TAO lot (if None, uses start_date)
         """
         
-        start_ts = int(start_date.timestamp())
-        end_ts = int(end_date.timestamp())
-        sales_start_ts = int(sales_start_date.timestamp()) if sales_start_date else 0
-        
-        # Convert historical prices dict to list for timestamp lookup (same as MockTaoStatsClient)
-        price_list = list(raw_historical_prices.values())
-        
-        # Helper function to get price at specific timestamp (replicates get_price_at_timestamp)
-        def price_lookup_by_timestamp(timestamp: int) -> float:
-            """Find closest price by timestamp, matching MockTaoStatsClient behavior."""
-            closest = min(price_list, key=lambda p: abs(p['timestamp'] - timestamp))
-            return float(closest['price'])
-        
-        # Step 1: Calculate TAO lots from raw sales data (UNDELEGATE events with is_transfer=None)
-        # Filter for UNDELEGATE events (user-initiated sales) - these create TAO lots
-        # Include sales from sales_start_date up to end_date (transfer range)
-        sales_events = []
-        for e in raw_stake_events:
-            event_ts = int(datetime.fromisoformat(e['timestamp'].replace('Z', '+00:00')).timestamp())
-            if (e['action'] == 'UNDELEGATE' and 
-                e.get('is_transfer') is None and
-                event_ts >= sales_start_ts and
-                event_ts <= end_ts):  # Only include sales up to end of transfer range
-                sales_events.append({
-                    'timestamp': event_ts,
-                    'tao_received': float(e['amount']) / 1e9,
-                    'block_number': e.get('block_number', 0),
-                    'extrinsic_id': e.get('extrinsic_id', '')
-                })
-        
-        # Sort sales by timestamp
-        sales_events.sort(key=lambda x: x['timestamp'])
-        
-        # Create TAO lots from sales (matching tracker logic)
-        tao_lots = []
-        for i, sale in enumerate(sales_events, start=1):
-            tao_quantity = sale['tao_received']
-            # Calculate USD basis using timestamp-based price (same as tracker)
-            tao_price_at_sale = price_lookup_by_timestamp(sale['timestamp'])
-            usd_basis = tao_quantity * tao_price_at_sale
-            usd_per_tao = usd_basis / tao_quantity if tao_quantity > 0 else 0
+        # Reset both ALPHA and TAO lot ID counters to match how seeding works
+        # Opening lot gets TAO-0001, deposit gets TAO-0002, then sales get TAO-0003+
+        with id_context():
+            start_ts = int(start_date.timestamp())
+            end_ts = int(end_date.timestamp())
             
-            tao_lots.append({
-                'lot_id': f'TAO-{i:04d}',
-                'timestamp': sale['timestamp'],
-                'tao_quantity': tao_quantity,
-                'tao_remaining': tao_quantity,
-                'usd_basis': usd_basis,
-                'usd_per_tao': usd_per_tao,
-                'block_number': sale['block_number'],
-                'extrinsic_id': sale['extrinsic_id']
-            })
-        
-        # Step 2: Load and process transfer events
-        # Step 2: Load and process transfer events
-        # Filter transfers to brokerage in date range
-        brokerage_transfers = []
-        for t in raw_transfer_events:
-            if isinstance(t.get('timestamp'), str):
-                timestamp = int(datetime.fromisoformat(t['timestamp'].replace('Z', '+00:00')).timestamp())
-            else:
-                timestamp = t['timestamp']
+            # Use opening_lot_date if provided, otherwise fall back to start_date
+            opening_date = opening_lot_date if opening_lot_date is not None else start_date
+            opening_tao_lot = get_opening_tao_lot(opening_date)
             
-            # Extract to address
-            to_addr_data = t.get('to')
-            if isinstance(to_addr_data, dict):
-                to_addr = to_addr_data.get('ss58', '')
-            else:
-                to_addr = to_addr_data or ''
-            
-            # Extract from address
-            from_addr_data = t.get('from')
-            if isinstance(from_addr_data, dict):
-                from_addr = from_addr_data.get('ss58', '')
-            else:
-                from_addr = from_addr_data or ''
-            
-            if (to_addr == brokerage_address and 
-                from_addr == wallet_address and
-                start_ts <= timestamp <= end_ts):
-                
-                # Convert amounts
-                amount_tao = int(t['amount']) / 1e9 if isinstance(t.get('amount'), str) else t['amount']
-                fee_tao = int(t['fee']) / 1e9 if isinstance(t.get('fee'), str) and t.get('fee') else 0.0
-                
-                brokerage_transfers.append({
-                    'timestamp': timestamp,
-                    'block_number': t['block_number'],
-                    'brokerage_amount': amount_tao,
-                    'fee_tao': fee_tao,
-                    'total_outflow': amount_tao + fee_tao,
-                    'transaction_hash': t.get('transaction_hash'),
-                    'extrinsic_id': t.get('extrinsic_id')
-                })
-        
-        # Sort transfers chronologically (oldest first)
-        # Note: We're reading from raw JSON which is in reverse chronological order
-        # The MockTaoStatsClient sorts its output, but this function reads raw JSON directly
-        brokerage_transfers.sort(key=lambda x: x['timestamp'])
-        
-        # Sort TAO lots for consumption based on cost basis method
-        if cost_basis_method == CostBasisMethod.FIFO:
-            sorted_tao_lots = sorted(tao_lots, key=lambda x: x['timestamp'])
-        else:  # HIFO
-            sorted_tao_lots = sorted(tao_lots, key=lambda x: -x['usd_per_tao'])
-        
-        # Step 5: Process each transfer chronologically
-        expected_transfers = []
-        transfer_counter = 1
-        
-        for transfer in brokerage_transfers:
-            brokerage_amount = transfer['brokerage_amount']
-            total_outflow = transfer['total_outflow']
-            fee_tao = transfer['fee_tao']
-            transfer_ts = transfer['timestamp']
-            
-            # Only consider TAO lots created BEFORE this transfer
-            available_lots = [lot for lot in sorted_tao_lots if lot['timestamp'] <= transfer_ts and lot['tao_remaining'] > 0]
-            available_tao = sum(lot['tao_remaining'] for lot in available_lots)
-            
-            # Debug: show available lots in consumption order
-            print(f"\n=== Transfer #{transfer_counter} at {datetime.fromtimestamp(transfer_ts)} ===")
-            print(f"Need: {total_outflow:.4f} TAO")
-            print(f"Available lots (HIFO order):")
-            for lot in available_lots:
-                print(f"  {lot['lot_id']}: {lot['tao_remaining']:.4f} TAO remaining @ ${lot['usd_per_tao']:.2f}/TAO")
-            print(f"Total available: {available_tao:.4f} TAO")
-            
-            # Verify sufficient TAO lots exist - if not, this indicates bad data or preprocessing
-            if available_tao < total_outflow:
-                print(f"\n=== DEBUG: Insufficient TAO for transfer ===")
-                print(f"Transfer timestamp: {datetime.fromtimestamp(transfer_ts)} ({transfer_ts})")
-                print(f"Need: {total_outflow:.4f} TAO")
-                print(f"Available: {available_tao:.4f} TAO")
-                print(f"\nAll TAO lots created before transfer:")
-                for lot in [l for l in sorted_tao_lots if l['timestamp'] <= transfer_ts]:
-                    lot_dt = datetime.fromtimestamp(lot['timestamp'])
-                    print(f"  {lot['lot_id']}: {lot_dt} - {lot['tao_quantity']:.4f} TAO (remaining: {lot['tao_remaining']:.4f})")
-                print(f"\nTotal TAO lots: {len(tao_lots)}")
-                print(f"Sales start timestamp: {sales_start_ts} ({datetime.fromtimestamp(sales_start_ts) if sales_start_ts > 0 else 'ALL'})")
-                
-            assert available_tao >= total_outflow, (
-                f"Insufficient TAO lots for transfer at {datetime.fromtimestamp(transfer_ts)}: "
-                f"need {total_outflow:.4f} TAO but only {available_tao:.4f} available. "
-                f"This suggests incorrect sales processing or missing TAO lots."
+            # Get deposit TAO lots BEFORE sales - they were seeded first
+            deposit_lots = compute_expected_deposit_lots(
+                start_date,
+                end_date,
+                wallet_address,
             )
             
-            # Consume TAO lots for total outflow (brokerage + fees)
-            remaining_to_consume = total_outflow
-            consumed_lots = []
-            total_cost_basis = 0.0
-            oldest_acquisition_ts = None
+            # Now get sales - they will get IDs after opening and deposits
+            # Pass opening_date so ALPHA lots are computed from the same date as seeding
+            sales, sale_tao_lots = compute_expected_sales(
+                start_date,
+                end_date,
+                opening_lot_date=opening_date,
+            )
             
-            for lot in available_lots:  # Use available_lots instead of sorted_tao_lots
-                if remaining_to_consume <= 0:
-                    break
-                
-                if lot['tao_remaining'] > 0:
-                    consume_amount = min(remaining_to_consume, lot['tao_remaining'])
-                    
-                    # Calculate pro-rata cost basis
-                    cost_basis_consumed = (consume_amount / lot['tao_quantity']) * lot['usd_basis']
-                    
-                    consumed_lots.append({
-                        'lot_id': lot['lot_id'],
-                        'tao_consumed': consume_amount,
-                        'cost_basis_consumed': cost_basis_consumed,
-                        'acquisition_timestamp': lot['timestamp']
-                    })
-                    
-                    total_cost_basis += cost_basis_consumed
-                    lot['tao_remaining'] -= consume_amount
-                    remaining_to_consume -= consume_amount
-                    
-                    if oldest_acquisition_ts is None:
-                        oldest_acquisition_ts = lot['timestamp']
+            tao_lots = [opening_tao_lot] + deposit_lots + sale_tao_lots
             
-            # Allocate cost basis proportionally between brokerage and fees
-            cost_basis_for_brokerage = (total_cost_basis * (brokerage_amount / total_outflow)) if total_outflow > 0 else 0.0
-            fee_cost_basis = total_cost_basis - cost_basis_for_brokerage
+            # Sort sales by timestamp
+            sales.sort(key=lambda x: x.timestamp)
             
-            # Get price at transfer timestamp (not daily price)
-            tao_price_at_transfer = price_lookup_by_timestamp(transfer['timestamp'])
+            # Step 2: Load and process transfer events
+            # Filter transfers to brokerage in date range
+            brokerage_transfers = [
+                e for e in transfer_events
+                if e.to_address is not None
+                and e.to_address.ss58 == brokerage_address 
+                and e.from_address is not None
+                and e.from_address.ss58 == wallet_address 
+                and start_ts <= e.timestamp_unix <= end_ts
+            ]
+
+            # Sort transfers chronologically (oldest first)
+            # Note: We're reading from raw JSON which is in reverse chronological order
+            # The MockTaoStatsClient sorts its output, but this function reads raw JSON directly
+            brokerage_transfers.sort(key=lambda x: x.timestamp_unix)
             
-            # Calculate proceeds (only for brokerage amount)
-            usd_proceeds = brokerage_amount * tao_price_at_transfer
+            # Sort TAO lots for consumption based on cost basis method
+            if cost_basis_method == CostBasisMethod.FIFO:
+                sorted_tao_lots: list[TaoLot] = sorted(tao_lots, key=lambda x: x.timestamp)
+            else:  # HIFO
+                sorted_tao_lots: list[TaoLot] = sorted(tao_lots, key=lambda x: -x.usd_per_tao)
             
-            # Realized gain/loss
-            realized_gain_loss = usd_proceeds - cost_basis_for_brokerage
-            
-            # Determine gain type
-            holding_period_days = (transfer['timestamp'] - oldest_acquisition_ts) / 86400 if oldest_acquisition_ts else 0
-            gain_type = 'Long-term' if holding_period_days >= 365 else 'Short-term'
-            
-            expected_transfer = {
-                'transfer_id': f'XFER-{transfer_counter:04d}',
-                'timestamp': transfer['timestamp'],
-                'block_number': transfer['block_number'],
-                'tao_amount': brokerage_amount,
-                'tao_price_usd': tao_price_at_transfer,
-                'usd_proceeds': usd_proceeds,
-                'cost_basis': cost_basis_for_brokerage,
-                'realized_gain_loss': realized_gain_loss,
-                'gain_type': gain_type,
-                'consumed_lots': consumed_lots,
-                'transaction_hash': transfer['transaction_hash'],
-                'extrinsic_id': transfer['extrinsic_id'],
-                'total_outflow_tao': total_outflow,
-                'fee_tao': fee_tao,
-                'fee_cost_basis_usd': fee_cost_basis
-            }
-            
-            expected_transfers.append(expected_transfer)
-            transfer_counter += 1
-    
-        return expected_transfers
+            # Step 5: Process each transfer chronologically
+            expected_transfers = []
+            for taostats_transfer in brokerage_transfers:
+                # Round timestamp to nearest day (add half day before truncating)
+                timestamp = ((taostats_transfer.timestamp_unix + SECONDS_PER_DAY // 2) // SECONDS_PER_DAY) * SECONDS_PER_DAY
+                tao_price = historical_prices.get_price_for_timestamp(timestamp)
+                transfer = consume_tao_lots(get_transfer_id(), sorted_tao_lots, taostats_transfer, tao_price)
+                expected_transfers.append(transfer)
+        
+            return expected_transfers
 
     return _compute_expected_transfers

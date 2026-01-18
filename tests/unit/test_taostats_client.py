@@ -354,7 +354,7 @@ def test_get_stake_balance_history_params(
         
         # Verify the result returns model objects
         assert len(result) == 1
-        assert result[0].balance_rao == 500000000
+        assert result[0].balance_as_alpha_rao == 500000000
         assert result[0].balance_as_tao_rao == 1000000000
 
 

@@ -1,8 +1,9 @@
 """Unit tests for staking emissions processing."""
+from curses import use_default_colors
 from datetime import datetime
 from unittest.mock import patch
 import pytest
-from emissions_tracker.models import SourceType
+from emissions_tracker.models import AlphaLot, SourceType
 
 @pytest.fixture
 def tracker(contract_tracker):
@@ -17,13 +18,13 @@ def tracker(contract_tracker):
 ])
 def test_process_staking_emissions(
     tracker, 
-    compute_expected_staking_emissions,
+    compute_expected_staking_emission_lots,
     start_date, 
     end_date
 ):
     """Test staking emissions processing for a given date range."""
     # Compute expected emission lots from raw data
-    expected_lots = compute_expected_staking_emissions(
+    expected_lots: list[AlphaLot] = compute_expected_staking_emission_lots(
         start_date,
         end_date
     )
@@ -34,7 +35,7 @@ def test_process_staking_emissions(
     lookback_days = (end_date - start_date).days + 1
     
     with patch.object(tracker, '_resolve_time_window', return_value=(start_time, end_time)):
-        new_lots = tracker.process_staking_emissions(lookback_days=lookback_days)
+        new_lots: list[AlphaLot] = tracker.process_staking_emissions(lookback_days=lookback_days)
     
     # Get actual results from returned lots
     actual_count = len(new_lots)
@@ -45,21 +46,21 @@ def test_process_staking_emissions(
         f"Expected {expected_count} emission lots, got {actual_count}"
     
     # Sort both lists by timestamp for comparison
-    expected_lots_sorted = sorted(expected_lots, key=lambda x: x['timestamp'])
+    expected_lots_sorted = sorted(expected_lots, key=lambda x: x.timestamp)
     actual_lots_sorted = sorted(new_lots, key=lambda x: x.timestamp)
     
     # Compare each lot
     for i, (expected, actual) in enumerate(zip(expected_lots_sorted, actual_lots_sorted)):
         # Verify timestamps are from the same day (not exact match due to different balance snapshot times)
         from datetime import datetime
-        expected_date = datetime.fromtimestamp(expected['timestamp']).date()
+        expected_date = datetime.fromtimestamp(expected.timestamp).date()
         actual_date = datetime.fromtimestamp(actual.timestamp).date()
         assert actual_date == expected_date, \
             f"Lot {i+1} date mismatch: {actual_date} != {expected_date}"
         
         # Verify alpha quantity matches exactly
-        assert abs(actual.alpha - expected['alpha_quantity']) < 0.001, \
-            f"Lot {i+1} ALPHA quantity mismatch: {actual.alpha:.6f} != {expected['alpha_quantity']:.6f}"
+        assert abs(actual.alpha - expected.alpha) < 0.001, \
+            f"Lot {i+1} ALPHA quantity mismatch: {actual.alpha:.6f} != {expected.alpha:.6f}"
         
         # Verify USD values are positive and non-zero (validates calculation is working)
         assert actual.usd_fmv > 0, \
@@ -67,9 +68,11 @@ def test_process_staking_emissions(
         assert actual.usd_per_alpha > 0, \
             f"Lot {i+1} has non-positive USD per alpha: {actual.usd_per_alpha}"
         
-        # Verify expected values are also positive
-        assert expected['usd_fmv'] > 0, \
-            f"Expected lot {i+1} has non-positive USD FMV: {expected['usd_fmv']}"
+        # Verify USD values are expected values (validates calculation is working)
+        assert actual.usd_fmv == expected.usd_fmv, \
+            f"Lot {actual.lot_id} does not match expected USD FMV: {expected.usd_fmv}"
+        assert actual.usd_per_alpha == expected.usd_per_alpha, \
+            f"Lot {actual.lot_id} does not match expected USD per alpha: {expected.usd_per_alpha}"
         
         # Verify source type
         assert actual.source_type == SourceType.STAKING, \
@@ -78,4 +81,4 @@ def test_process_staking_emissions(
         # Verify usd_fmv = alpha * usd_per_alpha (within floating point tolerance)
         expected_fmv = actual.alpha * actual.usd_per_alpha
         assert abs(actual.usd_fmv - expected_fmv) < 0.01, \
-            f"Lot {i+1} FMV consistency check: {actual.usd_fmv} != {actual.alpha} * {actual.usd_per_alpha}"
+            f"Lot {actual.lot_id} FMV consistency check: {actual.usd_fmv} != {actual.alpha} * {actual.usd_per_alpha}"
