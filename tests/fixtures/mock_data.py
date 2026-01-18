@@ -423,7 +423,7 @@ def get_opening_alpha_lot(
                 alpha_rao_remaining=balance.balance_as_alpha_rao,
                 usd_per_alpha=usd_per_alpha,
                 usd_fmv=usd_fmv,
-                tao_equivalent=balance.balance_as_tao,
+                tao_equivalent=balance.balance_as_tao_float,
                 extrinsic_id="",
                 transfer_address='',
                 status=LotStatus.OPEN,

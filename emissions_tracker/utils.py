@@ -20,3 +20,14 @@ def _ensure_sheet_headers(worksheet, expected_headers, label: str):
             print(f"  Updated {label} headers")
     except Exception as e:
         print(f"  Warning: Could not verify {label} headers: {e}")
+
+# Convert indices to Excel column letters (0-indexed)
+def col_idx_to_letter(idx: int) -> str:
+    """Convert 0-indexed column index to Excel column letter."""
+    result = ""
+    idx += 1  # Excel columns are 1-indexed
+    while idx > 0:
+        idx -= 1
+        result = chr(ord('A') + (idx % 26)) + result
+        idx //= 26
+    return result

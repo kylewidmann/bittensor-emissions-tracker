@@ -86,15 +86,15 @@ def test_process_expenses(
         
         # USD proceeds (critical verification)
         assert abs(actual.usd_proceeds - expected.usd_proceeds) < 0.01, \
-            f"Expense {i+1}: usd_proceeds mismatch - actual: ${actual.usd_proceeds:.2f}, expected: ${expected['usd_proceeds']:.2f}"
+            f"Expense {i+1}: usd_proceeds mismatch - actual: ${actual.usd_proceeds:.2f}, expected: ${expected.usd_proceeds:.2f}"
         
         # Cost basis (critical verification)
         assert abs(actual.cost_basis - expected.cost_basis) < 0.01, \
-            f"Expense {i+1}: cost_basis mismatch - actual: ${actual.cost_basis:.2f}, expected: ${expected['cost_basis']:.2f}"
+            f"Expense {i+1}: cost_basis mismatch - actual: ${actual.cost_basis:.2f}, expected: ${expected.cost_basis:.2f}"
         
         # Realized gain/loss (critical verification)
         assert abs(actual.realized_gain_loss - expected.realized_gain_loss) < 0.01, \
-            f"Expense {i+1}: realized_gain_loss mismatch - actual: ${actual.realized_gain_loss:.2f}, expected: ${expected['realized_gain_loss']:.2f}"
+            f"Expense {i+1}: realized_gain_loss mismatch - actual: ${actual.realized_gain_loss:.2f}, expected: ${expected.realized_gain_loss:.2f}"
         
         # Gain type
         assert actual.gain_type == expected.gain_type, \

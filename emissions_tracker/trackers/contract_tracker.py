@@ -15,7 +15,7 @@ from emissions_tracker.models import (
 from emissions_tracker.trackers.bittensor_tracker import BittensorTracker, _is_rate_limit_error, SECONDS_PER_DAY
 from oauth2client.service_account import ServiceAccountCredentials
 
-from emissions_tracker.utils import initialize_sheets
+from emissions_tracker.utils import col_idx_to_letter, initialize_sheets
 
 RAO_PER_TAO = 10 ** 9
 # Sheet names
@@ -182,16 +182,29 @@ class ContractTracker(BittensorTracker):
             print(f"  Warning: Could not load income records: {e}")
             return
 
+        # Get column positions from AlphaLot headers
+        headers = AlphaLot.sheet_headers()
+        try:
+            rao_remaining_idx = headers.index('Alpha RAO Remaining')
+            status_idx = headers.index('Status')
+        except ValueError as e:
+            print(f"  Warning: Could not find required columns in headers: {e}")
+            return
+
+        rao_remaining_col = col_idx_to_letter(rao_remaining_idx)
+        status_col = col_idx_to_letter(status_idx)
+
         updates = []
-        for idx, record in enumerate(records, start=2):
+        
+        for idx, record in enumerate(records, start=2):  # Start at 2 (row 1 is header)
             alpha_rao = record.get('Alpha RAO', 0)
             if alpha_rao > 0:
                 updates.append({
-                    'range': f'I{idx}',  # Alpha RAO Remaining column
+                    'range': f'{rao_remaining_col}{idx}',
                     'values': [[alpha_rao]]
                 })
                 updates.append({
-                    'range': f'M{idx}',  # Status column
+                    'range': f'{status_col}{idx}',
                     'values': [['Open']]
                 })
 
@@ -609,19 +622,19 @@ class ContractTracker(BittensorTracker):
         records = self.income_sheet.get_all_records()
         alpha_lots = []
 
-        for idx, record in enumerate(records, start=2):  # Start at 2 (row 1 is header)
-            alpha_rao_remaining = record.get('Alpha RAO Remaining', 0)
+        for idx, record in enumerate(records, start=2):
+            alpha_rao_remaining = int(record.get('Alpha RAO Remaining', 0))
             if alpha_rao_remaining > 0:
                 lot = AlphaLotRow(
                     lot_id=record['Lot ID'],
-                    timestamp=record['Timestamp'],
-                    block_number=record['Block'],
+                    timestamp=int(record['Timestamp']),
+                    block_number=int(record['Block']),
                     source_type=SourceType(record['Source Type']),
-                    alpha_rao=record['Alpha RAO'],
+                    alpha_rao=int(record['Alpha RAO']),
                     alpha_rao_remaining=alpha_rao_remaining,
-                    usd_fmv=record['USD FMV'],
-                    usd_per_alpha=record['USD/Alpha'],
-                    tao_equivalent=record.get('TAO Equivalent', 0.0),
+                    usd_fmv=float(record['USD FMV']),
+                    usd_per_alpha=float(record['USD/Alpha']),
+                    tao_equivalent=float(record.get('TAO Equivalent', 0.0)),
                     extrinsic_id=record.get('Extrinsic ID') or None,
                     transfer_address=record.get('Transfer Address') or None,
                     status=LotStatus(record['Status']),
