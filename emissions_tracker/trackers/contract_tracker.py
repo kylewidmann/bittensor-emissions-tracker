@@ -8,7 +8,7 @@ from datetime import datetime
 from emissions_tracker.config import TrackerSettings, WaveAccountSettings
 from emissions_tracker.exceptions import PriceNotAvailableError
 from emissions_tracker.models import (
-    AlphaLot, AlphaLotRow, TaoLot, TaoLotConsumption, TaoLotRow, AlphaSale, Expense, TaoStatsStakeBalance, TaoStatsTransfer, TaoTransfer,
+    AlphaLot, AlphaLotRow, TaoLot, TaoLotConsumption, TaoLotRow, AlphaSale, Expense, TaoDeposit, TaoStatsStakeBalance, TaoStatsTransfer, TaoTransfer,
     SourceType, LotStatus, CostBasisMethod, TaoStatsDelegation, AlphaLotConsumption, GainType
 )
 from emissions_tracker.trackers.bittensor_tracker import BittensorTracker, _is_rate_limit_error, SECONDS_PER_DAY
@@ -21,6 +21,7 @@ RAO_PER_TAO = 10 ** 9
 INCOME_SHEET = "Income"
 SALES_SHEET = "Sales"
 EXPENSES_SHEET = "Expenses"
+DEPOSITS_SHEET = "Deposits"
 TRANSFERS_SHEET = "Transfers"
 JOURNAL_SHEET = "Journal Entries"
 TAO_LOTS_SHEET = "TAO Lots"
@@ -28,6 +29,7 @@ SHEET_CONFIGS = [
     (INCOME_SHEET, AlphaLot.sheet_headers()),
     (SALES_SHEET, AlphaSale.sheet_headers()),
     (EXPENSES_SHEET, Expense.sheet_headers()),
+    (DEPOSITS_SHEET, TaoDeposit.sheet_headers()),
     (TAO_LOTS_SHEET, TaoLot.sheet_headers()),
     (TRANSFERS_SHEET, TaoTransfer.sheet_headers()),
 ]
@@ -103,6 +105,7 @@ class ContractTracker(BittensorTracker):
         self.income_sheet = self.sheet.worksheet(INCOME_SHEET)
         self.sales_sheet = self.sheet.worksheet(SALES_SHEET)
         self.expenses_sheet = self.sheet.worksheet(EXPENSES_SHEET)
+        self.deposits_sheet = self.sheet.worksheet(DEPOSITS_SHEET)
         self.tao_lots_sheet = self.sheet.worksheet(TAO_LOTS_SHEET)
         self.transfers_sheet = self.sheet.worksheet(TRANSFERS_SHEET)
 
@@ -113,6 +116,7 @@ class ContractTracker(BittensorTracker):
         self.last_income_timestamp = 0
         self.last_sale_timestamp = 0
         self.last_expense_timestamp = 0
+        self.last_deposit_timestamp = 0
         self.last_transfer_timestamp = 0
         
         try:
@@ -143,6 +147,13 @@ class ContractTracker(BittensorTracker):
                 self.last_expense_timestamp = max(r['Timestamp'] for r in records)
         except Exception as e:
             print(f"  Warning: Could not load expense state: {e}")
+        
+        try:
+            records = self.deposits_sheet.get_all_records()
+            if records:
+                self.last_deposit_timestamp = max(r['Timestamp'] for r in records)
+        except Exception as e:
+            print(f"  Warning: Could not load deposit state: {e}")
         
         try:
             records = self.transfers_sheet.get_all_records()
@@ -227,6 +238,16 @@ class ContractTracker(BittensorTracker):
             self.expense_counter = 1
         
         try:
+            records = self.deposits_sheet.get_all_records()
+            if records:
+                deposit_ids = [r['Deposit ID'] for r in records if r.get('Deposit ID', '').startswith('DEP-')]
+                self.deposit_counter = max([int(did.split('-')[1]) for did in deposit_ids], default=0) + 1
+            else:
+                self.deposit_counter = 1
+        except:
+            self.deposit_counter = 1
+        
+        try:
             records = self.tao_lots_sheet.get_all_records()
             if records:
                 lot_ids = [r['TAO Lot ID'] for r in records if r.get('TAO Lot ID', '').startswith('TAO-')]
@@ -246,7 +267,7 @@ class ContractTracker(BittensorTracker):
         except:
             self.transfer_counter = 1
         
-        print(f"  Counters: ALPHA={self.alpha_lot_counter}, SALE={self.sale_counter}, EXPENSE={self.expense_counter}, TAO={self.tao_lot_counter}, XFER={self.transfer_counter}")
+        print(f"  Counters: ALPHA={self.alpha_lot_counter}, SALE={self.sale_counter}, EXPENSE={self.expense_counter}, DEP={self.deposit_counter}, TAO={self.tao_lot_counter}, XFER={self.transfer_counter}")
 
     # -------------------------------------------------------------------------
     # ID Generation
@@ -266,6 +287,11 @@ class ContractTracker(BittensorTracker):
         expense_id = f"EXP-{self.expense_counter:04d}"
         self.expense_counter += 1
         return expense_id
+    
+    def _next_deposit_id(self) -> str:
+        deposit_id = f"DEP-{self.deposit_counter:04d}"
+        self.deposit_counter += 1
+        return deposit_id
     
     def _next_tao_lot_id(self) -> str:
         lot_id = f"TAO-{self.tao_lot_counter:04d}"
@@ -1036,11 +1062,134 @@ class ContractTracker(BittensorTracker):
         
         return alpha_lots
 
-    def process_tao_transfers(self, lookback_days: int = 1) -> list:
-        """Process TAO transfers over the specified lookback period.
+    def process_tao_deposits(self, start_time: Optional[int] = None, end_time: Optional[int] = None) -> list:
+        """Process incoming TAO transfers (deposits) over the specified time period.
+
+        Creates TaoDeposit records and corresponding TAO lots for TAO received
+        from external sources (excluding brokerage withdrawals).
 
         Args:
-            lookback_days (int): Number of days to look back for processing.
+            start_time: Start timestamp (uses last processed if None)
+            end_time: End timestamp (defaults to now if None)
+
+        Returns:
+            list: List of processed TaoDeposit records.
+        """
+        start_time, end_time = self._resolve_time_window(
+            "TAO deposits",
+            self.last_deposit_timestamp,
+            start_time,
+            end_time
+        )
+
+        # Get incoming transfers TO the coldkey (deposits)
+        incoming_transfers = self.wallet_client.get_transfers(
+            account_address=self.coldkey_ss58,
+            start_time=start_time,
+            end_time=end_time,
+            receiver=self.coldkey_ss58  # Filter for transfers TO coldkey
+        )
+
+        # Filter out transfers from brokerage (those are withdrawals, not deposits we track)
+        deposit_transfers = [
+            t for t in incoming_transfers
+            if t.from_address.ss58 != self.brokerage_ss58
+        ]
+
+        if not deposit_transfers:
+            print("ℹ️  No new TAO deposits found")
+            return []
+
+        # Create deposits and TAO lots
+        deposits, tao_lots = self._create_tao_deposits(deposit_transfers)
+
+        if deposits:
+            # Write deposits to sheet
+            deposit_rows = [deposit.to_sheet_row() for deposit in deposits]
+            self._append_rows_with_retry(self.deposits_sheet, deposit_rows)
+
+            # Write TAO lots to sheet
+            tao_lot_rows = [lot.to_sheet_row() for lot in tao_lots]
+            self._append_rows_with_retry(self.tao_lots_sheet, tao_lot_rows)
+
+            max_ts = max(deposit.timestamp for deposit in deposits)
+            self.last_deposit_timestamp = max_ts
+
+            # Sort sheets
+            self._sort_sheet_by_timestamp(self.deposits_sheet, timestamp_col=3, label="Deposits", range_str="A2:M")
+            self._sort_sheet_by_timestamp(self.tao_lots_sheet, timestamp_col=3, label="TAO Lots", range_str="A2:K")
+
+            print(f"\n✓ Created {len(deposits)} TAO deposits and {len(tao_lots)} TAO lots")
+        else:
+            print("ℹ️  No valid TAO deposits to process")
+
+        return deposits
+
+    def _create_tao_deposits(self, transfers: list[TaoStatsTransfer]) -> tuple[list[TaoDeposit], list[TaoLot]]:
+        """Create TaoDeposit records and corresponding TAO lots from incoming transfers.
+
+        Args:
+            transfers: List of incoming transfer events
+
+        Returns:
+            Tuple of (deposits list, tao_lots list)
+        """
+        deposits = []
+        tao_lots = []
+
+        for transfer in transfers:
+            # Get TAO price at time of deposit
+            try:
+                tao_price = self.price_client.get_price_at_timestamp('TAO', transfer.timestamp_unix)
+            except Exception as e:
+                print(f"  Warning: Could not get price for deposit at {transfer.timestamp}: {e}")
+                continue
+
+            # Calculate USD FMV
+            tao_amount = transfer.amount_rao / RAO_PER_TAO
+            usd_fmv = tao_amount * tao_price
+
+            # Create TAO lot for the deposit
+            tao_lot_id = self._next_tao_lot_id()
+            tao_lot = TaoLot(
+                lot_id=tao_lot_id,
+                timestamp=transfer.timestamp_unix,
+                block_number=transfer.block_number,
+                source_sale_id="",  # No sale associated with deposits
+                rao=transfer.amount_rao,
+                rao_remaining=transfer.amount_rao,
+                usd_per_tao=tao_price,
+                usd_basis=usd_fmv,
+                status=LotStatus.OPEN,
+                extrinsic_id=transfer.extrinsic_id,
+                notes=f"Deposit from {transfer.from_address.ss58[:8]}..."
+            )
+            tao_lots.append(tao_lot)
+
+            # Create deposit record
+            deposit = TaoDeposit(
+                deposit_id=self._next_deposit_id(),
+                timestamp=transfer.timestamp_unix,
+                block_number=transfer.block_number,
+                from_address=transfer.from_address.ss58,
+                tao_amount=tao_amount,
+                tao_amount_rao=transfer.amount_rao,
+                tao_price_usd=tao_price,
+                usd_fmv=usd_fmv,
+                created_tao_lot_id=tao_lot_id,
+                extrinsic_id=transfer.extrinsic_id,
+                notes=f"TAO deposit from {transfer.from_address.ss58[:8]}... at block {transfer.block_number}"
+            )
+            deposits.append(deposit)
+
+        return deposits, tao_lots
+
+    def process_tao_transfers(self, start_time: Optional[int] = None, end_time: Optional[int] = None) -> list:
+        """Process TAO transfers over the specified time period.
+
+        Args:
+            start_time: Start timestamp (uses last processed if None)
+            end_time: End timestamp (defaults to now if None)
 
         Returns:
             list: List of processed transfer lots.

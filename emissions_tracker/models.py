@@ -313,10 +313,12 @@ class TaoStatsAccountHistory:
 # Business Logic Models
 
 class SourceType(Enum):
-    """Income source type for ALPHA lots."""
+    """Income source type for ALPHA lots and TAO lots."""
     CONTRACT = "Contract"
     STAKING = "Staking"
     MINING = "Mining"
+    SALE = "Sale"       # TAO lot from ALPHA sale
+    DEPOSIT = "Deposit" # TAO lot from incoming TAO transfer
 
 
 class CostBasisMethod(Enum):
@@ -733,6 +735,52 @@ class Expense:
             "TAO Slippage", "Slippage USD", "Slippage Ratio",
             "Network Fee (TAO)", "Network Fee (USD)",
             "Consumed Lots", "Created TAO Lot ID", "Extrinsic ID", "Notes"
+        ]
+
+
+@dataclass
+class TaoDeposit:
+    """Represents an incoming TAO transfer (deposit) that creates a TAO lot."""
+    deposit_id: str
+    timestamp: int
+    block_number: int
+    from_address: str
+    tao_amount: float  # TAO received
+    tao_amount_rao: int  # TAO in RAO for precision
+    tao_price_usd: float
+    usd_fmv: float  # Fair market value at time of receipt
+    created_tao_lot_id: str  # Link to TAO lot created
+    category: str = ""  # User fills this in (e.g., "Gift", "Payment Received", "Refund", etc.)
+    extrinsic_id: Optional[str] = None
+    notes: str = ""
+    
+    @property
+    def date(self) -> str:
+        return datetime.fromtimestamp(self.timestamp).strftime('%Y-%m-%d %H:%M:%S')
+    
+    def to_sheet_row(self) -> List[Any]:
+        return [
+            self.deposit_id,
+            self.date,
+            self.timestamp,
+            self.block_number,
+            self.from_address,
+            self.category,
+            self.tao_amount,
+            self.tao_amount_rao,
+            self.tao_price_usd,
+            self.usd_fmv,
+            self.created_tao_lot_id,
+            self.extrinsic_id or "",
+            self.notes
+        ]
+    
+    @classmethod
+    def sheet_headers(cls) -> List[str]:
+        return [
+            "Deposit ID", "Date", "Timestamp", "Block", "From Address", "Category",
+            "TAO Amount", "TAO RAO", "TAO Price USD", "USD FMV",
+            "Created TAO Lot ID", "Extrinsic ID", "Notes"
         ]
 
 
