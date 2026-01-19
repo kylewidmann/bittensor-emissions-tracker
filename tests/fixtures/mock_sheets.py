@@ -110,6 +110,9 @@ class MockWorksheet:
                     record[header] = ""
             results.append(record)
         return results
+    
+    def get_all_values(self) -> List[List[Any]]:
+        return self.rows
 
     def row_values(self, idx) -> List[Any]:
         """
@@ -270,6 +273,54 @@ class MockWorksheet:
         self.operations.append(WorksheetOperation(
             operation_type="clear",
             data=None
+        ))
+
+    def batch_clear(self, ranges: List[str]):
+        """Clear specified ranges (like gspread's batch_clear).
+        
+        For ranges starting at row 2 (data rows), this removes the rows entirely
+        to match typical usage of clearing data while preserving headers.
+        
+        Args:
+            ranges: List of range strings like ['A2:Z100']
+        """
+        from emissions_tracker.utils import col_letter_to_idx
+        
+        self.clear_calls += 1
+        for range_str in ranges:
+            # Parse range like "A2:Z100"
+            if ':' in range_str:
+                start_cell, end_cell = range_str.split(':')
+            else:
+                start_cell = end_cell = range_str
+            
+            # Parse column letters and row numbers
+            start_col_letters = ''.join(c for c in start_cell if c.isalpha())
+            end_col_letters = ''.join(c for c in end_cell if c.isalpha())
+            start_row = int(''.join(c for c in start_cell if c.isdigit()))
+            end_row = int(''.join(c for c in end_cell if c.isdigit()))
+            
+            # Convert to 0-based indices
+            start_row_idx = start_row - 1
+            end_row_idx = end_row  # exclusive for slicing
+            start_col_idx = col_letter_to_idx(start_col_letters)
+            end_col_idx = col_letter_to_idx(end_col_letters) + 1  # exclusive
+            
+            # Check if this is a full-row clear (common case: A2:Z100 clears all data rows)
+            # If clearing from column A and the range spans all used columns, delete rows
+            if start_col_idx == 0 and (not self.rows or end_col_idx >= len(self.rows[0]) if self.rows else True):
+                # Delete rows in range (keeping header at row 0 if start_row_idx > 0)
+                if start_row_idx < len(self.rows):
+                    self.rows = self.rows[:start_row_idx] + self.rows[min(end_row_idx, len(self.rows)):]
+            else:
+                # Partial column clear - just clear cells to empty strings
+                for row_idx in range(start_row_idx, min(end_row_idx, len(self.rows))):
+                    for col_idx in range(start_col_idx, min(end_col_idx, len(self.rows[row_idx]))):
+                        self.rows[row_idx][col_idx] = ""
+        
+        self.operations.append(WorksheetOperation(
+            operation_type="batch_clear",
+            data=ranges
         ))
     
     @property

@@ -37,3 +37,20 @@ def col_idx_to_letter(col: str, headers: list[str]) -> str:
         result = chr(ord('A') + (idx % 26)) + result
         idx //= 26
     return result
+
+
+def col_letter_to_idx(letters: str) -> int:
+    """Convert Excel column letters to 0-indexed column index.
+    
+    Args:
+        letters: Column letters like 'A', 'B', 'Z', 'AA', 'AB', etc.
+        
+    Returns:
+        0-indexed column index (A=0, B=1, Z=25, AA=26, etc.)
+    """
+    result = 0
+    for ch in letters.upper():
+        if not ch.isalpha():
+            continue
+        result = result * 26 + (ord(ch) - ord('A') + 1)
+    return result - 1  # Convert to 0-indexed
