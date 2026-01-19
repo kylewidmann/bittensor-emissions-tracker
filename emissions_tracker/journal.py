@@ -14,6 +14,7 @@ def aggregate_monthly_journal_entries(
     sales_records: List[Dict[str, Any]],
     expense_records: List[Dict[str, Any]],
     transfer_records: List[Dict[str, Any]],
+    deposit_records: List[Dict[str, Any]],
     wave_config: WaveAccountSettings,
     start_ts: int,
     end_ts: int,
@@ -38,6 +39,7 @@ def aggregate_monthly_journal_entries(
         "expense_gain": 0.0,
         "transfer_gain": 0.0,
         "transfer_fees": 0.0,
+        "deposit_total": 0.0,
     }
 
     gain_buckets: Dict[str, Dict[str, Any]] = {
@@ -285,6 +287,38 @@ def aggregate_monthly_journal_entries(
         bucket = gain_buckets.setdefault(gain_type, {"amount": 0.0, "notes": []})
         bucket["amount"] += gain_loss
         bucket["notes"].append(f"Transfer {transfer_id}: ${gain_loss:.2f}")
+
+    # ------------------------- Deposits (Fiat → TAO purchases) --------------
+    for deposit in deposit_records:
+        ts = deposit.get("Timestamp")
+        if ts is None:
+            continue
+        try:
+            ts = int(ts)
+        except (TypeError, ValueError):
+            continue
+        if ts < start_ts or ts >= end_ts:
+            continue
+        usd_fmv = deposit.get("USD FMV") or 0.0
+        deposit_id = deposit.get("Deposit ID") or ""
+        
+        summary["deposit_total"] += usd_fmv
+        
+        # Debit TAO asset (crypto acquired)
+        _add_amount(
+            wave_config.tao_asset_account,
+            "debit",
+            usd_fmv,
+            f"Deposit {deposit_id}: TAO deposit ${usd_fmv:.2f}"
+        )
+        
+        # Credit bank account (cash paid)
+        _add_amount(
+            wave_config.business_checking_account,
+            "credit",
+            usd_fmv,
+            f"Deposit {deposit_id}: TAO purchase ${usd_fmv:.2f}"
+        )
 
     gain_account_map = {
         "Short-term": wave_config.short_term_gain_account,

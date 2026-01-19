@@ -86,6 +86,11 @@ class WaveAccountSettings(BaseSettings):
         alias="WAVE_BLOCKCHAIN_FEE_ACCOUNT",
         description="Wave account for on-chain transaction fees (paid in ALPHA or TAO)"
     )
+    business_checking_account: str = Field(
+        "Business Checking",
+        alias="WAVE_BUSINESS_CHECKING_ACCOUNT",
+        description="Wave account for business bank account (used for TAO purchases)"
+    )
     
     # Gain/Loss accounts
     short_term_gain_account: str = Field(

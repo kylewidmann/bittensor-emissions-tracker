@@ -1557,6 +1557,7 @@ class ContractTracker(BittensorTracker):
         income_records = self.income_sheet.get_all_records()
         sales_records = self.sales_sheet.get_all_records()
         transfer_records = self.transfers_sheet.get_all_records()
+        deposit_records = self.deposits_sheet.get_all_records()
 
         # Check for uncategorized expenses
         self._check_uncategorized_expenses(expense_records, start_ts, end_ts, year_month)
@@ -1567,6 +1568,7 @@ class ContractTracker(BittensorTracker):
             sales_records,
             expense_records,
             transfer_records,
+            deposit_records,
             self.wave_config,
             start_ts,
             end_ts,
@@ -1590,6 +1592,7 @@ class ContractTracker(BittensorTracker):
         income_records = self.income_sheet.get_all_records()
         sales_records = self.sales_sheet.get_all_records()
         transfer_records = self.transfers_sheet.get_all_records()
+        deposit_records = self.deposits_sheet.get_all_records()
         print("✓ Data loaded\n")
 
         # Check for uncategorized expenses in the entire year
@@ -1627,6 +1630,7 @@ class ContractTracker(BittensorTracker):
                     sales_records,
                     expense_records,
                     transfer_records,
+                    deposit_records,
                     self.wave_config,
                     start_ts,
                     end_ts,
@@ -1705,3 +1709,4 @@ class ContractTracker(BittensorTracker):
         print(f"  Expense Gain/Loss: ${summary['expense_gain']:.2f}")
         print(f"  Transfer Gain/Loss: ${summary['transfer_gain']:.2f}")
         print(f"  Transfer Fees (cost basis): ${summary['transfer_fees']:.2f}")
+        print(f"  TAO Deposits (Purchases): ${summary['deposit_total']:.2f}")
