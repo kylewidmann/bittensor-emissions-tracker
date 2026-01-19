@@ -442,22 +442,7 @@ class ContractTracker(BittensorTracker):
         try:
             records = self._get_records_with_retry(self.income_sheet)
             for record in records:
-                # TODO: Move row reading to models and get rid of hard coded column names
-                lot = AlphaLot(
-                    lot_id=record['Lot ID'],
-                    timestamp=int(record['Timestamp']),
-                    block_number=int(record['Block']),
-                    alpha_rao=int(record['Alpha RAO']),
-                    alpha_rao_remaining=int(record.get('Alpha RAO Remaining', 0)),
-                    usd_per_alpha=float(record['USD/Alpha']),
-                    usd_fmv=float(record['USD FMV']),
-                    tao_equivalent=float(record.get('TAO Equivalent', 0.0)),
-                    extrinsic_id=record.get('Extrinsic ID', ''),
-                    transfer_address=record.get('Transfer Address', ''),
-                    status=LotStatus(record['Status']),
-                    source_type=SourceType(record['Source Type']),
-                    notes=record.get('Notes', '')
-                )
+                lot = AlphaLot.from_record(record)
                 self.alpha_lots.append(lot)
         except Exception as e:
             print(f"  Warning: Could not load income data: {e}")
@@ -466,19 +451,7 @@ class ContractTracker(BittensorTracker):
         try:
             records = self._get_records_with_retry(self.tao_lots_sheet)
             for record in records:
-                lot = TaoLot(
-                    lot_id=record['TAO Lot ID'],
-                    timestamp=int(record['Timestamp']),
-                    block_number=int(record['Block']),
-                    rao=int(record['TAO RAO']),
-                    rao_remaining=int(record.get('TAO RAO Remaining', 0)),
-                    usd_basis=float(record['USD Basis']),
-                    usd_per_tao=float(record['USD/TAO']),
-                    source_sale_id=record.get('Source Sale ID', ''),
-                    extrinsic_id=record.get('Extrinsic ID', ''),
-                    status=LotStatus(record['Status']),
-                    notes=record.get('Notes', '')
-                )
+                lot = TaoLot.from_record(record)
                 self.tao_lots.append(lot)
         except Exception as e:
             print(f"  Warning: Could not load TAO lots data: {e}")
@@ -487,21 +460,7 @@ class ContractTracker(BittensorTracker):
         try:
             records = self._get_records_with_retry(self.sales_sheet)
             for record in records:
-                sale = AlphaSale(
-                    sale_id=record['Sale ID'],
-                    timestamp=int(record['Timestamp']),
-                    block_number=int(record['Block']),
-                    alpha_rao=int(record['Alpha RAO']),
-                    tao_proceeds=float(record['TAO Proceeds']),
-                    usd_proceeds=float(record['USD Proceeds']),
-                    cost_basis=float(record['Cost Basis']),
-                    realized_gain_loss=float(record['Realized Gain/Loss']),
-                    gain_type=GainType(record['Gain Type']),
-                    extrinsic_id=record.get('Extrinsic ID', ''),
-                    slippage_tao=float(record.get('Slippage TAO', 0.0)),
-                    slippage_usd=float(record.get('Slippage USD', 0.0)),
-                    notes=record.get('Notes', '')
-                )
+                sale = AlphaSale.from_record(record)
                 self.sales.append(sale)
         except Exception as e:
             print(f"  Warning: Could not load sales data: {e}")
@@ -510,19 +469,7 @@ class ContractTracker(BittensorTracker):
         try:
             records = self._get_records_with_retry(self.expenses_sheet)
             for record in records:
-                expense = Expense(
-                    expense_id=record['Expense ID'],
-                    timestamp=int(record['Timestamp']),
-                    block_number=int(record['Block']),
-                    rao=int(record['RAO']),
-                    usd_amount=float(record['USD Amount']),
-                    cost_basis=float(record['Cost Basis']),
-                    realized_gain_loss=float(record['Realized Gain/Loss']),
-                    gain_type=GainType(record['Gain Type']),
-                    extrinsic_id=record.get('Extrinsic ID', ''),
-                    category=record.get('Category', ''),
-                    notes=record.get('Notes', '')
-                )
+                expense = Expense.from_record(record)
                 self.expenses.append(expense)
         except Exception as e:
             print(f"  Warning: Could not load expenses data: {e}")
@@ -531,16 +478,7 @@ class ContractTracker(BittensorTracker):
         try:
             records = self._get_records_with_retry(self.deposits_sheet)
             for record in records:
-                deposit = TaoDeposit(
-                    deposit_id=record['Deposit ID'],
-                    timestamp=int(record['Timestamp']),
-                    block_number=int(record['Block']),
-                    rao=int(record['RAO']),
-                    usd_basis=float(record['USD Basis']),
-                    usd_per_tao=float(record['USD/TAO']),
-                    extrinsic_id=record.get('Extrinsic ID', ''),
-                    notes=record.get('Notes', '')
-                )
+                deposit = TaoDeposit.from_record(record)
                 self.deposits.append(deposit)
         except Exception as e:
             print(f"  Warning: Could not load deposits data: {e}")
@@ -549,20 +487,7 @@ class ContractTracker(BittensorTracker):
         try:
             records = self._get_records_with_retry(self.transfers_sheet)
             for record in records:
-                transfer = TaoTransfer(
-                    transfer_id=record['Transfer ID'],
-                    timestamp=int(record['Timestamp']),
-                    block_number=int(record['Block']),
-                    rao=int(record['RAO']),
-                    fee_rao=int(record['Fee RAO']),
-                    usd_proceeds=float(record['USD Proceeds']),
-                    cost_basis=float(record['Cost Basis']),
-                    realized_gain_loss=float(record['Realized Gain/Loss']),
-                    gain_type=GainType(record['Gain Type']),
-                    extrinsic_id=record.get('Extrinsic ID', ''),
-                    to_address=record.get('To Address', ''),
-                    notes=record.get('Notes', '')
-                )
+                transfer = TaoTransfer.from_record(record)
                 self.transfers.append(transfer)
         except Exception as e:
             print(f"  Warning: Could not load transfers data: {e}")

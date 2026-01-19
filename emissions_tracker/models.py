@@ -1,8 +1,45 @@
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import List, Optional, Dict, Any, Callable
+from typing import List, Optional, Dict, Any, Callable, Tuple, Type, TypeVar, Union, ClassVar
 import json
+
+
+# Type alias for field specifications
+# Format: (header_name, property_name, type_converter, default_value)
+# - header_name: Column name in Google Sheets
+# - property_name: Field name on the dataclass (None for computed/derived columns like "Date")
+# - type_converter: Callable to convert from string (None for computed columns)
+# - default_value: Default if missing (None means required)
+FieldSpec = Tuple[str, Optional[str], Optional[Callable[[Any], Any]], Any]
+
+T = TypeVar('T')
+
+
+def _identity(x: Any) -> Any:
+    """Identity function for string fields."""
+    return x if x else ""
+
+
+def _opt_str(x: Any) -> Optional[str]:
+    """Convert to optional string."""
+    return str(x) if x else None
+
+
+def _float_or_zero(x: Any) -> float:
+    """Convert to float, defaulting to 0."""
+    try:
+        return float(x) if x else 0.0
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _int_or_zero(x: Any) -> int:
+    """Convert to int, defaulting to 0."""
+    try:
+        return int(x) if x else 0
+    except (ValueError, TypeError):
+        return 0
 
 
 # TaoStats API Response Models
@@ -381,6 +418,28 @@ class AlphaLot:
     status: LotStatus = LotStatus.OPEN
     notes: str = ""
     
+    # Field map: (header, property, from_record_converter, default)
+    # Properties set to None are computed/output-only
+    FIELD_MAP: ClassVar[List[FieldSpec]] = [
+        ("Lot ID", "lot_id", str, None),
+        ("Date", None, None, None),  # Computed from timestamp
+        ("Timestamp", "timestamp", int, None),
+        ("Block", "block_number", int, None),
+        ("Source Type", "source_type", lambda x: SourceType(x), None),
+        ("Transfer Address", "transfer_address", _opt_str, ""),
+        ("Extrinsic ID", "extrinsic_id", _opt_str, ""),
+        ("Alpha RAO", "alpha_rao", int, None),
+        ("Alpha RAO Remaining", "alpha_rao_remaining", _int_or_zero, 0),
+        ("Alpha Quantity", None, None, None),  # Computed from alpha_rao
+        ("Alpha Remaining", None, None, None),  # Computed from alpha_rao_remaining
+        ("USD FMV", "usd_fmv", float, None),
+        ("USD/Alpha", "usd_per_alpha", float, None),
+        ("TAO Equivalent", "tao_equivalent", _float_or_zero, 0.0),
+        ("Long Term Date", None, None, None),  # Computed from timestamp
+        ("Status", "status", lambda x: LotStatus(x), LotStatus.OPEN),
+        ("Notes", "notes", _identity, ""),
+    ]
+    
     @property
     def alpha(self) -> float:
         """Original ALPHA amount (converted from RAO)."""
@@ -407,37 +466,54 @@ class AlphaLot:
             return 0
         return (self.alpha_rao_remaining / self.alpha_rao) * self.usd_fmv
     
+    def _get_row_value(self, header: str) -> Any:
+        """Get the value for a specific header column."""
+        # Handle computed properties
+        if header == "Date":
+            return self.date
+        elif header == "Alpha Quantity":
+            return self.alpha
+        elif header == "Alpha Remaining":
+            return self.alpha_remaining
+        elif header == "Long Term Date":
+            return self.long_term_date
+        
+        # Find the field spec
+        for h, prop, _, _ in self.FIELD_MAP:
+            if h == header and prop:
+                val = getattr(self, prop)
+                # Handle enums
+                if isinstance(val, Enum):
+                    return val.value
+                # Handle None -> empty string
+                return val if val is not None else ""
+        return ""
+    
     def to_sheet_row(self) -> List[Any]:
-        """Convert to Google Sheets row."""
-        return [
-            self.lot_id,
-            self.date,
-            self.timestamp,
-            self.block_number,
-            self.source_type.value,
-            self.transfer_address or "",
-            self.extrinsic_id or "",
-            self.alpha_rao,  # RAO for calculations (integer)
-            self.alpha_rao_remaining,  # RAO remaining for calculations (integer)
-            self.alpha,  # Display column (float)
-            self.alpha_remaining,  # Display column (float)
-            self.usd_fmv,
-            self.usd_per_alpha,
-            self.tao_equivalent,
-            self.long_term_date,
-            self.status.value,
-            self.notes
-        ]
+        """Convert to Google Sheets row using FIELD_MAP."""
+        return [self._get_row_value(h) for h, _, _, _ in self.FIELD_MAP]
     
     @classmethod
     def sheet_headers(cls) -> List[str]:
-        return [
-            "Lot ID", "Date", "Timestamp", "Block", "Source Type", 
-            "Transfer Address", "Extrinsic ID", "Alpha RAO",
-            "Alpha RAO Remaining", "Alpha Quantity", "Alpha Remaining",
-            "USD FMV", "USD/Alpha", "TAO Equivalent",
-            "Long Term Date", "Status", "Notes"
-        ]
+        """Get column headers from FIELD_MAP."""
+        return [h for h, _, _, _ in cls.FIELD_MAP]
+    
+    @classmethod
+    def from_record(cls, record: Dict[str, Any]) -> 'AlphaLot':
+        """Create instance from a sheet record (dict with header keys)."""
+        kwargs = {}
+        for header, prop, converter, default in cls.FIELD_MAP:
+            if prop is None:  # Skip computed fields
+                continue
+            value = record.get(header)
+            if value is None or value == "":
+                if default is None:
+                    raise ValueError(f"Missing required field: {header}")
+                value = default
+            else:
+                value = converter(value)
+            kwargs[prop] = value
+        return cls(**kwargs)
 
 
 @dataclass
@@ -498,6 +574,23 @@ class TaoLot:
     status: LotStatus = LotStatus.OPEN
     notes: str = ""
     
+    FIELD_MAP: ClassVar[List[FieldSpec]] = [
+        ("TAO Lot ID", "lot_id", str, None),
+        ("Date", None, None, None),  # Computed
+        ("Timestamp", "timestamp", int, None),
+        ("Block", "block_number", int, None),
+        ("TAO RAO", "rao", int, None),
+        ("TAO RAO Remaining", "rao_remaining", _int_or_zero, 0),
+        ("TAO Quantity", None, None, None),  # Computed
+        ("TAO Remaining", None, None, None),  # Computed
+        ("USD Basis", "usd_basis", float, None),
+        ("USD/TAO", "usd_per_tao", float, None),
+        ("Source Sale ID", "source_sale_id", _identity, ""),
+        ("Extrinsic ID", "extrinsic_id", _opt_str, ""),
+        ("Status", "status", lambda x: LotStatus(x), LotStatus.OPEN),
+        ("Notes", "notes", _identity, ""),
+    ]
+    
     @property
     def tao(self) -> float:
         """Original TAO amount (converted from RAO)."""
@@ -519,32 +612,48 @@ class TaoLot:
             return 0
         return (self.rao_remaining / self.rao) * self.usd_basis
     
+    def _get_row_value(self, header: str) -> Any:
+        """Get the value for a specific header column."""
+        if header == "Date":
+            return self.date
+        elif header == "TAO Quantity":
+            return self.tao
+        elif header == "TAO Remaining":
+            return self.tao_remaining
+        
+        for h, prop, _, _ in self.FIELD_MAP:
+            if h == header and prop:
+                val = getattr(self, prop)
+                if isinstance(val, Enum):
+                    return val.value
+                return val if val is not None else ""
+        return ""
+    
     def to_sheet_row(self) -> List[Any]:
-        return [
-            self.lot_id,
-            self.date,
-            self.timestamp,
-            self.block_number,
-            self.rao,  # RAO for calculations (integer)
-            self.rao_remaining,  # RAO remaining for calculations (integer)
-            self.tao,  # Display column (float)
-            self.tao_remaining,  # Display column (float)
-            self.usd_basis,
-            self.usd_per_tao,
-            self.source_sale_id,
-            self.extrinsic_id or "",
-            self.status.value,
-            self.notes
-        ]
+        """Convert to Google Sheets row using FIELD_MAP."""
+        return [self._get_row_value(h) for h, _, _, _ in self.FIELD_MAP]
     
     @classmethod
     def sheet_headers(cls) -> List[str]:
-        return [
-            "TAO Lot ID", "Date", "Timestamp", "Block", "TAO RAO",
-            "TAO RAO Remaining", "TAO Quantity", "TAO Remaining",
-            "USD Basis", "USD/TAO", "Source Sale ID",
-            "Extrinsic ID", "Status", "Notes"
-        ]
+        """Get column headers from FIELD_MAP."""
+        return [h for h, _, _, _ in cls.FIELD_MAP]
+    
+    @classmethod
+    def from_record(cls, record: Dict[str, Any]) -> 'TaoLot':
+        """Create instance from a sheet record (dict with header keys)."""
+        kwargs = {}
+        for header, prop, converter, default in cls.FIELD_MAP:
+            if prop is None:
+                continue
+            value = record.get(header)
+            if value is None or value == "":
+                if default is None:
+                    raise ValueError(f"Missing required field: {header}")
+                value = default
+            else:
+                value = converter(value)
+            kwargs[prop] = value
+        return cls(**kwargs)
 
 
 @dataclass
@@ -568,12 +677,38 @@ class AlphaSale:
     gain_type: GainType
     consumed_lots: List[AlphaLotConsumption]
     created_tao_lot_id: str  # Link to TAO lot created
+    tao_expected: float = 0.0
     tao_slippage: float = 0.0
     slippage_usd: float = 0.0
+    slippage_ratio: float = 0.0
     network_fee_tao: float = 0.0
     network_fee_usd: float = 0.0
     extrinsic_id: Optional[str] = None
     notes: str = ""
+    
+    FIELD_MAP: ClassVar[List[FieldSpec]] = [
+        ("Sale ID", "sale_id", str, None),
+        ("Date", None, None, None),  # Computed
+        ("Timestamp", "timestamp", int, None),
+        ("Block", "block_number", int, None),
+        ("Alpha Disposed", "alpha_disposed", float, None),
+        ("TAO Received", "tao_received", float, None),
+        ("TAO Price USD", "tao_price_usd", float, None),
+        ("USD Proceeds", "usd_proceeds", float, None),
+        ("Cost Basis", "cost_basis", float, None),
+        ("Realized Gain/Loss", "realized_gain_loss", float, None),
+        ("Gain Type", "gain_type", lambda x: GainType(x), None),
+        ("TAO Expected", "tao_expected", _float_or_zero, 0.0),
+        ("TAO Slippage", "tao_slippage", _float_or_zero, 0.0),
+        ("Slippage USD", "slippage_usd", _float_or_zero, 0.0),
+        ("Slippage Ratio", "slippage_ratio", _float_or_zero, 0.0),
+        ("Network Fee (TAO)", "network_fee_tao", _float_or_zero, 0.0),
+        ("Network Fee (USD)", "network_fee_usd", _float_or_zero, 0.0),
+        ("Consumed Lots", None, None, None),  # Computed from consumed_lots
+        ("Created TAO Lot ID", "created_tao_lot_id", _identity, ""),
+        ("Extrinsic ID", "extrinsic_id", _opt_str, ""),
+        ("Notes", "notes", _identity, ""),
+    ]
     
     @property
     def date(self) -> str:
@@ -587,39 +722,48 @@ class AlphaSale:
         """Human-readable summary of consumed lots."""
         return ", ".join([f"{c.lot_id}:{c.alpha_consumed:.4f}" for c in self.consumed_lots])
     
+    def _get_row_value(self, header: str) -> Any:
+        """Get the value for a specific header column."""
+        if header == "Date":
+            return self.date
+        elif header == "Consumed Lots":
+            return self.consumed_lots_summary()
+        
+        for h, prop, _, _ in self.FIELD_MAP:
+            if h == header and prop:
+                val = getattr(self, prop)
+                if isinstance(val, Enum):
+                    return val.value
+                return val if val is not None else ""
+        return ""
+    
     def to_sheet_row(self) -> List[Any]:
-        return [
-            self.sale_id,
-            self.date,
-            self.timestamp,
-            self.block_number,
-            self.alpha_disposed,
-            self.tao_received,
-            self.tao_price_usd,
-            self.usd_proceeds,
-            self.cost_basis,
-            self.realized_gain_loss,
-            self.gain_type.value,
-            self.tao_slippage,
-            self.slippage_usd,
-            self.network_fee_tao,
-            self.network_fee_usd,
-            self.consumed_lots_summary(),
-            self.created_tao_lot_id,
-            self.extrinsic_id or "",
-            self.notes
-        ]
+        """Convert to Google Sheets row using FIELD_MAP."""
+        return [self._get_row_value(h) for h, _, _, _ in self.FIELD_MAP]
     
     @classmethod
     def sheet_headers(cls) -> List[str]:
-        return [
-            "Sale ID", "Date", "Timestamp", "Block", "Alpha Disposed",
-            "TAO Received", "TAO Price USD", "USD Proceeds", "Cost Basis",
-            "Realized Gain/Loss", "Gain Type", "TAO Expected", "TAO Slippage",
-            "Slippage USD", "Slippage Ratio",
-            "Network Fee (TAO)", "Network Fee (USD)",
-            "Consumed Lots", "Created TAO Lot ID", "Extrinsic ID", "Notes"
-        ]
+        """Get column headers from FIELD_MAP."""
+        return [h for h, _, _, _ in cls.FIELD_MAP]
+    
+    @classmethod
+    def from_record(cls, record: Dict[str, Any]) -> 'AlphaSale':
+        """Create instance from a sheet record (dict with header keys)."""
+        kwargs = {}
+        for header, prop, converter, default in cls.FIELD_MAP:
+            if prop is None:
+                continue
+            value = record.get(header)
+            if value is None or value == "":
+                if default is None:
+                    raise ValueError(f"Missing required field: {header}")
+                value = default
+            else:
+                value = converter(value)
+            kwargs[prop] = value
+        # consumed_lots is not stored in sheet, initialize as empty
+        kwargs['consumed_lots'] = []
+        return cls(**kwargs)
 
 
 @dataclass
@@ -642,6 +786,26 @@ class TaoTransfer:
     fee_tao: float = 0.0
     fee_cost_basis_usd: float = 0.0
     
+    FIELD_MAP: ClassVar[List[FieldSpec]] = [
+        ("Transfer ID", "transfer_id", str, None),
+        ("Date", None, None, None),  # Computed
+        ("Timestamp", "timestamp", int, None),
+        ("Block", "block_number", int, None),
+        ("TAO Amount", "tao_amount", float, None),
+        ("TAO Price USD", "tao_price_usd", float, None),
+        ("USD Proceeds", "usd_proceeds", float, None),
+        ("Cost Basis", "cost_basis", float, None),
+        ("Realized Gain/Loss", "realized_gain_loss", float, None),
+        ("Gain Type", "gain_type", lambda x: GainType(x), None),
+        ("Consumed TAO Lots", None, None, None),  # Computed
+        ("Transaction Hash", "transaction_hash", _opt_str, ""),
+        ("Extrinsic ID", "extrinsic_id", _opt_str, ""),
+        ("Notes", "notes", _identity, ""),
+        ("Total Outflow TAO", "total_outflow_tao", _float_or_zero, 0.0),
+        ("Fee TAO", "fee_tao", _float_or_zero, 0.0),
+        ("Fee Cost Basis USD", "fee_cost_basis_usd", _float_or_zero, 0.0),
+    ]
+    
     @property
     def date(self) -> str:
         return datetime.fromtimestamp(self.timestamp).strftime('%Y-%m-%d %H:%M:%S')
@@ -649,36 +813,48 @@ class TaoTransfer:
     def consumed_lots_summary(self) -> str:
         return ", ".join([f"{c.lot_id}:{c.tao_consumed:.4f}" for c in self.consumed_tao_lots])
     
+    def _get_row_value(self, header: str) -> Any:
+        """Get the value for a specific header column."""
+        if header == "Date":
+            return self.date
+        elif header == "Consumed TAO Lots":
+            return self.consumed_lots_summary()
+        
+        for h, prop, _, _ in self.FIELD_MAP:
+            if h == header and prop:
+                val = getattr(self, prop)
+                if isinstance(val, Enum):
+                    return val.value
+                return val if val is not None else ""
+        return ""
+    
     def to_sheet_row(self) -> List[Any]:
-        return [
-            self.transfer_id,
-            self.date,
-            self.timestamp,
-            self.block_number,
-            self.tao_amount,
-            self.tao_price_usd,
-            self.usd_proceeds,
-            self.cost_basis,
-            self.realized_gain_loss,
-            self.gain_type.value,
-            self.consumed_lots_summary(),
-            self.transaction_hash or "",
-            self.extrinsic_id or "",
-            self.notes,
-            self.total_outflow_tao,
-            self.fee_tao,
-            self.fee_cost_basis_usd
-        ]
+        """Convert to Google Sheets row using FIELD_MAP."""
+        return [self._get_row_value(h) for h, _, _, _ in self.FIELD_MAP]
     
     @classmethod
     def sheet_headers(cls) -> List[str]:
-        return [
-            "Transfer ID", "Date", "Timestamp", "Block", "TAO Amount",
-            "TAO Price USD", "USD Proceeds", "Cost Basis", "Realized Gain/Loss",
-            "Gain Type", "Consumed TAO Lots", "Transaction Hash", 
-            "Extrinsic ID", "Notes", "Total Outflow TAO", "Fee TAO",
-            "Fee Cost Basis USD"
-        ]
+        """Get column headers from FIELD_MAP."""
+        return [h for h, _, _, _ in cls.FIELD_MAP]
+    
+    @classmethod
+    def from_record(cls, record: Dict[str, Any]) -> 'TaoTransfer':
+        """Create instance from a sheet record (dict with header keys)."""
+        kwargs = {}
+        for header, prop, converter, default in cls.FIELD_MAP:
+            if prop is None:
+                continue
+            value = record.get(header)
+            if value is None or value == "":
+                if default is None:
+                    raise ValueError(f"Missing required field: {header}")
+                value = default
+            else:
+                value = converter(value)
+            kwargs[prop] = value
+        # consumed_tao_lots is not stored in sheet, initialize as empty
+        kwargs['consumed_tao_lots'] = []
+        return cls(**kwargs)
 
 
 @dataclass
@@ -707,6 +883,32 @@ class Expense:
     extrinsic_id: Optional[str] = None
     notes: str = ""
     
+    FIELD_MAP: ClassVar[List[FieldSpec]] = [
+        ("Expense ID", "expense_id", str, None),
+        ("Date", None, None, None),  # Computed
+        ("Timestamp", "timestamp", int, None),
+        ("Block", "block_number", int, None),
+        ("Transfer Address", "transfer_address", _identity, ""),
+        ("Category", "category", _identity, ""),
+        ("Alpha Disposed", "alpha_disposed", float, None),
+        ("TAO Received", "tao_received", float, None),
+        ("TAO Price USD", "tao_price_usd", float, None),
+        ("USD Proceeds", "usd_proceeds", float, None),
+        ("Cost Basis", "cost_basis", float, None),
+        ("Realized Gain/Loss", "realized_gain_loss", float, None),
+        ("Gain Type", "gain_type", lambda x: GainType(x), None),
+        ("TAO Expected", "tao_expected", _float_or_zero, 0.0),
+        ("TAO Slippage", "tao_slippage", _float_or_zero, 0.0),
+        ("Slippage USD", "slippage_usd", _float_or_zero, 0.0),
+        ("Slippage Ratio", "slippage_ratio", _float_or_zero, 0.0),
+        ("Network Fee (TAO)", "network_fee_tao", _float_or_zero, 0.0),
+        ("Network Fee (USD)", "network_fee_usd", _float_or_zero, 0.0),
+        ("Consumed Lots", None, None, None),  # Computed
+        ("Created TAO Lot ID", "created_tao_lot_id", _identity, ""),
+        ("Extrinsic ID", "extrinsic_id", _opt_str, ""),
+        ("Notes", "notes", _identity, ""),
+    ]
+    
     @property
     def date(self) -> str:
         return datetime.fromtimestamp(self.timestamp).strftime('%Y-%m-%d %H:%M:%S')
@@ -719,43 +921,48 @@ class Expense:
         """Human-readable summary of consumed lots."""
         return ", ".join([f"{c.lot_id}:{c.alpha_consumed:.4f}" for c in self.consumed_lots])
     
+    def _get_row_value(self, header: str) -> Any:
+        """Get the value for a specific header column."""
+        if header == "Date":
+            return self.date
+        elif header == "Consumed Lots":
+            return self.consumed_lots_summary()
+        
+        for h, prop, _, _ in self.FIELD_MAP:
+            if h == header and prop:
+                val = getattr(self, prop)
+                if isinstance(val, Enum):
+                    return val.value
+                return val if val is not None else ""
+        return ""
+    
     def to_sheet_row(self) -> List[Any]:
-        return [
-            self.expense_id,
-            self.date,
-            self.timestamp,
-            self.block_number,
-            self.transfer_address,
-            self.category,
-            self.alpha_disposed,
-            self.tao_received,
-            self.tao_price_usd,
-            self.usd_proceeds,
-            self.cost_basis,
-            self.realized_gain_loss,
-            self.gain_type.value,
-            self.tao_expected,
-            self.tao_slippage,
-            self.slippage_usd,
-            self.slippage_ratio,
-            self.network_fee_tao,
-            self.network_fee_usd,
-            self.consumed_lots_summary(),
-            self.created_tao_lot_id,
-            self.extrinsic_id or "",
-            self.notes
-        ]
+        """Convert to Google Sheets row using FIELD_MAP."""
+        return [self._get_row_value(h) for h, _, _, _ in self.FIELD_MAP]
     
     @classmethod
     def sheet_headers(cls) -> List[str]:
-        return [
-            "Expense ID", "Date", "Timestamp", "Block", "Transfer Address", "Category",
-            "Alpha Disposed", "TAO Received", "TAO Price USD", "USD Proceeds", 
-            "Cost Basis", "Realized Gain/Loss", "Gain Type", "TAO Expected", 
-            "TAO Slippage", "Slippage USD", "Slippage Ratio",
-            "Network Fee (TAO)", "Network Fee (USD)",
-            "Consumed Lots", "Created TAO Lot ID", "Extrinsic ID", "Notes"
-        ]
+        """Get column headers from FIELD_MAP."""
+        return [h for h, _, _, _ in cls.FIELD_MAP]
+    
+    @classmethod
+    def from_record(cls, record: Dict[str, Any]) -> 'Expense':
+        """Create instance from a sheet record (dict with header keys)."""
+        kwargs = {}
+        for header, prop, converter, default in cls.FIELD_MAP:
+            if prop is None:
+                continue
+            value = record.get(header)
+            if value is None or value == "":
+                if default is None:
+                    raise ValueError(f"Missing required field: {header}")
+                value = default
+            else:
+                value = converter(value)
+            kwargs[prop] = value
+        # consumed_lots is not stored in sheet, initialize as empty
+        kwargs['consumed_lots'] = []
+        return cls(**kwargs)
 
 
 @dataclass
@@ -774,34 +981,64 @@ class TaoDeposit:
     extrinsic_id: Optional[str] = None
     notes: str = ""
     
+    FIELD_MAP: ClassVar[List[FieldSpec]] = [
+        ("Deposit ID", "deposit_id", str, None),
+        ("Date", None, None, None),  # Computed
+        ("Timestamp", "timestamp", int, None),
+        ("Block", "block_number", int, None),
+        ("From Address", "from_address", _identity, ""),
+        ("Category", "category", _identity, ""),
+        ("TAO Amount", "tao_amount", float, None),
+        ("TAO RAO", "tao_amount_rao", _int_or_zero, 0),
+        ("TAO Price USD", "tao_price_usd", float, None),
+        ("USD FMV", "usd_fmv", float, None),
+        ("Created TAO Lot ID", "created_tao_lot_id", _identity, ""),
+        ("Extrinsic ID", "extrinsic_id", _opt_str, ""),
+        ("Notes", "notes", _identity, ""),
+    ]
+    
     @property
     def date(self) -> str:
         return datetime.fromtimestamp(self.timestamp).strftime('%Y-%m-%d %H:%M:%S')
     
+    def _get_row_value(self, header: str) -> Any:
+        """Get the value for a specific header column."""
+        if header == "Date":
+            return self.date
+        
+        for h, prop, _, _ in self.FIELD_MAP:
+            if h == header and prop:
+                val = getattr(self, prop)
+                if isinstance(val, Enum):
+                    return val.value
+                return val if val is not None else ""
+        return ""
+    
     def to_sheet_row(self) -> List[Any]:
-        return [
-            self.deposit_id,
-            self.date,
-            self.timestamp,
-            self.block_number,
-            self.from_address,
-            self.category,
-            self.tao_amount,
-            self.tao_amount_rao,
-            self.tao_price_usd,
-            self.usd_fmv,
-            self.created_tao_lot_id,
-            self.extrinsic_id or "",
-            self.notes
-        ]
+        """Convert to Google Sheets row using FIELD_MAP."""
+        return [self._get_row_value(h) for h, _, _, _ in self.FIELD_MAP]
     
     @classmethod
     def sheet_headers(cls) -> List[str]:
-        return [
-            "Deposit ID", "Date", "Timestamp", "Block", "From Address", "Category",
-            "TAO Amount", "TAO RAO", "TAO Price USD", "USD FMV",
-            "Created TAO Lot ID", "Extrinsic ID", "Notes"
-        ]
+        """Get column headers from FIELD_MAP."""
+        return [h for h, _, _, _ in cls.FIELD_MAP]
+    
+    @classmethod
+    def from_record(cls, record: Dict[str, Any]) -> 'TaoDeposit':
+        """Create instance from a sheet record (dict with header keys)."""
+        kwargs = {}
+        for header, prop, converter, default in cls.FIELD_MAP:
+            if prop is None:
+                continue
+            value = record.get(header)
+            if value is None or value == "":
+                if default is None:
+                    raise ValueError(f"Missing required field: {header}")
+                value = default
+            else:
+                value = converter(value)
+            kwargs[prop] = value
+        return cls(**kwargs)
 
 
 @dataclass
