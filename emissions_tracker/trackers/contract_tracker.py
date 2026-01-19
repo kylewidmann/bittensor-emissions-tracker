@@ -1005,9 +1005,11 @@ class ContractTracker(BittensorTracker):
             end_time=end_time
         )
 
-        # Pre-fetch all TAO prices for the time range to avoid individual API calls
-        print(f"  Pre-fetching TAO prices for date range...")
-        self.price_client.get_prices_in_range('TAO', start_time, end_time)
+        # Pre-fetch TAO prices for actual event timestamps to avoid individual API calls
+        min_ts = min(b.timestamp_unix for b in stake_balances)
+        max_ts = max(b.timestamp_unix for b in stake_balances)
+        print(f"  Pre-fetching TAO prices for actual event timestamps...")
+        self.price_client.get_prices_in_range('TAO', min_ts, max_ts)
 
         # Calculate daily emissions
         alpha_lots = self._calculate_daily_emissions(stake_balances, delegations)
@@ -1146,9 +1148,11 @@ class ContractTracker(BittensorTracker):
             print("ℹ️  No new TAO deposits found")
             return []
 
-        # Pre-fetch all TAO prices for the time range to avoid individual API calls
-        print(f"  Pre-fetching TAO prices for date range...")
-        self.price_client.get_prices_in_range('TAO', start_time, end_time)
+        # Pre-fetch TAO prices for actual transfer timestamps to avoid individual API calls
+        min_ts = min(t.timestamp_unix for t in deposit_transfers)
+        max_ts = max(t.timestamp_unix for t in deposit_transfers)
+        print(f"  Pre-fetching TAO prices for actual event timestamps...")
+        self.price_client.get_prices_in_range('TAO', min_ts, max_ts)
 
         # Create deposits and TAO lots
         deposits, tao_lots = self._create_tao_deposits(deposit_transfers)
@@ -1269,9 +1273,11 @@ class ContractTracker(BittensorTracker):
             print("ℹ️  No new TAO transfers found")
             return []
 
-        # Pre-fetch all TAO prices for the time range to avoid individual API calls
-        print(f"  Pre-fetching TAO prices for date range...")
-        self.price_client.get_prices_in_range('TAO', start_time, end_time)
+        # Pre-fetch TAO prices for actual transfer timestamps to avoid individual API calls
+        min_ts = min(t.timestamp_unix for t in brokerage_transfers)
+        max_ts = max(t.timestamp_unix for t in brokerage_transfers)
+        print(f"  Pre-fetching TAO prices for actual event timestamps...")
+        self.price_client.get_prices_in_range('TAO', min_ts, max_ts)
 
         # Create transfers
         tao_transfers, tao_lots = self._create_tao_transfers(brokerage_transfers)
