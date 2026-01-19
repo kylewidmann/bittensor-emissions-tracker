@@ -369,9 +369,9 @@ def test_get_stake_balance_history_params(
             "timestamp_start": 1700000000 - 1800,  # 30 min buffer
             "timestamp_end": 1700000000 + 1800,
             "order": "timestamp_asc",
-            "per_page": 50,
+            "per_page": 200,
             "page": 1,
-            "limit": 50
+            "limit": 200
         }
     ),
 ])
@@ -487,7 +487,7 @@ def test_get_prices_in_range_invalid_symbol(client):
         {
             "asset": "TAO",
             "page": 1,
-            "limit": 50
+            "limit": 200
         }
     ),
 ])

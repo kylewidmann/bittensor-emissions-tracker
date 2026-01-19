@@ -47,7 +47,7 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
         giveup=lambda e: e.response is None or e.response.status_code != 429,
         factor=6
     )
-    def _fetch_with_pagination(self, url: str, params: dict, per_page: int = 50, context: str = "") -> List[Dict[str, Any]]:
+    def _fetch_with_pagination(self, url: str, params: dict, per_page: int = 200, context: str = "") -> List[Dict[str, Any]]:
         """Helper to fetch all pages from an endpoint with throttling and lightweight progress."""
         all_data = []
         page = 1
@@ -245,7 +245,7 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
                 "timestamp_start": timestamp - buffer,
                 "timestamp_end": timestamp + buffer,
                 "order": "timestamp_asc",
-                "per_page": 50
+                "per_page": 200
             }
             
             data = self._fetch_with_pagination(url, params, context="price_at_timestamp")
