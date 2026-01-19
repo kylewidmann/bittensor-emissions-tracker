@@ -766,11 +766,7 @@ class ContractTracker(BittensorTracker):
                     updated_count += 1
 
         if updates:
-            body = {
-                "valueInputOption": "RAW",
-                "data": updates,
-            }
-            self.income_sheet.spreadsheet.batch_update(body)
+            self.income_sheet.batch_update(updates, value_input_option='RAW')
             print(f"  Updated {updated_count} income lots")
 
     def process_expenses(self, start_time: Optional[int] = None, end_time: Optional[int] = None) -> list:
@@ -957,11 +953,7 @@ class ContractTracker(BittensorTracker):
                     updated_count += 1
 
         if updates:
-            body = {
-                "valueInputOption": "RAW",
-                "data": updates,
-            }
-            self.income_sheet.spreadsheet.batch_update(body)
+            self.income_sheet.batch_update(updates, value_input_option='RAW')
             print(f"  Updated {updated_count} income lots")
 
 
@@ -1533,11 +1525,7 @@ class ContractTracker(BittensorTracker):
                     updated_count += 1
 
         if updates:
-            body = {
-                "valueInputOption": "RAW",
-                "data": updates,
-            }
-            self.tao_lots_sheet.spreadsheet.batch_update(body)
+            self.tao_lots_sheet.batch_update(updates, value_input_option='RAW')
             print(f"  Updated {updated_count} TAO lots")
 
     # -------------------------------------------------------------------------
