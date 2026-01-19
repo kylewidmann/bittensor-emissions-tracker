@@ -184,15 +184,9 @@ class ContractTracker(BittensorTracker):
 
         # Get column positions from AlphaLot headers
         headers = AlphaLot.sheet_headers()
-        try:
-            rao_remaining_idx = headers.index('Alpha RAO Remaining')
-            status_idx = headers.index('Status')
-        except ValueError as e:
-            print(f"  Warning: Could not find required columns in headers: {e}")
-            return
 
-        rao_remaining_col = col_idx_to_letter(rao_remaining_idx)
-        status_col = col_idx_to_letter(status_idx)
+        rao_remaining_col = col_idx_to_letter('Alpha RAO Remaining', headers)
+        status_col = col_idx_to_letter('Status', headers)
 
         updates = []
         
@@ -724,6 +718,13 @@ class ContractTracker(BittensorTracker):
             sales: List of AlphaSale objects
             alpha_lots: List of AlphaLotRow objects with updated remaining amounts and row numbers
         """
+        # Get column positions from AlphaLot headers
+        headers = AlphaLot.sheet_headers()
+        
+        rao_remaining_col = col_idx_to_letter('Alpha RAO Remaining', headers)
+        remaining_col = col_idx_to_letter('Alpha Remaining', headers)
+        status_col = col_idx_to_letter('Status', headers)
+        
         # Build lot lookup by ID for quick access
         lots_by_id = {lot.lot_id: lot for lot in alpha_lots}
         
@@ -741,15 +742,15 @@ class ContractTracker(BittensorTracker):
                     new_status = lot.status.value
                     
                     updates.append({
-                        'range': f'Income!I{lot.row}',  # Alpha RAO Remaining
+                        'range': f'Income!{rao_remaining_col}{lot.row}',
                         'values': [[new_remaining_rao]]
                     })
                     updates.append({
-                        'range': f'Income!K{lot.row}',  # Alpha Remaining (display)
+                        'range': f'Income!{remaining_col}{lot.row}',
                         'values': [[new_remaining]]
                     })
                     updates.append({
-                        'range': f'Income!P{lot.row}',  # Status
+                        'range': f'Income!{status_col}{lot.row}',
                         'values': [[new_status]]
                     })
                     updated_count += 1
@@ -902,6 +903,13 @@ class ContractTracker(BittensorTracker):
             expenses: List of Expense objects
             alpha_lots: List of AlphaLotRow objects with updated remaining amounts and row numbers
         """
+        # Get column positions from AlphaLot headers
+        headers = AlphaLot.sheet_headers()
+        
+        rao_remaining_col = col_idx_to_letter('Alpha RAO Remaining', headers)
+        remaining_col = col_idx_to_letter('Alpha Remaining', headers)
+        status_col = col_idx_to_letter('Status', headers)
+        
         # TODO: Possibly combine alpha lot consumption?
         # Build lot lookup by ID for quick access
         lots_by_id = {lot.lot_id: lot for lot in alpha_lots}
@@ -920,15 +928,15 @@ class ContractTracker(BittensorTracker):
                     new_status = lot.status.value
                     
                     updates.append({
-                        'range': f'Income!I{lot.row}',  # Alpha RAO Remaining
+                        'range': f'Income!{rao_remaining_col}{lot.row}',
                         'values': [[new_remaining_rao]]
                     })
                     updates.append({
-                        'range': f'Income!K{lot.row}',  # Alpha Remaining (display)
+                        'range': f'Income!{remaining_col}{lot.row}',
                         'values': [[new_remaining]]
                     })
                     updates.append({
-                        'range': f'Income!P{lot.row}',  # Status
+                        'range': f'Income!{status_col}{lot.row}',
                         'values': [[new_status]]
                     })
                     updated_count += 1
@@ -1446,6 +1454,13 @@ class ContractTracker(BittensorTracker):
             transfers: List of TaoTransfer objects
             tao_lots: List of TaoLotRow objects with updated remaining amounts and row numbers
         """
+        # Get column positions from TaoLot headers
+        headers = TaoLot.sheet_headers()
+        
+        rao_remaining_col = col_idx_to_letter('TAO RAO Remaining', headers)
+        remaining_col = col_idx_to_letter('TAO Remaining', headers)
+        status_col = col_idx_to_letter('Status', headers)
+        
         # Build lot lookup by ID for quick access
         lots_by_id = {lot.lot_id: lot for lot in tao_lots}
         
@@ -1463,15 +1478,15 @@ class ContractTracker(BittensorTracker):
                     new_status = lot.status.value
                     
                     updates.append({
-                        'range': f'TAO Lots!F{lot.row}',  # TAO RAO Remaining
+                        'range': f'TAO Lots!{rao_remaining_col}{lot.row}',
                         'values': [[new_remaining_rao]]
                     })
                     updates.append({
-                        'range': f'TAO Lots!H{lot.row}',  # TAO Remaining (display)
+                        'range': f'TAO Lots!{remaining_col}{lot.row}',
                         'values': [[new_remaining]]
                     })
                     updates.append({
-                        'range': f'TAO Lots!M{lot.row}',  # Status
+                        'range': f'TAO Lots!{status_col}{lot.row}',
                         'values': [[new_status]]
                     })
                     updated_count += 1

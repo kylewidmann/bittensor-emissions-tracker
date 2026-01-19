@@ -22,8 +22,14 @@ def _ensure_sheet_headers(worksheet, expected_headers, label: str):
         print(f"  Warning: Could not verify {label} headers: {e}")
 
 # Convert indices to Excel column letters (0-indexed)
-def col_idx_to_letter(idx: int) -> str:
+def col_idx_to_letter(col: str, headers: list[str]) -> str:
     """Convert 0-indexed column index to Excel column letter."""
+    try:
+        idx = headers.index(col)
+    except ValueError as e:
+        print(f"  Warning: Could not find required columns in headers: {e}")
+        return
+    
     result = ""
     idx += 1  # Excel columns are 1-indexed
     while idx > 0:
