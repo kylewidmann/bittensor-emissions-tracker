@@ -107,19 +107,6 @@ class ContractTracker(BittensorTracker):
     # Sheet Infrastructure
     # -------------------------------------------------------------------------
 
-    @backoff.on_exception(
-        backoff.expo,
-        Exception,
-        max_tries=5,
-        max_time=180,
-        base=10,
-        factor=5,
-        giveup=lambda e: not _is_rate_limit_error(e),
-        on_backoff=lambda details: print(f"  Warning: opening sheet failed (attempt {details['tries']}), retrying in {details['wait']:.1f}s...")
-    )
-    def _open_sheet_with_retry(self, sheet_id: str):
-        return self.sheets_client.open_by_key(sheet_id)
-
     def _init_sheets(self):
         """Initialize all tracking sheets with headers."""
         
@@ -525,44 +512,6 @@ class ContractTracker(BittensorTracker):
         transfer_id = f"XFER-{self.transfer_counter:04d}"
         self.transfer_counter += 1
         return transfer_id
-
-    # -------------------------------------------------------------------------
-    # Sheet Operations
-    # -------------------------------------------------------------------------
-
-    @backoff.on_exception(
-        backoff.expo,
-        Exception,
-        max_tries=5,
-        max_time=180,
-        base=10,
-        factor=5,
-        giveup=lambda e: not _is_rate_limit_error(e),
-        on_backoff=lambda details: print(f"  Warning: get records failed (attempt {details['tries']}), retrying in {details['wait']:.1f}s...")
-    )
-    def _get_records_with_retry(self, worksheet):
-        """Get all records from a worksheet with retry logic for rate limiting."""
-        return worksheet.get_all_records()
-
-    @backoff.on_exception(
-        backoff.expo,
-        Exception,
-        max_tries=5,
-        max_time=180,
-        base=10,
-        factor=5,
-        giveup=lambda e: not _is_rate_limit_error(e),
-        on_backoff=lambda details: print(f"  Warning: append rows failed (attempt {details['tries']}), retrying in {details['wait']:.1f}s...")
-    )
-    def _append_rows_with_retry(self, worksheet, rows: List[List[Any]]):
-        worksheet.append_rows(rows, value_input_option='RAW')
-
-    def _sort_sheet_by_timestamp(self, worksheet, timestamp_col: int, label: str, range_str: str = "A2:Z"):
-        """Sort a worksheet by a timestamp column (ascending) excluding header row."""
-        try:
-            worksheet.sort((timestamp_col, 'asc'), range=range_str)
-        except Exception as e:
-            print(f"  Warning: Could not sort {label} sheet: {e}")
 
     # -------------------------------------------------------------------------
     # Main Processing

@@ -1,6 +1,8 @@
 from abc import abstractmethod
 import time
-from typing import Optional, Tuple
+from typing import Any, List, Optional, Tuple
+
+import backoff
 
 from emissions_tracker.clients.price import PriceClient
 from emissions_tracker.clients.wallet import WalletClientInterface
@@ -14,6 +16,7 @@ def _is_rate_limit_error(e: Exception) -> bool:
     error_str = str(e)
     error_type = type(e).__name__
     return '429' in error_str or 'Quota exceeded' in error_str or 'APIError' in error_type
+
 
 class BittensorTracker:
 
@@ -75,3 +78,56 @@ class BittensorTracker:
         raise ValueError(
             f"No previous {label} timestamp found; please provide --start-date to seed the tracker."
         )
+
+    # -------------------------------------------------------------------------
+    # Sheet Operations (with retry logic for rate limiting)
+    # -------------------------------------------------------------------------
+
+    @backoff.on_exception(
+        backoff.expo,
+        Exception,
+        max_tries=5,
+        max_time=180,
+        base=10,
+        factor=5,
+        giveup=lambda e: not _is_rate_limit_error(e),
+        on_backoff=lambda details: print(f"  Warning: opening sheet failed (attempt {details['tries']}), retrying in {details['wait']:.1f}s...")
+    )
+    def _open_sheet_with_retry(self, sheet_id: str):
+        """Open a Google Sheet by ID with retry logic for rate limiting."""
+        return self.sheets_client.open_by_key(sheet_id)
+
+    @backoff.on_exception(
+        backoff.expo,
+        Exception,
+        max_tries=5,
+        max_time=180,
+        base=10,
+        factor=5,
+        giveup=lambda e: not _is_rate_limit_error(e),
+        on_backoff=lambda details: print(f"  Warning: get records failed (attempt {details['tries']}), retrying in {details['wait']:.1f}s...")
+    )
+    def _get_records_with_retry(self, worksheet):
+        """Get all records from a worksheet with retry logic for rate limiting."""
+        return worksheet.get_all_records()
+
+    @backoff.on_exception(
+        backoff.expo,
+        Exception,
+        max_tries=5,
+        max_time=180,
+        base=10,
+        factor=5,
+        giveup=lambda e: not _is_rate_limit_error(e),
+        on_backoff=lambda details: print(f"  Warning: append rows failed (attempt {details['tries']}), retrying in {details['wait']:.1f}s...")
+    )
+    def _append_rows_with_retry(self, worksheet, rows: List[List[Any]]):
+        """Append rows to a worksheet with retry logic for rate limiting."""
+        worksheet.append_rows(rows, value_input_option='RAW')
+
+    def _sort_sheet_by_timestamp(self, worksheet, timestamp_col: int, label: str, range_str: str = "A2:Z"):
+        """Sort a worksheet by a timestamp column (ascending) excluding header row."""
+        try:
+            worksheet.sort((timestamp_col, 'asc'), range=range_str)
+        except Exception as e:
+            print(f"  Warning: Could not sort {label} sheet: {e}")

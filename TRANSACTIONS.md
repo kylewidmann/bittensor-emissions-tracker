@@ -63,14 +63,7 @@
     3. For each UNDELEGATE event
         1. Get the associated fee transfer. These are linked via the extrisic ID. 
         2. Create TAO lot from the sale based on the delegations `amount` - the transfer `amount` - the transfer `fee`
-3. Tracking expenses
-    1. Get all delegation events where
-        1. action = UNDELEGATE
-        2. is_transfer = True and transfer_address != the validator ss58
-        3. The nominator is my wallet ss58
-        4. the delegate is the validator ss58
-    1. Reduce alpha lots according to strategiy (FIFO vs HIFO) using the `alpha` property from the delegation event
-4. Processing TAO Transfers
+3. Processing TAO Transfers
     1. Get all transfers where
         1. from is my wallet ss58
         2. to is the brokerage ss58
