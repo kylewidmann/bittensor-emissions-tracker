@@ -365,6 +365,11 @@ class ContractTracker(BittensorTracker):
             end_time
         )
 
+        # Skip if already fully processed
+        if start_time is None:
+            print("ℹ️  Contract income already fully processed for requested time range")
+            return []
+
         # Implementation for processing contract income
         delegation_events = self.wallet_client.get_delegations(
             netuid=self.subnet_id,
@@ -439,6 +444,11 @@ class ContractTracker(BittensorTracker):
             start_time,
             end_time
         )
+
+        # Skip if already fully processed
+        if start_time is None:
+            print("ℹ️  Alpha sales already fully processed for requested time range")
+            return []
 
         # Get UNDELEGATE events without transfers (these are alpha sales)
         undelegations = self.wallet_client.get_delegations(
@@ -780,6 +790,11 @@ class ContractTracker(BittensorTracker):
             end_time
         )
 
+        # Skip if already fully processed
+        if start_time is None:
+            print("ℹ️  Expenses already fully processed for requested time range")
+            return []
+
         # Get UNDELEGATE events with transfers (these are expenses)
         undelegations = self.wallet_client.get_delegations(
             netuid=self.subnet_id,
@@ -967,6 +982,11 @@ class ContractTracker(BittensorTracker):
             end_time
         )
 
+        # Skip if already fully processed
+        if start_time is None:
+            print("ℹ️  Staking emissions already fully processed for requested time range")
+            return []
+
         # For emission calculation, we need the previous day's balance to compute deltas
         # Extend start_time backward by 1 day to get comparison baseline
         extended_start_time = start_time - SECONDS_PER_DAY
@@ -1114,6 +1134,11 @@ class ContractTracker(BittensorTracker):
             end_time
         )
 
+        # Skip if already fully processed
+        if start_time is None:
+            print("ℹ️  TAO deposits already fully processed for requested time range")
+            return []
+
         # Get incoming transfers TO the coldkey (deposits)
         incoming_transfers = self.wallet_client.get_transfers(
             account_address=self.coldkey_ss58,
@@ -1232,6 +1257,11 @@ class ContractTracker(BittensorTracker):
             start_time,
             end_time
         )
+
+        # Skip if already fully processed
+        if start_time is None:
+            print("ℹ️  TAO transfers already fully processed for requested time range")
+            return []
 
         # Get transfers from wallet to brokerage (using receiver filter)
         brokerage_transfers = self.wallet_client.get_transfers(

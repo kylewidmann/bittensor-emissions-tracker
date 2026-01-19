@@ -36,7 +36,7 @@ class BittensorTracker:
         last_timestamp: int,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
-    ) -> Tuple[int, int]:
+    ) -> Tuple[Optional[int], Optional[int]]:
         """Determine the (start_time, end_time) timestamps for a processing window.
         
         Args:
@@ -46,7 +46,8 @@ class BittensorTracker:
             end_time: Explicit end time (defaults to now if not provided)
             
         Returns:
-            Tuple of (start_time, end_time) as Unix timestamps
+            Tuple of (start_time, end_time) as Unix timestamps, or (None, None) if 
+            the requested range has already been fully processed
             
         Raises:
             ValueError: If no start_time provided and no last_timestamp exists
@@ -54,8 +55,17 @@ class BittensorTracker:
         # End time defaults to now
         resolved_end = end_time if end_time is not None else int(time.time())
 
-        # If explicit start_time provided, use it
+        # If explicit start_time provided, check if range overlaps with already processed data
         if start_time is not None:
+            # If we've already processed data up to or past the requested end time, skip entirely
+            if last_timestamp >= resolved_end:
+                return None, None
+            
+            # If last_timestamp is within the requested range, continue from there
+            if last_timestamp >= start_time:
+                return last_timestamp + 1, resolved_end
+            
+            # Otherwise use the explicit start_time
             return start_time, resolved_end
 
         # Otherwise, continue from last processed timestamp
