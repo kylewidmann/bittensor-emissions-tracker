@@ -109,6 +109,7 @@ def test_aggregate_monthly_journal_entries_balances_double_entry():
         sales_records,
         [],  # expense_records
         transfer_records,
+        [],  # deposit_records
         wave,
         start_ts,
         end_ts,
@@ -165,7 +166,8 @@ def test_rounding_adjustment_balances_totals_with_combined_accounts():
         income_records,
         sales_records,
         [],  # expense_records
-        [],
+        [],  # transfer_records
+        [],  # deposit_records
         wave,
         0,
         100,

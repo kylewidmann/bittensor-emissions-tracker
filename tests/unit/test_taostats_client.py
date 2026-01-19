@@ -67,7 +67,7 @@ def mock_requests_get():
             "timestamp_start": 1700000000,
             "timestamp_end": 1700100000,
             "order": "timestamp_asc",
-            "sender": "5EYCAe5ijiYfyeZ2JJCGq56LmPyNRAKzpG4QkoQkkQNB5e6Z",
+            "from": "5EYCAe5ijiYfyeZ2JJCGq56LmPyNRAKzpG4QkoQkkQNB5e6Z",
             "page": 1,
             "limit": 500
         }
@@ -84,7 +84,7 @@ def mock_requests_get():
             "timestamp_start": 1700000000,
             "timestamp_end": 1700100000,
             "order": "timestamp_asc",
-            "receiver": "5EYCAe5ijiYfyeZ2JJCGq56LmPyNRAKzpG4QkoQkkQNB5e6Z",
+            "to": "5EYCAe5ijiYfyeZ2JJCGq56LmPyNRAKzpG4QkoQkkQNB5e6Z",
             "page": 1,
             "limit": 500
         }
@@ -101,8 +101,8 @@ def mock_requests_get():
             "timestamp_start": 1700000000,
             "timestamp_end": 1700100000,
             "order": "timestamp_asc",
-            "sender": "5EYCAe5ijiYfyeZ2JJCGq56LmPyNRAKzpG4QkoQkkQNB5e6Z",
-            "receiver": "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty",
+            "from": "5EYCAe5ijiYfyeZ2JJCGq56LmPyNRAKzpG4QkoQkkQNB5e6Z",
+            "to": "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty",
             "page": 1,
             "limit": 500
         }
@@ -298,8 +298,8 @@ def test_get_delegations_params(
             "netuid": 64,
             "hotkey": "5Dt7HZ7Zpw4DppPxFM7Ke3Cm7sDAWhsZXmM5ZAmE7dSVJbcQ",
             "coldkey": "5DcjH2Y8eXskQ9cGgoProcS7S6m9FRg7bdMqvZs4VT2gNsR2",
-            "start_time": 1700000000,
-            "end_time": 1700100000,
+            "timestamp_start": 1700000000,
+            "timestamp_end": 1700100000,
             "order": "timestamp_asc",
             "page": 1,
             "limit": 500

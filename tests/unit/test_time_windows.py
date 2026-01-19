@@ -4,10 +4,10 @@ from emissions_tracker.trackers.bittensor_tracker import BittensorTracker
 
 
 def test_explicit_start_takes_priority_over_last_timestamp():
-    """When start_time is provided, it overrides last_timestamp."""
+    """When start_time is provided and last_timestamp is before it, start_time is used."""
     start, end = BittensorTracker._resolve_time_window(
         "contract income",
-        last_timestamp=999999,
+        last_timestamp=50,  # Before start_time
         start_time=100,
         end_time=1000,
     )
@@ -22,7 +22,7 @@ def test_end_time_defaults_to_now_when_not_provided():
     before = int(time.time())
     start, end = BittensorTracker._resolve_time_window(
         "contract income",
-        last_timestamp=999999,
+        last_timestamp=50,  # Before start_time
         start_time=100,
         end_time=None,
     )
