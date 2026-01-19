@@ -90,6 +90,17 @@ class ContractTracker(BittensorTracker):
         print("  Loading counters...")
         self._load_counters()
         print("  ✓ Counters loaded")
+        
+        # In-memory storage for all data (loaded from sheets, modified during processing)
+        print("  Loading data into memory...")
+        self.alpha_lots: List[AlphaLot] = []
+        self.tao_lots: List[TaoLot] = []
+        self.sales: List[AlphaSale] = []
+        self.expenses: List[Expense] = []
+        self.deposits: List[TaoDeposit] = []
+        self.transfers: List[TaoTransfer] = []
+        self._load_all_data_from_sheets()
+        print("  ✓ Data loaded into memory")
 
     # -------------------------------------------------------------------------
     # Sheet Infrastructure
@@ -254,7 +265,7 @@ class ContractTracker(BittensorTracker):
             notes="Opening balance lot"
         )
         
-        self._append_rows_with_retry(self.income_sheet, [lot.to_sheet_row()])
+        self.alpha_lots.append(lot)
         print(f"    Created opening ALPHA lot: {lot.lot_id} with {opening_balance.balance_as_alpha_float:.4f} ALPHA (${usd_fmv:.2f})")
     
     def _create_opening_tao_lot(self, start_time: int):
@@ -309,7 +320,7 @@ class ContractTracker(BittensorTracker):
             notes="Opening balance lot"
         )
         
-        self._append_rows_with_retry(self.tao_lots_sheet, [lot.to_sheet_row()])
+        self.tao_lots.append(lot)
         print(f"    Created opening TAO lot: {lot.lot_id} with {tao_amount:.4f} TAO (${usd_basis:.2f})")
 
     def _reset_income_lots_if_sales_empty(self):
@@ -422,6 +433,137 @@ class ContractTracker(BittensorTracker):
         
         print(f"  Counters: ALPHA={self.alpha_lot_counter}, SALE={self.sale_counter}, EXPENSE={self.expense_counter}, DEP={self.deposit_counter}, TAO={self.tao_lot_counter}, XFER={self.transfer_counter}")
 
+    def _load_all_data_from_sheets(self):
+        """Load all existing data from sheets into memory."""
+        # Load ALPHA lots (income)
+        try:
+            records = self._get_records_with_retry(self.income_sheet)
+            for record in records:
+                # TODO: Move row reading to models and get rid of hard coded column names
+                lot = AlphaLot(
+                    lot_id=record['Lot ID'],
+                    timestamp=int(record['Timestamp']),
+                    block_number=int(record['Block']),
+                    alpha_rao=int(record['Alpha RAO']),
+                    alpha_rao_remaining=int(record.get('Alpha RAO Remaining', 0)),
+                    usd_per_alpha=float(record['USD/Alpha']),
+                    usd_fmv=float(record['USD FMV']),
+                    tao_equivalent=float(record.get('TAO Equivalent', 0.0)),
+                    extrinsic_id=record.get('Extrinsic ID', ''),
+                    transfer_address=record.get('Transfer Address', ''),
+                    status=LotStatus(record['Status']),
+                    source_type=SourceType(record['Source Type']),
+                    notes=record.get('Notes', '')
+                )
+                self.alpha_lots.append(lot)
+        except Exception as e:
+            print(f"  Warning: Could not load income data: {e}")
+        
+        # Load TAO lots
+        try:
+            records = self._get_records_with_retry(self.tao_lots_sheet)
+            for record in records:
+                lot = TaoLot(
+                    lot_id=record['TAO Lot ID'],
+                    timestamp=int(record['Timestamp']),
+                    block_number=int(record['Block']),
+                    rao=int(record['TAO RAO']),
+                    rao_remaining=int(record.get('TAO RAO Remaining', 0)),
+                    usd_basis=float(record['USD Basis']),
+                    usd_per_tao=float(record['USD/TAO']),
+                    source_sale_id=record.get('Source Sale ID', ''),
+                    extrinsic_id=record.get('Extrinsic ID', ''),
+                    status=LotStatus(record['Status']),
+                    notes=record.get('Notes', '')
+                )
+                self.tao_lots.append(lot)
+        except Exception as e:
+            print(f"  Warning: Could not load TAO lots data: {e}")
+        
+        # Load sales
+        try:
+            records = self._get_records_with_retry(self.sales_sheet)
+            for record in records:
+                sale = AlphaSale(
+                    sale_id=record['Sale ID'],
+                    timestamp=int(record['Timestamp']),
+                    block_number=int(record['Block']),
+                    alpha_rao=int(record['Alpha RAO']),
+                    tao_proceeds=float(record['TAO Proceeds']),
+                    usd_proceeds=float(record['USD Proceeds']),
+                    cost_basis=float(record['Cost Basis']),
+                    realized_gain_loss=float(record['Realized Gain/Loss']),
+                    gain_type=GainType(record['Gain Type']),
+                    extrinsic_id=record.get('Extrinsic ID', ''),
+                    slippage_tao=float(record.get('Slippage TAO', 0.0)),
+                    slippage_usd=float(record.get('Slippage USD', 0.0)),
+                    notes=record.get('Notes', '')
+                )
+                self.sales.append(sale)
+        except Exception as e:
+            print(f"  Warning: Could not load sales data: {e}")
+        
+        # Load expenses
+        try:
+            records = self._get_records_with_retry(self.expenses_sheet)
+            for record in records:
+                expense = Expense(
+                    expense_id=record['Expense ID'],
+                    timestamp=int(record['Timestamp']),
+                    block_number=int(record['Block']),
+                    rao=int(record['RAO']),
+                    usd_amount=float(record['USD Amount']),
+                    cost_basis=float(record['Cost Basis']),
+                    realized_gain_loss=float(record['Realized Gain/Loss']),
+                    gain_type=GainType(record['Gain Type']),
+                    extrinsic_id=record.get('Extrinsic ID', ''),
+                    category=record.get('Category', ''),
+                    notes=record.get('Notes', '')
+                )
+                self.expenses.append(expense)
+        except Exception as e:
+            print(f"  Warning: Could not load expenses data: {e}")
+        
+        # Load deposits
+        try:
+            records = self._get_records_with_retry(self.deposits_sheet)
+            for record in records:
+                deposit = TaoDeposit(
+                    deposit_id=record['Deposit ID'],
+                    timestamp=int(record['Timestamp']),
+                    block_number=int(record['Block']),
+                    rao=int(record['RAO']),
+                    usd_basis=float(record['USD Basis']),
+                    usd_per_tao=float(record['USD/TAO']),
+                    extrinsic_id=record.get('Extrinsic ID', ''),
+                    notes=record.get('Notes', '')
+                )
+                self.deposits.append(deposit)
+        except Exception as e:
+            print(f"  Warning: Could not load deposits data: {e}")
+        
+        # Load transfers
+        try:
+            records = self._get_records_with_retry(self.transfers_sheet)
+            for record in records:
+                transfer = TaoTransfer(
+                    transfer_id=record['Transfer ID'],
+                    timestamp=int(record['Timestamp']),
+                    block_number=int(record['Block']),
+                    rao=int(record['RAO']),
+                    fee_rao=int(record['Fee RAO']),
+                    usd_proceeds=float(record['USD Proceeds']),
+                    cost_basis=float(record['Cost Basis']),
+                    realized_gain_loss=float(record['Realized Gain/Loss']),
+                    gain_type=GainType(record['Gain Type']),
+                    extrinsic_id=record.get('Extrinsic ID', ''),
+                    to_address=record.get('To Address', ''),
+                    notes=record.get('Notes', '')
+                )
+                self.transfers.append(transfer)
+        except Exception as e:
+            print(f"  Warning: Could not load transfers data: {e}")
+
     # -------------------------------------------------------------------------
     # ID Generation
     # -------------------------------------------------------------------------
@@ -500,13 +642,17 @@ class ContractTracker(BittensorTracker):
 
     def run(self, start_time: Optional[int] = None, end_time: Optional[int] = None):
         """Run the contract tracker processing."""
-        # Implementation for running the contract tracker
+        # Process all transactions in memory
         self.process_contract_income(start_time=start_time, end_time=end_time)
         self.process_staking_emissions(start_time=start_time, end_time=end_time)
         self.process_alpha_sales(start_time=start_time, end_time=end_time)
         self.process_expenses(start_time=start_time, end_time=end_time)
         self.process_tao_deposits(start_time=start_time, end_time=end_time)
         self.process_tao_transfers(start_time=start_time, end_time=end_time)
+        
+        # Write everything to sheets atomically
+        self.write_all_data_to_sheets()
+
 
     def process_contract_income(self, start_time: Optional[int] = None, end_time: Optional[int] = None) -> list:
         """Process contract income over the specified time period.
@@ -544,16 +690,13 @@ class ContractTracker(BittensorTracker):
         alpha_lots = self._convert_delegations_to_alpha_lots(delegation_events)
 
         if alpha_lots:
-            # Write all lots to sheet
-            rows = [lot.to_sheet_row() for lot in alpha_lots]
-            self._append_rows_with_retry(self.income_sheet, rows)
+            # Add to memory
+            self.alpha_lots.extend(alpha_lots)
             
             max_ts = max(lot.timestamp for lot in alpha_lots)
             self.last_contract_income_timestamp = max_ts
             self.last_income_timestamp = max(self.last_contract_income_timestamp, self.last_staking_income_timestamp)
             
-            # Keep sheet sorted by timestamp (column 3)
-            self._sort_sheet_by_timestamp(self.income_sheet, timestamp_col=3, label="Income", range_str="A2:O")
             print(f"\n✓ Created {len(alpha_lots)} contract income lots")
         else:
             print("ℹ️  No new contract income found")
@@ -640,26 +783,21 @@ class ContractTracker(BittensorTracker):
         )
 
         # Create sales
-        sales, alpha_lots = self._create_alpha_sales(sales_undelegations, transfers)
+        sales, tao_lots = self._create_alpha_sales(sales_undelegations, transfers)
 
         if sales:
-            # Write sales to sheet
-            sale_rows = [sale.to_sheet_row() for sale in sales]
-            self._append_rows_with_retry(self.sales_sheet, sale_rows)
+            # Add to memory
+            self.sales.extend(sales)
+            
+            # Add created TAO lots to memory
+            self.tao_lots.extend(tao_lots)
 
-            # Write TAO lots to sheet
-            tao_lot_rows = [lot.to_sheet_row() for lot in [s._tao_lot for s in sales]]
-            self._append_rows_with_retry(self.tao_lots_sheet, tao_lot_rows)
-
-            # Update income sheet with consumed lot amounts
-            self._update_consumed_alpha_lots(sales, alpha_lots)
+            # Note: alpha_lots returned from _create_alpha_sales are already updated in memory
+            # since _load_alpha_lots returns references to self.alpha_lots
 
             max_ts = max(sale.timestamp for sale in sales)
             self.last_sale_timestamp = max_ts
 
-            # Sort sheets
-            self._sort_sheet_by_timestamp(self.sales_sheet, timestamp_col=3, label="Sales", range_str="A2:U")
-            self._sort_sheet_by_timestamp(self.tao_lots_sheet, timestamp_col=3, label="TAO Lots", range_str="A2:N")
 
             print(f"\n✓ Created {len(sales)} alpha sales and {len(sales)} TAO lots")
         else:
@@ -684,10 +822,8 @@ class ContractTracker(BittensorTracker):
         # Index transfers by extrinsic_id for quick lookup
         transfers_by_extrinsic = {t.extrinsic_id: t for t in transfers}
 
-        # Load available ALPHA lots
-        alpha_lots = self._load_alpha_lots()
-
         sales = []
+        tao_lots = []
         for undelegate in undelegations:
             # Find matching fee transfer
             fee_transfer = transfers_by_extrinsic.get(undelegate.extrinsic_id)
@@ -700,7 +836,6 @@ class ContractTracker(BittensorTracker):
             # Consume ALPHA lots for this sale
             alpha_rao_needed = int(undelegate.alpha)
             consumed_lots, total_basis = self._consume_alpha_lots(
-                alpha_lots,
                 alpha_rao_needed,
                 undelegate.timestamp_unix
             )
@@ -773,65 +908,32 @@ class ContractTracker(BittensorTracker):
             )
 
             # Attach TAO lot to sale for later persistence
-            sale._tao_lot = tao_lot
             sales.append(sale)
+            tao_lots.append(tao_lot)
 
-        return sales, alpha_lots
-
-    def _load_alpha_lots(self) -> list:
-        """Load available ALPHA lots from income sheet.
-        
-        Returns:
-            List of AlphaLotRow objects with remaining balance > 0 and row numbers attached
-        """
-        records = self.income_sheet.get_all_records()
-        alpha_lots = []
-
-        for idx, record in enumerate(records, start=2):
-            alpha_rao_remaining = int(record.get('Alpha RAO Remaining', 0))
-            if alpha_rao_remaining > 0:
-                lot = AlphaLotRow(
-                    lot_id=record['Lot ID'],
-                    timestamp=int(record['Timestamp']),
-                    block_number=int(record['Block']),
-                    source_type=SourceType(record['Source Type']),
-                    alpha_rao=int(record['Alpha RAO']),
-                    alpha_rao_remaining=alpha_rao_remaining,
-                    usd_fmv=float(record['USD FMV']),
-                    usd_per_alpha=float(record['USD/Alpha']),
-                    tao_equivalent=float(record.get('TAO Equivalent', 0.0)),
-                    extrinsic_id=record.get('Extrinsic ID') or None,
-                    transfer_address=record.get('Transfer Address') or None,
-                    status=LotStatus(record['Status']),
-                    notes=record.get('Notes', ''),
-                    row=idx
-                )
-                alpha_lots.append(lot)
-
-        return alpha_lots
+        return sales, tao_lots
 
     def _consume_alpha_lots(
         self, 
-        lots: list[AlphaLot], 
         amount_rao: int,
         timestamp: int
     ) -> tuple[list[AlphaLotConsumption], float]:
         """Consume ALPHA lots according to configured strategy.
         
         Args:
-            lots: List of available AlphaLot objects
             amount_rao: Amount to consume in RAO
             timestamp: Timestamp of the consumption event
         Returns:
             Tuple of (consumed_lots list, total_basis_consumed)
         """
+
         # Sort lots by strategy
         if self.config.lot_strategy == CostBasisMethod.FIFO:
             # First In First Out - oldest first
-            sorted_lots = sorted(lots, key=lambda x: x.timestamp)
+            sorted_lots = sorted(self.alpha_lots, key=lambda x: x.timestamp)
         else:  # HIFO
             # Highest In First Out - highest basis first
-            sorted_lots = sorted(lots, key=lambda x: x.usd_per_alpha, reverse=True)
+            sorted_lots = sorted(self.alpha_lots, key=lambda x: x.usd_per_alpha, reverse=True)
 
         available_lots = [
             l for l in sorted_lots 
@@ -974,21 +1076,16 @@ class ContractTracker(BittensorTracker):
             return []
 
         # Create expenses
-        expenses, alpha_lots = self._create_expenses(expense_undelegations)
+        expenses = self._create_expenses(expense_undelegations)
 
         if expenses:
-            # Write expenses to sheet
-            expense_rows = [expense.to_sheet_row() for expense in expenses]
-            self._append_rows_with_retry(self.expenses_sheet, expense_rows)
+            # Add to memory
+            self.expenses.extend(expenses)
 
-            # Update income sheet with consumed lot amounts
-            self._update_consumed_alpha_lots_for_expenses(expenses, alpha_lots)
+            # Note: alpha_lots returned from _create_expenses are already updated in memory
 
             max_ts = max(expense.timestamp for expense in expenses)
             self.last_expense_timestamp = max_ts
-
-            # Sort sheet
-            self._sort_sheet_by_timestamp(self.expenses_sheet, timestamp_col=3, label="Expenses", range_str="A2:O")
 
             print(f"\n✓ Created {len(expenses)} expenses")
         else:
@@ -1005,15 +1102,11 @@ class ContractTracker(BittensorTracker):
         Returns:
             Tuple of (expenses list, alpha_lots list)
         """
-        # Load available ALPHA lots
-        alpha_lots = self._load_alpha_lots()
-
         expenses = []
         for undelegate in undelegations:
             # Consume ALPHA lots for this expense
             alpha_rao_needed = int(undelegate.alpha)
             consumed_lots, total_basis = self._consume_alpha_lots(
-                alpha_lots,
                 alpha_rao_needed,
                 undelegate.timestamp_unix
             )
@@ -1066,7 +1159,7 @@ class ContractTracker(BittensorTracker):
 
             expenses.append(expense)
 
-        return expenses, alpha_lots
+        return expenses
 
     def _update_consumed_alpha_lots_for_expenses(self, expenses: list, alpha_lots: list):
         """Update income sheet with consumed lot amounts from expenses.
@@ -1176,16 +1269,13 @@ class ContractTracker(BittensorTracker):
         alpha_lots = self._calculate_daily_emissions(stake_balances, delegations)
 
         if alpha_lots:
-            # Write all lots to sheet
-            rows = [lot.to_sheet_row() for lot in alpha_lots]
-            self._append_rows_with_retry(self.income_sheet, rows)
+            # Add to memory
+            self.alpha_lots.extend(alpha_lots)
             
             max_ts = max(lot.timestamp for lot in alpha_lots)
             self.last_staking_income_timestamp = max_ts
             self.last_income_timestamp = max(self.last_contract_income_timestamp, self.last_staking_income_timestamp)
             
-            # Keep sheet sorted by timestamp (column 3)
-            self._sort_sheet_by_timestamp(self.income_sheet, timestamp_col=3, label="Income", range_str="A2:O")
             print(f"\n✓ Created {len(alpha_lots)} staking emission lots")
         else:
             print("ℹ️  No staking emissions found")
@@ -1318,21 +1408,13 @@ class ContractTracker(BittensorTracker):
         # Create deposits and TAO lots
         deposits, tao_lots = self._create_tao_deposits(deposit_transfers)
 
-        if deposits:
-            # Write deposits to sheet
-            deposit_rows = [deposit.to_sheet_row() for deposit in deposits]
-            self._append_rows_with_retry(self.deposits_sheet, deposit_rows)
-
-            # Write TAO lots to sheet
-            tao_lot_rows = [lot.to_sheet_row() for lot in tao_lots]
-            self._append_rows_with_retry(self.tao_lots_sheet, tao_lot_rows)
+        if deposits and tao_lots:
+            # Add to memory
+            self.deposits.extend(deposits)
+            self.tao_lots.extend(tao_lots)
 
             max_ts = max(deposit.timestamp for deposit in deposits)
             self.last_deposit_timestamp = max_ts
-
-            # Sort sheets
-            self._sort_sheet_by_timestamp(self.deposits_sheet, timestamp_col=3, label="Deposits", range_str="A2:M")
-            self._sort_sheet_by_timestamp(self.tao_lots_sheet, timestamp_col=3, label="TAO Lots", range_str="A2:K")
 
             print(f"\n✓ Created {len(deposits)} TAO deposits and {len(tao_lots)} TAO lots")
         else:
@@ -1441,21 +1523,19 @@ class ContractTracker(BittensorTracker):
         self.price_client.get_prices_in_range('TAO', min_ts, max_ts)
 
         # Create transfers
-        tao_transfers, tao_lots = self._create_tao_transfers(brokerage_transfers)
+        tao_transfers = self._create_tao_transfers(brokerage_transfers)
 
         if tao_transfers:
             # Write transfers to sheet
             transfer_rows = [transfer.to_sheet_row() for transfer in tao_transfers]
-            self._append_rows_with_retry(self.transfers_sheet, transfer_rows)
+        if tao_transfers:
+            # Add to memory
+            self.transfers.extend(tao_transfers)
 
-            # Update TAO lots sheet with consumed lot amounts
-            self._update_consumed_tao_lots(tao_transfers, tao_lots)
+            # Note: tao_lots returned from _create_tao_transfers are already updated in memory
 
             max_ts = max(transfer.timestamp for transfer in tao_transfers)
             self.last_transfer_timestamp = max_ts
-
-            # Sort sheet
-            self._sort_sheet_by_timestamp(self.transfers_sheet, timestamp_col=3, label="Transfers", range_str="A2:N")
 
             print(f"\n✓ Created {len(tao_transfers)} TAO transfers")
         else:
@@ -1472,9 +1552,6 @@ class ContractTracker(BittensorTracker):
         Returns:
             Tuple of (transfers list, tao_lots list)
         """
-        # Load available TAO lots
-        tao_lots = self._load_tao_lots()
-
         tao_transfers = []
         for transfer in transfers:
             # Total outflow = transfer amount + fee (work in RAO to avoid floating point errors)
@@ -1483,7 +1560,6 @@ class ContractTracker(BittensorTracker):
             # Consume TAO lots for total outflow (amount + fee)
             # Both the transfer amount and fee reduce the wallet balance
             consumed_lots, total_basis = self._consume_tao_lots(
-                tao_lots,
                 total_outflow_rao,
                 transfer.timestamp_unix
             )
@@ -1538,41 +1614,11 @@ class ContractTracker(BittensorTracker):
 
             tao_transfers.append(tao_transfer)
 
-        return tao_transfers, tao_lots
+        return tao_transfers
 
-    def _load_tao_lots(self) -> list:
-        """Load available TAO lots from TAO Lots sheet.
-        
-        Returns:
-            List of TaoLotRow objects with remaining balance > 0 and row numbers attached
-        """
-        records = self.tao_lots_sheet.get_all_records()
-        tao_lots = []
-
-        for idx, record in enumerate(records, start=2):  # Start at 2 (row 1 is header)
-            rao_remaining = record.get('TAO RAO Remaining', 0)
-            if rao_remaining > 0:
-                lot = TaoLotRow(
-                    lot_id=record['TAO Lot ID'],
-                    timestamp=record['Timestamp'],
-                    block_number=record['Block'],
-                    rao=record['TAO RAO'],
-                    rao_remaining=rao_remaining,
-                    usd_basis=record['USD Basis'],
-                    usd_per_tao=record['USD/TAO'],
-                    source_sale_id=record.get('Source Sale ID') or "",
-                    extrinsic_id=record.get('Extrinsic ID') or "",
-                    status=LotStatus(record['Status']),
-                    notes=record.get('Notes', ''),
-                    row=idx  # Use the actual enumeration index (row number in sheet)
-                )
-                tao_lots.append(lot)
-
-        return tao_lots
 
     def _consume_tao_lots(
         self, 
-        lots: list[TaoLotRow], 
         amount_rao: int, 
         disposal_timestamp: int
     ) -> tuple[list[TaoLotConsumption], float]:
@@ -1589,10 +1635,10 @@ class ContractTracker(BittensorTracker):
         # Sort lots by strategy
         if self.config.lot_strategy == CostBasisMethod.FIFO:
             # First In First Out - oldest first
-            sorted_lots = sorted(lots, key=lambda x: x.timestamp)
+            sorted_lots = sorted(self.tao_lots, key=lambda x: x.timestamp)
         else:  # HIFO
             # Highest In First Out - highest basis first
-            sorted_lots = sorted(lots, key=lambda x: x.usd_per_tao, reverse=True)
+            sorted_lots = sorted(self.tao_lots, key=lambda x: x.usd_per_tao, reverse=True)
 
         consumed_lots = []
         total_basis = 0.0
@@ -1844,6 +1890,70 @@ class ContractTracker(BittensorTracker):
         
         print("✓ All sheets cleared\n")
 
+    def write_all_data_to_sheets(self):
+        """Atomically write all in-memory data to sheets."""
+        print("\n💾 Writing all data to sheets...")
+        
+        # Sort all data by timestamp before writing
+        self.alpha_lots.sort(key=lambda x: x.timestamp)
+        self.tao_lots.sort(key=lambda x: x.timestamp)
+        self.sales.sort(key=lambda x: x.timestamp)
+        self.expenses.sort(key=lambda x: x.timestamp)
+        self.deposits.sort(key=lambda x: x.timestamp)
+        self.transfers.sort(key=lambda x: x.timestamp)
+        
+        # Clear all sheets first
+        sheets_to_clear = [
+            (self.income_sheet, "Income", len(self.alpha_lots)),
+            (self.tao_lots_sheet, "TAO Lots", len(self.tao_lots)),
+            (self.sales_sheet, "Sales", len(self.sales)),
+            (self.expenses_sheet, "Expenses", len(self.expenses)),
+            (self.deposits_sheet, "Deposits", len(self.deposits)),
+            (self.transfers_sheet, "Transfers", len(self.transfers)),
+        ]
+        
+        for worksheet, name, count in sheets_to_clear:
+            try:
+                all_values = worksheet.get_all_values()
+                if len(all_values) > 1:
+                    last_row = len(all_values)
+                    worksheet.batch_clear([f'A2:Z{last_row}'])
+            except Exception as e:
+                print(f"  Warning: Could not clear {name} sheet: {e}")
+        
+        # Write all data
+        if self.alpha_lots:
+            rows = [lot.to_sheet_row() for lot in self.alpha_lots]
+            self._append_rows_with_retry(self.income_sheet, rows)
+            print(f"  ✓ Wrote {len(rows)} income records")
+        
+        if self.tao_lots:
+            rows = [lot.to_sheet_row() for lot in self.tao_lots]
+            self._append_rows_with_retry(self.tao_lots_sheet, rows)
+            print(f"  ✓ Wrote {len(rows)} TAO lot records")
+        
+        if self.sales:
+            rows = [sale.to_sheet_row() for sale in self.sales]
+            self._append_rows_with_retry(self.sales_sheet, rows)
+            print(f"  ✓ Wrote {len(rows)} sales records")
+        
+        if self.expenses:
+            rows = [expense.to_sheet_row() for expense in self.expenses]
+            self._append_rows_with_retry(self.expenses_sheet, rows)
+            print(f"  ✓ Wrote {len(rows)} expense records")
+        
+        if self.deposits:
+            rows = [deposit.to_sheet_row() for deposit in self.deposits]
+            self._append_rows_with_retry(self.deposits_sheet, rows)
+            print(f"  ✓ Wrote {len(rows)} deposit records")
+        
+        if self.transfers:
+            rows = [transfer.to_sheet_row() for transfer in self.transfers]
+            self._append_rows_with_retry(self.transfers_sheet, rows)
+            print(f"  ✓ Wrote {len(rows)} transfer records")
+        
+        print("✓ All data written to sheets\n")
+
     def create_opening_lots(self, start_time: int):
         """Create opening ALPHA and TAO lots based on balances from the day before start_time.
         
@@ -1854,6 +1964,9 @@ class ContractTracker(BittensorTracker):
         print(f"\nCreating opening lots for start date...")
         self._create_opening_alpha_lot(start_time)
         self._create_opening_tao_lot(start_time)
+        
+        # Write opening lots to sheets
+        self.write_all_data_to_sheets()
         
         # Reset counters after creating opening lots
         self._load_counters()

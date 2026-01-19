@@ -6,12 +6,8 @@ are correctly processed, including USD proceeds, cost basis calculation, and rea
 """
 import pytest
 from datetime import datetime
-from unittest.mock import patch
 
 from emissions_tracker.models import CostBasisMethod, Expense
-from tests.fixtures.mock_config import (
-    TEST_TRACKER_SHEET_ID,
-)
 
 @pytest.mark.parametrize(
     "seed_date,start_date,end_date",
