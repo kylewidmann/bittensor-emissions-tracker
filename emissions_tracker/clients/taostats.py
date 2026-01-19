@@ -11,6 +11,7 @@ from emissions_tracker.clients.wallet import WalletClientInterface
 from emissions_tracker.config import TaoStatsSettings
 from emissions_tracker.exceptions import PriceNotAvailableError
 from emissions_tracker.models import (
+    TaoStatsAccountHistory,
     TaoStatsTransfer,
     TaoStatsDelegation,
     TaoStatsStakeBalance,
@@ -219,6 +220,50 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
         except Exception as e:
             print(f"Taostats API error in get_stake_balance_history: {e}")
             return []
+
+    def get_account_history(
+        self,
+        address: str,
+        start_time: int,
+        end_time: int
+    ) -> List[TaoStatsAccountHistory]:
+        """Fetch historical account balance snapshots via Taostats API.
+        
+        Returns daily account balance snapshots at midnight GMT.
+        """
+        url = f"{self.base_url}/account/history/v1"
+        params = {
+            "address": address,
+            "timestamp_start": start_time,
+            "timestamp_end": end_time,
+            "order": "timestamp_asc"
+        }
+
+        history_data = self._fetch_with_pagination(url, params, per_page=200, context="account_history")
+        
+        histories = []
+        for h in history_data:
+            history = TaoStatsAccountHistory(
+                address=TaoStatsAddress(ss58=h['address']['ss58'], hex=h['address']['hex']),
+                network=h['network'],
+                block_number=h['block_number'],
+                timestamp=h['timestamp'],
+                rank=h.get('rank'),
+                balance_free=h['balance_free'],
+                balance_reserved=h.get('balance_reserved', '0'),
+                balance_staked=h['balance_staked'],
+                balance_staked_alpha_as_tao=h.get('balance_staked_alpha_as_tao'),
+                balance_staked_root=h.get('balance_staked_root'),
+                root_claim_type=h.get('root_claim_type', ''),
+                balance_liquidity=h.get('balance_liquidity', '0'),
+                balance_total=h['balance_total'],
+                created_on_date=h.get('created_on_date'),
+                created_on_network=h.get('created_on_network'),
+                coldkey_swap=h.get('coldkey_swap')
+            )
+            histories.append(history)
+        
+        return histories
 
     @backoff.on_exception(
         backoff.expo,

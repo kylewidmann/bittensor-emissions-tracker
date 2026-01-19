@@ -59,6 +59,7 @@ class ContractTracker(BittensorTracker):
         print(f"  Smart Contract: {self.smart_contract_ss58}")
         
         # Connect to Google Sheets
+        print("  Connecting to Google Sheets...")
         scope = [
             'https://spreadsheets.google.com/feeds',
             'https://www.googleapis.com/auth/drive'
@@ -68,18 +69,27 @@ class ContractTracker(BittensorTracker):
         )
         self.sheets_client = gspread.authorize(creds)
         self.sheet = self._open_sheet_with_retry(self.sheet_id)
+        print("  ✓ Connected to Google Sheets")
         
         # Initialize sheets
+        print("  Initializing sheets...")
         self._init_sheets()
+        print("  ✓ Sheets initialized")
         
         # Load state
+        print("  Loading state from sheets...")
         self._load_state()
+        print("  ✓ State loaded")
 
         # If derived sheets were cleared, reopen income lots so they can be reprocessed
+        print("  Checking if income lots need reset...")
         self._reset_income_lots_if_sales_empty()
+        print("  ✓ Income lots check complete")
         
         # Counters for ID generation
+        print("  Loading counters...")
         self._load_counters()
+        print("  ✓ Counters loaded")
 
     # -------------------------------------------------------------------------
     # Sheet Infrastructure
@@ -123,7 +133,7 @@ class ContractTracker(BittensorTracker):
         self.last_transfer_timestamp = 0
         
         try:
-            records = self.income_sheet.get_all_records()
+            records = self._get_records_with_retry(self.income_sheet)
             if records:
                 contract_income = [r for r in records if r.get('Source Type') == 'Contract']
                 if contract_income:
@@ -138,32 +148,169 @@ class ContractTracker(BittensorTracker):
             print(f"  Warning: Could not load income state: {e}")
         
         try:
-            records = self.sales_sheet.get_all_records()
+            records = self._get_records_with_retry(self.sales_sheet)
             if records:
                 self.last_sale_timestamp = max(r['Timestamp'] for r in records)
         except Exception as e:
             print(f"  Warning: Could not load sales state: {e}")
         
         try:
-            records = self.expenses_sheet.get_all_records()
+            records = self._get_records_with_retry(self.expenses_sheet)
             if records:
                 self.last_expense_timestamp = max(r['Timestamp'] for r in records)
         except Exception as e:
             print(f"  Warning: Could not load expense state: {e}")
         
         try:
-            records = self.deposits_sheet.get_all_records()
+            records = self._get_records_with_retry(self.deposits_sheet)
             if records:
                 self.last_deposit_timestamp = max(r['Timestamp'] for r in records)
         except Exception as e:
             print(f"  Warning: Could not load deposit state: {e}")
         
         try:
-            records = self.transfers_sheet.get_all_records()
+            records = self._get_records_with_retry(self.transfers_sheet)
             if records:
                 self.last_transfer_timestamp = max(r['Timestamp'] for r in records)
         except Exception as e:
             print(f"  Warning: Could not load transfer state: {e}")
+
+    def _create_opening_lots_if_needed(self, start_time: int):
+        """Create opening ALPHA and TAO lots if no lots exist.
+        
+        Args:
+            start_time: The start time for processing - opening lots will be created from the day before
+        """
+        try:
+            # Check if ALPHA lots exist
+            income_records = self.income_sheet.get_all_records()
+            if not income_records:
+                self._create_opening_alpha_lot(start_time)
+        except Exception as e:
+            print(f"  Warning: Could not check/create opening ALPHA lot: {e}")
+        
+        try:
+            # Check if TAO lots exist
+            tao_lot_records = self.tao_lots_sheet.get_all_records()
+            if not tao_lot_records:
+                self._create_opening_tao_lot(start_time)
+        except Exception as e:
+            print(f"  Warning: Could not check/create opening TAO lot: {e}")
+
+    def _create_opening_alpha_lot(self, start_time: int):
+        """Create an opening ALPHA lot from the last stake balance before start_time.
+        
+        Args:
+            start_time: The start time for processing - will fetch balance from the previous day
+        """
+        print("  Creating opening ALPHA lot from stake balance history...")
+        
+        # Get stake balance from the previous day (end of day)
+        # Start: beginning of previous day (start_time - 2 days)
+        # End: end of previous day (start_time - 1 second)
+        prev_day_start = start_time - (2 * SECONDS_PER_DAY)
+        prev_day_end = start_time - 1
+        
+        stake_balances = self.wallet_client.get_stake_balance_history(
+            netuid=self.subnet_id,
+            hotkey=self.validator_ss58,
+            coldkey=self.coldkey_ss58,
+            start_time=prev_day_start,
+            end_time=prev_day_end
+        )
+        
+        if not stake_balances:
+            print("    No stake balance history found for previous day, skipping opening ALPHA lot")
+            return
+        
+        # Use the last balance from that day as the opening lot
+        opening_balance = stake_balances[-1]
+        
+        if opening_balance.balance_as_alpha_rao == 0:
+            print("    Opening balance is zero, skipping opening ALPHA lot")
+            return
+        
+        # Get TAO price at that time
+        tao_price = self.price_client.get_price_at_timestamp('TAO', opening_balance.timestamp_unix)
+        
+        # Calculate USD values
+        tao_equivalent = opening_balance.balance_as_tao_float
+        usd_fmv = tao_equivalent * tao_price
+        usd_per_alpha = usd_fmv / opening_balance.balance_as_alpha_float if opening_balance.balance_as_alpha_float > 0 else 0.0
+        
+        lot = AlphaLot(
+            lot_id=self._next_alpha_lot_id(),
+            timestamp=opening_balance.timestamp_unix,
+            block_number=opening_balance.block_number,
+            alpha_rao=opening_balance.balance_as_alpha_rao,
+            alpha_rao_remaining=opening_balance.balance_as_alpha_rao,
+            usd_per_alpha=usd_per_alpha,
+            usd_fmv=usd_fmv,
+            tao_equivalent=tao_equivalent,
+            extrinsic_id="",
+            transfer_address="",
+            status=LotStatus.OPEN,
+            source_type=SourceType.CONTRACT,
+            notes="Opening balance lot"
+        )
+        
+        self._append_rows_with_retry(self.income_sheet, [lot.to_sheet_row()])
+        print(f"    Created opening ALPHA lot: {lot.lot_id} with {opening_balance.balance_as_alpha_float:.4f} ALPHA (${usd_fmv:.2f})")
+    
+    def _create_opening_tao_lot(self, start_time: int):
+        """Create an opening TAO lot from account history before start_time.
+        
+        Args:
+            start_time: The start time for processing - will fetch balance from the previous day
+        """
+        print("  Creating opening TAO lot from account history...")
+        
+        # Get account balance from the previous day (end of day)
+        # Start: beginning of previous day (start_time - 2 days)
+        # End: end of previous day (start_time - 1 second)
+        prev_day_start = start_time - (2 * SECONDS_PER_DAY)
+        prev_day_end = start_time - 1
+        
+        account_histories = self.wallet_client.get_account_history(
+            address=self.coldkey_ss58,
+            start_time=prev_day_start,
+            end_time=prev_day_end
+        )
+        
+        if not account_histories:
+            print("    No account history found for previous day, skipping opening TAO lot")
+            return
+        
+        # Use the last balance from that day as the opening lot
+        opening_history = account_histories[-1]
+        tao_balance_rao = opening_history.balance_free_rao
+        
+        if tao_balance_rao == 0:
+            print("    Opening balance is zero, skipping opening TAO lot")
+            return
+        
+        # Get TAO price at that time
+        tao_price = self.price_client.get_price_at_timestamp('TAO', opening_history.timestamp_unix)
+        
+        tao_amount = tao_balance_rao / RAO_PER_TAO
+        usd_basis = tao_amount * tao_price
+        
+        lot = TaoLot(
+            lot_id=self._next_tao_lot_id(),
+            timestamp=opening_history.timestamp_unix,
+            block_number=opening_history.block_number,
+            rao=tao_balance_rao,
+            rao_remaining=tao_balance_rao,
+            usd_basis=usd_basis,
+            usd_per_tao=tao_price,
+            source_sale_id="",
+            extrinsic_id="",
+            status=LotStatus.OPEN,
+            notes="Opening balance lot"
+        )
+        
+        self._append_rows_with_retry(self.tao_lots_sheet, [lot.to_sheet_row()])
+        print(f"    Created opening TAO lot: {lot.lot_id} with {tao_amount:.4f} TAO (${usd_basis:.2f})")
 
     def _reset_income_lots_if_sales_empty(self):
         """Reset ALPHA lot remaining amounts/status if sales sheet is empty."""
@@ -214,7 +361,7 @@ class ContractTracker(BittensorTracker):
     def _load_counters(self):
         """Load ID counters from existing data."""
         try:
-            records = self.income_sheet.get_all_records()
+            records = self._get_records_with_retry(self.income_sheet)
             if records:
                 lot_ids = [r['Lot ID'] for r in records if r.get('Lot ID', '').startswith('ALPHA-')]
                 self.alpha_lot_counter = max([int(lid.split('-')[1]) for lid in lot_ids], default=0) + 1
@@ -224,7 +371,7 @@ class ContractTracker(BittensorTracker):
             self.alpha_lot_counter = 1
         
         try:
-            records = self.sales_sheet.get_all_records()
+            records = self._get_records_with_retry(self.sales_sheet)
             if records:
                 sale_ids = [r['Sale ID'] for r in records if r.get('Sale ID', '').startswith('SALE-')]
                 self.sale_counter = max([int(sid.split('-')[1]) for sid in sale_ids], default=0) + 1
@@ -234,7 +381,7 @@ class ContractTracker(BittensorTracker):
             self.sale_counter = 1
         
         try:
-            records = self.expenses_sheet.get_all_records()
+            records = self._get_records_with_retry(self.expenses_sheet)
             if records:
                 expense_ids = [r['Expense ID'] for r in records if r.get('Expense ID', '').startswith('EXP-')]
                 self.expense_counter = max([int(eid.split('-')[1]) for eid in expense_ids], default=0) + 1
@@ -244,7 +391,7 @@ class ContractTracker(BittensorTracker):
             self.expense_counter = 1
         
         try:
-            records = self.deposits_sheet.get_all_records()
+            records = self._get_records_with_retry(self.deposits_sheet)
             if records:
                 deposit_ids = [r['Deposit ID'] for r in records if r.get('Deposit ID', '').startswith('DEP-')]
                 self.deposit_counter = max([int(did.split('-')[1]) for did in deposit_ids], default=0) + 1
@@ -254,7 +401,7 @@ class ContractTracker(BittensorTracker):
             self.deposit_counter = 1
         
         try:
-            records = self.tao_lots_sheet.get_all_records()
+            records = self._get_records_with_retry(self.tao_lots_sheet)
             if records:
                 lot_ids = [r['TAO Lot ID'] for r in records if r.get('TAO Lot ID', '').startswith('TAO-')]
                 self.tao_lot_counter = max([int(lid.split('-')[1]) for lid in lot_ids], default=0) + 1
@@ -264,7 +411,7 @@ class ContractTracker(BittensorTracker):
             self.tao_lot_counter = 1
         
         try:
-            records = self.transfers_sheet.get_all_records()
+            records = self._get_records_with_retry(self.transfers_sheet)
             if records:
                 xfer_ids = [r['Transfer ID'] for r in records if r.get('Transfer ID', '').startswith('XFER-')]
                 self.transfer_counter = max([int(xid.split('-')[1]) for xid in xfer_ids], default=0) + 1
@@ -312,6 +459,20 @@ class ContractTracker(BittensorTracker):
     # -------------------------------------------------------------------------
     # Sheet Operations
     # -------------------------------------------------------------------------
+
+    @backoff.on_exception(
+        backoff.expo,
+        Exception,
+        max_tries=5,
+        max_time=180,
+        base=10,
+        factor=5,
+        giveup=lambda e: not _is_rate_limit_error(e),
+        on_backoff=lambda details: print(f"  Warning: get records failed (attempt {details['tries']}), retrying in {details['wait']:.1f}s...")
+    )
+    def _get_records_with_retry(self, worksheet):
+        """Get all records from a worksheet with retry logic for rate limiting."""
+        return worksheet.get_all_records()
 
     @backoff.on_exception(
         backoff.expo,
@@ -1655,17 +1816,48 @@ class ContractTracker(BittensorTracker):
         print(f"\n✓ Generated {len(all_entries)} total journal entries for {year}")
         return all_entries
 
-    def clear_journal_sheet(self):
-        """Clear all journal entries (for regeneration)."""
-        print("  Clearing Journal Entries sheet...")
-        try:
-            all_values = self.journal_sheet.get_all_values()
-            if len(all_values) > 1:
-                last_row = len(all_values)
-                self.journal_sheet.batch_clear([f'A2:Z{last_row}'])
-            print("  ✓ Journal Entries sheet cleared")
-        except Exception as e:
-            print(f"  Warning: Could not clear journal sheet: {e}")
+    def clear_all_sheets(self):
+        """Clear all transaction sheets (for regeneration)."""
+        print("\n⚠️  Clearing all transaction sheets...")
+        
+        sheets_to_clear = [
+            (self.income_sheet, "Income"),
+            (self.sales_sheet, "Sales"),
+            (self.expenses_sheet, "Expenses"),
+            (self.deposits_sheet, "Deposits"),
+            (self.transfers_sheet, "Transfers"),
+            (self.tao_lots_sheet, "TAO Lots"),
+            (self.journal_sheet, "Journal Entries")
+        ]
+        
+        for worksheet, name in sheets_to_clear:
+            try:
+                all_values = worksheet.get_all_values()
+                if len(all_values) > 1:
+                    last_row = len(all_values)
+                    worksheet.batch_clear([f'A2:Z{last_row}'])
+                    print(f"  ✓ {name} sheet cleared")
+                else:
+                    print(f"  ✓ {name} sheet already empty")
+            except Exception as e:
+                print(f"  Warning: Could not clear {name} sheet: {e}")
+        
+        print("✓ All sheets cleared\n")
+
+    def create_opening_lots(self, start_time: int):
+        """Create opening ALPHA and TAO lots based on balances from the day before start_time.
+        
+        Args:
+            start_time: Unix timestamp of the first day to process.
+                       Opening lots will be created from balances at end of previous day.
+        """
+        print(f"\nCreating opening lots for start date...")
+        self._create_opening_alpha_lot(start_time)
+        self._create_opening_tao_lot(start_time)
+        
+        # Reset counters after creating opening lots
+        self._load_counters()
+        print("✓ Opening lots created\n")
 
     def _check_uncategorized_expenses(
         self,

@@ -135,17 +135,12 @@ Examples:
     
     # Handle regeneration if requested
     if args.regenerate:
-        print("\n⚠️  REGENERATION MODE: Clearing existing data...")
-        if args.mode in ['auto', 'income']:
-            tracker.clear_income_sheets()
-        if args.mode in ['auto', 'sales']:
-            tracker.clear_sales_sheet()
-            tracker.clear_expenses_sheet()
-        if args.mode in ['auto', 'transfers']:
-            tracker.clear_transfers_sheet()
-        if args.mode == 'journal':
-            tracker.clear_journal_sheet()
-        print("✓ Sheets cleared\n")
+        if not start_time:
+            print("Error: --start-date is required when using --regenerate to create opening lots")
+            return 1
+        
+        tracker.clear_all_sheets()
+        tracker.create_opening_lots(start_time)
     
     # Execute based on mode
     if args.mode == 'auto':
