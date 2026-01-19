@@ -10,7 +10,8 @@ from emissions_tracker.exceptions import PriceNotAvailableError
 from emissions_tracker.journal import JournalGenerator, aggregate_monthly_journal_entries
 from emissions_tracker.models import (
     AlphaLot, AlphaLotRow, TaoLot, TaoLotConsumption, TaoLotRow, AlphaSale, Expense, TaoDeposit, TaoStatsStakeBalance, TaoStatsTransfer, TaoTransfer,
-    SourceType, LotStatus, CostBasisMethod, TaoStatsDelegation, AlphaLotConsumption, GainType, JournalEntry
+    SourceType, LotStatus, CostBasisMethod, TaoStatsDelegation, AlphaLotConsumption, GainType, JournalEntry,
+    DisposalType, DisposalEvent
 )
 from emissions_tracker.trackers.bittensor_tracker import BittensorTracker, _is_rate_limit_error, SECONDS_PER_DAY
 from oauth2client.service_account import ServiceAccountCredentials
@@ -138,10 +139,8 @@ class ContractTracker(BittensorTracker):
         self.last_contract_income_timestamp = 0
         self.last_staking_income_timestamp = 0
         self.last_income_timestamp = 0
-        self.last_sale_timestamp = 0
-        self.last_expense_timestamp = 0
         self.last_deposit_timestamp = 0
-        self.last_transfer_timestamp = 0
+        self.last_disposal_timestamp = 0  # Unified timestamp for all disposal types
         
         try:
             records = self._get_records_with_retry(self.income_sheet)
@@ -159,32 +158,36 @@ class ContractTracker(BittensorTracker):
             print(f"  Warning: Could not load income state: {e}")
         
         try:
-            records = self._get_records_with_retry(self.sales_sheet)
-            if records:
-                self.last_sale_timestamp = max(r['Timestamp'] for r in records)
-        except Exception as e:
-            print(f"  Warning: Could not load sales state: {e}")
-        
-        try:
-            records = self._get_records_with_retry(self.expenses_sheet)
-            if records:
-                self.last_expense_timestamp = max(r['Timestamp'] for r in records)
-        except Exception as e:
-            print(f"  Warning: Could not load expense state: {e}")
-        
-        try:
             records = self._get_records_with_retry(self.deposits_sheet)
             if records:
                 self.last_deposit_timestamp = max(r['Timestamp'] for r in records)
         except Exception as e:
             print(f"  Warning: Could not load deposit state: {e}")
         
+        # Load last disposal timestamp from all disposal sheets (sales, expenses, transfers)
+        disposal_timestamps = [0]
+        try:
+            records = self._get_records_with_retry(self.sales_sheet)
+            if records:
+                disposal_timestamps.append(max(r['Timestamp'] for r in records))
+        except Exception as e:
+            print(f"  Warning: Could not load sales state: {e}")
+        
+        try:
+            records = self._get_records_with_retry(self.expenses_sheet)
+            if records:
+                disposal_timestamps.append(max(r['Timestamp'] for r in records))
+        except Exception as e:
+            print(f"  Warning: Could not load expense state: {e}")
+        
         try:
             records = self._get_records_with_retry(self.transfers_sheet)
             if records:
-                self.last_transfer_timestamp = max(r['Timestamp'] for r in records)
+                disposal_timestamps.append(max(r['Timestamp'] for r in records))
         except Exception as e:
             print(f"  Warning: Could not load transfer state: {e}")
+        
+        self.last_disposal_timestamp = max(disposal_timestamps)
 
     def _create_opening_lots_if_needed(self, start_time: int):
         """Create opening ALPHA and TAO lots if no lots exist.
@@ -641,17 +644,198 @@ class ContractTracker(BittensorTracker):
     # -------------------------------------------------------------------------
 
     def run(self, start_time: Optional[int] = None, end_time: Optional[int] = None):
-        """Run the contract tracker processing."""
-        # Process all transactions in memory
+        """Run the contract tracker processing.
+        
+        Processing order:
+        1. Income phase - creates lots (no consumption, order doesn't matter):
+           - Contract income → ALPHA lots
+           - Staking emissions → ALPHA lots  
+           - TAO deposits → TAO lots
+        
+        2. Disposal phase - consumes lots (must be chronological):
+           - Sales (consume ALPHA, create TAO)
+           - Expenses (consume ALPHA)
+           - Transfers (consume TAO)
+           All processed together in timestamp order to ensure correct lot consumption.
+        """
+        # Phase 1: Process all income (creates lots, no consumption)
         self.process_contract_income(start_time=start_time, end_time=end_time)
         self.process_staking_emissions(start_time=start_time, end_time=end_time)
-        self.process_alpha_sales(start_time=start_time, end_time=end_time)
-        self.process_expenses(start_time=start_time, end_time=end_time)
         self.process_tao_deposits(start_time=start_time, end_time=end_time)
-        self.process_tao_transfers(start_time=start_time, end_time=end_time)
+        
+        # Phase 2: Process all disposals chronologically
+        self.process_disposals(start_time=start_time, end_time=end_time)
         
         # Write everything to sheets atomically
         self.write_all_data_to_sheets()
+
+    def process_disposals(self, start_time: Optional[int] = None, end_time: Optional[int] = None):
+        """Process all disposal events (sales, expenses, transfers) in chronological order.
+        
+        This ensures correct lot consumption by processing events in the order they occurred,
+        rather than by type. A sale on Dec 15 won't consume lots needed for an expense on Nov 20.
+        
+        Args:
+            start_time: Start timestamp
+            end_time: End timestamp
+        """
+        # Step 1: Calculate single time window for all disposals
+        disposal_start, disposal_end = self._resolve_time_window(
+            "disposals", self.last_disposal_timestamp, start_time, end_time
+        )
+        if disposal_start is None:
+            print("ℹ️  No new disposal events to process")
+            return
+        
+        # Step 2: Fetch all events for the time window
+        all_delegations, all_transfers = self._fetch_disposal_events(disposal_start, disposal_end)
+        
+        # Step 3: Create disposal events from fetched data
+        disposal_events = self._create_disposal_events(
+            all_delegations, all_transfers, disposal_start, disposal_end
+        )
+        
+        if not disposal_events:
+            print("ℹ️  No new disposal events found")
+            return
+        
+        # Step 4: Sort by timestamp and process
+        disposal_events.sort(key=lambda x: x.timestamp)
+        
+        # Pre-fetch TAO prices for all events
+        min_ts = min(e.timestamp for e in disposal_events)
+        max_ts = max(e.timestamp for e in disposal_events)
+        print(f"  Pre-fetching TAO prices for disposal events...")
+        self.price_client.get_prices_in_range('TAO', min_ts, max_ts)
+        
+        # Step 5: Process each event in chronological order
+        self._execute_disposal_events(disposal_events)
+
+    def _fetch_disposal_events(
+        self,
+        start_time: int,
+        end_time: int
+    ) -> Tuple[List[TaoStatsDelegation], List[TaoStatsTransfer]]:
+        """Fetch all delegations and transfers for the time range.
+        
+        Args:
+            start_time: Start timestamp
+            end_time: End timestamp
+            
+        Returns:
+            Tuple of (all_delegations, all_transfers)
+        """
+        # Fetch all UNDELEGATE events (covers both sales and expenses)
+        all_delegations = self.wallet_client.get_delegations(
+            netuid=self.subnet_id,
+            delegate=self.validator_ss58,
+            nominator=self.coldkey_ss58,
+            start_time=start_time,
+            end_time=end_time,
+            action='UNDELEGATE'
+        )
+        
+        # Fetch all transfers (covers both fee transfers and brokerage transfers)
+        all_transfers = self.wallet_client.get_transfers(
+            account_address=self.coldkey_ss58,
+            start_time=start_time,
+            end_time=end_time,
+            sender=self.coldkey_ss58
+        )
+        
+        return all_delegations, all_transfers
+
+    def _create_disposal_events(
+        self,
+        all_delegations: List[TaoStatsDelegation],
+        all_transfers: List[TaoStatsTransfer],
+    ) -> List[DisposalEvent]:
+        """Create disposal events from fetched data.
+        
+        Args:
+            all_delegations: All UNDELEGATE events in the time range
+            all_transfers: All transfers in the time range
+            start_time: Start timestamp (for validation)
+            end_time: End timestamp (for validation)
+        
+        Returns:
+            List of DisposalEvent objects with process callbacks
+        """
+        disposal_events: List[DisposalEvent] = []
+        
+        # Index transfers by extrinsic_id for sale fee matching
+        transfers_by_extrinsic = {t.extrinsic_id: t for t in all_transfers}
+        
+        for d in all_delegations:
+            ts = d.timestamp_unix
+            
+            # Sales: UNDELEGATE without transfer
+            if not d.is_transfer and not d.transfer_address:
+                disposal_events.append(DisposalEvent(
+                    timestamp=ts,
+                    disposal_type=DisposalType.SALE,
+                    event=d,
+                    process=lambda d=d: self._create_alpha_sale(d, transfers_by_extrinsic)
+                ))
+            
+            # Expenses: UNDELEGATE with transfer to non-validator
+            elif d.transfer_address and d.transfer_address.ss58 != self.validator_ss58:
+                disposal_events.append(DisposalEvent(
+                    timestamp=ts,
+                    disposal_type=DisposalType.EXPENSE,
+                    event=d,
+                    process=lambda d=d: self._create_expense(d)
+                ))
+        
+        # Transfers: to brokerage
+        for t in all_transfers:
+            if t.to_address and t.to_address.ss58 == self.brokerage_ss58:
+                disposal_events.append(DisposalEvent(
+                    timestamp=t.timestamp_unix,
+                    disposal_type=DisposalType.TRANSFER,
+                    event=t,
+                    process=lambda t=t: self._create_tao_transfer(t)
+                ))
+        
+        return disposal_events
+
+    def _execute_disposal_events(self, disposal_events: List[DisposalEvent]):
+        """Execute disposal events and update state.
+        
+        Args:
+            disposal_events: Sorted list of disposal events to process
+        """
+        sales_created = 0
+        expenses_created = 0
+        transfers_created = 0
+        
+        for disposal in disposal_events:
+            result = disposal.process()
+            
+            if disposal.disposal_type == DisposalType.SALE:
+                sale, tao_lot = result
+                self.sales.append(sale)
+                self.tao_lots.append(tao_lot)
+                sales_created += 1
+                
+            elif disposal.disposal_type == DisposalType.EXPENSE:
+                self.expenses.append(result)
+                expenses_created += 1
+                
+            elif disposal.disposal_type == DisposalType.TRANSFER:
+                self.transfers.append(result)
+                transfers_created += 1
+            
+            # Update unified disposal timestamp
+            self.last_disposal_timestamp = max(self.last_disposal_timestamp, disposal.timestamp)
+        
+        # Print summary
+        if sales_created:
+            print(f"\n✓ Created {sales_created} alpha sales")
+        if expenses_created:
+            print(f"✓ Created {expenses_created} expenses")
+        if transfers_created:
+            print(f"✓ Created {transfers_created} TAO transfers")
 
 
     def process_contract_income(self, start_time: Optional[int] = None, end_time: Optional[int] = None) -> list:
@@ -732,84 +916,13 @@ class ContractTracker(BittensorTracker):
 
         return alpha_lots
 
-    def process_alpha_sales(self, start_time: Optional[int] = None, end_time: Optional[int] = None) -> list:
-        """Process ALPHA sales over the specified time period.
-
-        Args:
-            start_time: Start timestamp (uses last processed if None)
-            end_time: End timestamp (defaults to now if None)
-
-        Returns:
-            list: List of processed sales.
-        """
-        start_time, end_time = self._resolve_time_window(
-            "alpha sales",
-            self.last_sale_timestamp,
-            start_time,
-            end_time
-        )
-
-        # Skip if already fully processed
-        if start_time is None:
-            print("ℹ️  Alpha sales already fully processed for requested time range")
-            return []
-
-        # Get UNDELEGATE events without transfers (these are alpha sales)
-        undelegations = self.wallet_client.get_delegations(
-            netuid=self.subnet_id,
-            delegate=self.validator_ss58,
-            nominator=self.coldkey_ss58,
-            start_time=start_time,
-            end_time=end_time,
-            action='UNDELEGATE'
-        )
-
-        # Filter for sales: is_transfer=null, transfer_address=null
-        sales_undelegations = [
-            u for u in undelegations
-            if not u.is_transfer and not u.transfer_address
-        ]
-
-        if not sales_undelegations:
-            print("ℹ️  No new alpha sales found")
-            return []
-
-        # Get transfers to match fees
-        transfers = self.wallet_client.get_transfers(
-            account_address=self.coldkey_ss58,
-            start_time=start_time,
-            end_time=end_time,
-            sender=self.coldkey_ss58
-        )
-
-        # Create sales
-        sales, tao_lots = self._create_alpha_sales(sales_undelegations, transfers)
-
-        if sales:
-            # Add to memory
-            self.sales.extend(sales)
-            
-            # Add created TAO lots to memory
-            self.tao_lots.extend(tao_lots)
-
-            # Note: alpha_lots returned from _create_alpha_sales are already updated in memory
-            # since _load_alpha_lots returns references to self.alpha_lots
-
-            max_ts = max(sale.timestamp for sale in sales)
-            self.last_sale_timestamp = max_ts
 
 
-            print(f"\n✓ Created {len(sales)} alpha sales and {len(sales)} TAO lots")
-        else:
-            print("ℹ️  No valid alpha sales to process")
-
-        return sales
-
-    def _create_alpha_sales(
+    def _create_alpha_sale(
         self, 
-        undelegations: list[TaoStatsDelegation], 
-        transfers: list[TaoStatsTransfer]
-    ) -> list[AlphaSale]:
+        undelegate: TaoStatsDelegation, 
+        transfers_by_extrinsic: dict[str, TaoStatsTransfer]
+    ) -> tuple[AlphaSale, TaoLot]:
         """Create AlphaSale records from UNDELEGATE events.
         
         Args:
@@ -820,98 +933,90 @@ class ContractTracker(BittensorTracker):
             List of AlphaSale objects with attached TaoLot objects
         """
         # Index transfers by extrinsic_id for quick lookup
-        transfers_by_extrinsic = {t.extrinsic_id: t for t in transfers}
 
-        sales = []
-        tao_lots = []
-        for undelegate in undelegations:
-            # Find matching fee transfer
-            fee_transfer = transfers_by_extrinsic.get(undelegate.extrinsic_id)
-            if not fee_transfer:
-                raise ValueError(
-                    f"No fee transfer found for extrinsic {undelegate.extrinsic_id} "
-                    f"at block {undelegate.block_number}. This indicates a data integrity issue."
-                )
-
-            # Consume ALPHA lots for this sale
-            alpha_rao_needed = int(undelegate.alpha)
-            consumed_lots, total_basis = self._consume_alpha_lots(
-                alpha_rao_needed,
-                undelegate.timestamp_unix
+        # Find matching fee transfer
+        fee_transfer = transfers_by_extrinsic.get(undelegate.extrinsic_id)
+        if not fee_transfer:
+            raise ValueError(
+                f"No fee transfer found for extrinsic {undelegate.extrinsic_id} "
+                f"at block {undelegate.block_number}. This indicates a data integrity issue."
             )
 
-            if not consumed_lots:
-                raise ValueError(
-                    f"Insufficient ALPHA lots to cover sale of {alpha_rao_needed / RAO_PER_TAO:.4f} ALPHA "
-                    f"at block {undelegate.block_number}. This indicates missing income lots or incorrect lot consumption."
-                )
+        # Consume ALPHA lots for this sale
+        alpha_rao_needed = int(undelegate.alpha)
+        consumed_lots, total_basis = self._consume_alpha_lots(
+            alpha_rao_needed,
+            undelegate.timestamp_unix
+        )
 
-            # Calculate TAO received: delegation.amount - transfer.amount - transfer.fee
-            tao_received_rao = int(undelegate.amount) - fee_transfer.amount_rao - fee_transfer.fee_rao
-            tao_received = tao_received_rao / RAO_PER_TAO
-            
-            # Network fee is the total amount deducted (transfer amount + transfer fee)
-            # This equals undelegate.fee (the fee specified in the delegation event)
-            network_fee_tao = (fee_transfer.amount_rao + fee_transfer.fee_rao) / RAO_PER_TAO
-
-            # Calculate slippage
-            # TODO: Look at moving a bunch of these calculations into the models
-            # Get TAO price for valuation
-            tao_price_usd = undelegate.usd / (undelegate.amount / RAO_PER_TAO)
-            usd_proceeds = undelegate.usd
-            slippage_usd = undelegate.slippage * tao_price_usd
-
-            # Calculate gain/loss
-            realized_gain_loss = usd_proceeds - total_basis
-
-            # Determine gain type (short-term if held < 1 year)
-            oldest_lot_timestamp = min(c.acquisition_timestamp for c in consumed_lots)
-            holding_period_days = (undelegate.timestamp_unix - oldest_lot_timestamp) / (24 * 60 * 60)
-            gain_type = GainType.LONG_TERM if holding_period_days >= 365 else GainType.SHORT_TERM
-
-            # Create TAO lot
-            tao_lot_id = self._next_tao_lot_id()
-            tao_lot = TaoLot(
-                lot_id=tao_lot_id,
-                timestamp=undelegate.timestamp_unix,
-                block_number=undelegate.block_number,
-                rao=tao_received_rao,
-                rao_remaining=tao_received_rao,
-                usd_basis=usd_proceeds,  # Use proceeds as basis
-                usd_per_tao=tao_price_usd,
-                source_sale_id=self._next_sale_id(),
-                extrinsic_id=undelegate.extrinsic_id,
-                status=LotStatus.OPEN,
-                notes=f"TAO from alpha sale at block {undelegate.block_number}"
+        if not consumed_lots:
+            raise ValueError(
+                f"Insufficient ALPHA lots to cover sale of {alpha_rao_needed / RAO_PER_TAO:.4f} ALPHA "
+                f"at block {undelegate.block_number}. This indicates missing income lots or incorrect lot consumption."
             )
 
-            # Create sale record
-            sale = AlphaSale(
-                sale_id=tao_lot.source_sale_id,
-                timestamp=undelegate.timestamp_unix,
-                block_number=undelegate.block_number,
-                alpha_disposed=alpha_rao_needed / RAO_PER_TAO,
-                tao_received=tao_received,
-                tao_price_usd=tao_price_usd,
-                usd_proceeds=usd_proceeds,
-                cost_basis=total_basis,
-                realized_gain_loss=realized_gain_loss,
-                gain_type=gain_type,
-                consumed_lots=consumed_lots,
-                created_tao_lot_id=tao_lot_id,
-                tao_slippage=undelegate.slippage,
-                slippage_usd=slippage_usd,
-                network_fee_tao=network_fee_tao,
-                network_fee_usd=network_fee_tao * tao_price_usd,
-                extrinsic_id=undelegate.extrinsic_id,
-                notes=f"Alpha sale at block {undelegate.block_number}"
-            )
+        # Calculate TAO received: delegation.amount - transfer.amount - transfer.fee
+        tao_received_rao = int(undelegate.amount) - fee_transfer.amount_rao - fee_transfer.fee_rao
+        tao_received = tao_received_rao / RAO_PER_TAO
+        
+        # Network fee is the total amount deducted (transfer amount + transfer fee)
+        # This equals undelegate.fee (the fee specified in the delegation event)
+        network_fee_tao = (fee_transfer.amount_rao + fee_transfer.fee_rao) / RAO_PER_TAO
 
-            # Attach TAO lot to sale for later persistence
-            sales.append(sale)
-            tao_lots.append(tao_lot)
+        # Calculate slippage
+        # TODO: Look at moving a bunch of these calculations into the models
+        # Get TAO price for valuation
+        tao_price_usd = undelegate.usd / (undelegate.amount / RAO_PER_TAO)
+        usd_proceeds = undelegate.usd
+        slippage_usd = undelegate.slippage * tao_price_usd
 
-        return sales, tao_lots
+        # Calculate gain/loss
+        realized_gain_loss = usd_proceeds - total_basis
+
+        # Determine gain type (short-term if held < 1 year)
+        oldest_lot_timestamp = min(c.acquisition_timestamp for c in consumed_lots)
+        holding_period_days = (undelegate.timestamp_unix - oldest_lot_timestamp) / (24 * 60 * 60)
+        gain_type = GainType.LONG_TERM if holding_period_days >= 365 else GainType.SHORT_TERM
+
+        # Create TAO lot
+        tao_lot_id = self._next_tao_lot_id()
+        tao_lot = TaoLot(
+            lot_id=tao_lot_id,
+            timestamp=undelegate.timestamp_unix,
+            block_number=undelegate.block_number,
+            rao=tao_received_rao,
+            rao_remaining=tao_received_rao,
+            usd_basis=usd_proceeds,  # Use proceeds as basis
+            usd_per_tao=tao_price_usd,
+            source_sale_id=self._next_sale_id(),
+            extrinsic_id=undelegate.extrinsic_id,
+            status=LotStatus.OPEN,
+            notes=f"TAO from alpha sale at block {undelegate.block_number}"
+        )
+
+        # Create sale record
+        sale = AlphaSale(
+            sale_id=tao_lot.source_sale_id,
+            timestamp=undelegate.timestamp_unix,
+            block_number=undelegate.block_number,
+            alpha_disposed=alpha_rao_needed / RAO_PER_TAO,
+            tao_received=tao_received,
+            tao_price_usd=tao_price_usd,
+            usd_proceeds=usd_proceeds,
+            cost_basis=total_basis,
+            realized_gain_loss=realized_gain_loss,
+            gain_type=gain_type,
+            consumed_lots=consumed_lots,
+            created_tao_lot_id=tao_lot_id,
+            tao_slippage=undelegate.slippage,
+            slippage_usd=slippage_usd,
+            network_fee_tao=network_fee_tao,
+            network_fee_usd=network_fee_tao * tao_price_usd,
+            extrinsic_id=undelegate.extrinsic_id,
+            notes=f"Alpha sale at block {undelegate.block_number}"
+        )
+
+        return sale, tao_lot
 
     def _consume_alpha_lots(
         self, 
@@ -977,9 +1082,14 @@ class ContractTracker(BittensorTracker):
             remaining_needed -= consume_amount
 
         if remaining_needed > 0:
+            # Debug info: show what lots are available
+            # self.write_all_data_to_sheets()  # Persist current state for debugging
             raise ValueError(
-                f"Insufficient ALPHA lots to consume {amount_rao / RAO_PER_TAO:.4f} ALPHA. "
-                f"Shortfall of {remaining_needed / RAO_PER_TAO:.4f} ALPHA."
+                f"Insufficient ALPHA lots to consume {amount_rao / RAO_PER_TAO:.4f} ALPHA at timestamp {timestamp}. "
+                f"Shortfall of {remaining_needed / RAO_PER_TAO:.4f} ALPHA. "
+                f"Available lots (acquired before disposal): {len(available_lots)}. "
+                f"Total lots: {len(self.alpha_lots)}. "
+                f"Lots with remaining balance: {len([l for l in self.alpha_lots if l.alpha_rao_remaining > 0])}."
             )
 
         return consumed_lots, total_basis
@@ -1032,68 +1142,9 @@ class ContractTracker(BittensorTracker):
             self.income_sheet.batch_update(updates, value_input_option='RAW')
             print(f"  Updated {updated_count} income lots")
 
-    def process_expenses(self, start_time: Optional[int] = None, end_time: Optional[int] = None) -> list:
-        """Process expenses over the specified time period.
 
-        Args:
-            start_time: Start timestamp (uses last processed if None)
-            end_time: End timestamp (defaults to now if None)
 
-        Returns:
-            list: List of processed expense lots.
-        """
-        start_time, end_time = self._resolve_time_window(
-            "expenses",
-            self.last_expense_timestamp,
-            start_time,
-            end_time
-        )
-
-        # Skip if already fully processed
-        if start_time is None:
-            print("ℹ️  Expenses already fully processed for requested time range")
-            return []
-
-        # Get UNDELEGATE events with transfers (these are expenses)
-        undelegations = self.wallet_client.get_delegations(
-            netuid=self.subnet_id,
-            delegate=self.validator_ss58,
-            nominator=self.coldkey_ss58,
-            start_time=start_time,
-            end_time=end_time,
-            action='UNDELEGATE',
-            is_transfer=True
-        )
-
-        # Filter for expenses: transfer to address other than validator
-        expense_undelegations = [
-            u for u in undelegations
-            if u.transfer_address and u.transfer_address.ss58 != self.validator_ss58
-        ]
-
-        if not expense_undelegations:
-            print("ℹ️  No new expenses found")
-            return []
-
-        # Create expenses
-        expenses = self._create_expenses(expense_undelegations)
-
-        if expenses:
-            # Add to memory
-            self.expenses.extend(expenses)
-
-            # Note: alpha_lots returned from _create_expenses are already updated in memory
-
-            max_ts = max(expense.timestamp for expense in expenses)
-            self.last_expense_timestamp = max_ts
-
-            print(f"\n✓ Created {len(expenses)} expenses")
-        else:
-            print("ℹ️  No valid expenses to process")
-
-        return expenses
-
-    def _create_expenses(self, undelegations: list[TaoStatsDelegation]) -> tuple:
+    def _create_expense(self, undelegate: TaoStatsDelegation) -> Expense:
         """Create Expense records from UNDELEGATE events with transfers.
         
         Args:
@@ -1102,64 +1153,60 @@ class ContractTracker(BittensorTracker):
         Returns:
             Tuple of (expenses list, alpha_lots list)
         """
-        expenses = []
-        for undelegate in undelegations:
-            # Consume ALPHA lots for this expense
-            alpha_rao_needed = int(undelegate.alpha)
-            consumed_lots, total_basis = self._consume_alpha_lots(
-                alpha_rao_needed,
-                undelegate.timestamp_unix
+        # Consume ALPHA lots for this expense
+        alpha_rao_needed = int(undelegate.alpha)
+        consumed_lots, total_basis = self._consume_alpha_lots(
+            alpha_rao_needed,
+            undelegate.timestamp_unix
+        )
+
+        if not consumed_lots:
+            raise ValueError(
+                f"Insufficient ALPHA lots to cover expense of {alpha_rao_needed / RAO_PER_TAO:.4f} ALPHA "
+                f"at block {undelegate.block_number}. This indicates missing income lots or incorrect lot consumption."
             )
+        
+        # TODO: I don't think this accounts for slippage, should this be included in gain/loss?
+        # Calculate network fee in USD
+        network_fee_tao = 0.0  # No TAO fees for direct ALPHA transfers
+        network_fee_usd = 0.0
+        if undelegate.fee:
+            # Fee is in ALPHA RAO
+            network_fee_alpha = int(undelegate.fee) / RAO_PER_TAO
+            # Calculate fee USD using alpha price
+            if undelegate.alpha_price_in_usd:
+                network_fee_usd = network_fee_alpha * undelegate.alpha_price_in_usd
 
-            if not consumed_lots:
-                raise ValueError(
-                    f"Insufficient ALPHA lots to cover expense of {alpha_rao_needed / RAO_PER_TAO:.4f} ALPHA "
-                    f"at block {undelegate.block_number}. This indicates missing income lots or incorrect lot consumption."
-                )
-            
-            # TODO: I don't think this accounts for slippage, should this be included in gain/loss?
-            # Calculate network fee in USD
-            network_fee_tao = 0.0  # No TAO fees for direct ALPHA transfers
-            network_fee_usd = 0.0
-            if undelegate.fee:
-                # Fee is in ALPHA RAO
-                network_fee_alpha = int(undelegate.fee) / RAO_PER_TAO
-                # Calculate fee USD using alpha price
-                if undelegate.alpha_price_in_usd:
-                    network_fee_usd = network_fee_alpha * undelegate.alpha_price_in_usd
+        # Calculate gain/loss
+        realized_gain_loss = undelegate.usd - total_basis - network_fee_usd
 
-            # Calculate gain/loss
-            realized_gain_loss = undelegate.usd - total_basis - network_fee_usd
+        # Determine gain type (short-term if held < 1 year)
+        newest_lot_timestamp = min(c.acquisition_timestamp for c in consumed_lots)
+        holding_period_days = (undelegate.timestamp_unix - newest_lot_timestamp) / (24 * 60 * 60)
+        gain_type = GainType.LONG_TERM if holding_period_days >= 365 else GainType.SHORT_TERM
 
-            # Determine gain type (short-term if held < 1 year)
-            newest_lot_timestamp = min(c.acquisition_timestamp for c in consumed_lots)
-            holding_period_days = (undelegate.timestamp_unix - newest_lot_timestamp) / (24 * 60 * 60)
-            gain_type = GainType.LONG_TERM if holding_period_days >= 365 else GainType.SHORT_TERM
+        # Create expense record
+        expense = Expense(
+            expense_id=self._next_expense_id(),
+            timestamp=undelegate.timestamp_unix,
+            block_number=undelegate.block_number,
+            transfer_address=undelegate.transfer_address.ss58 if undelegate.transfer_address else "",
+            alpha_disposed=alpha_rao_needed / RAO_PER_TAO,
+            tao_received=0.0,  # No TAO received for ALPHA expenses
+            tao_price_usd=0.0,
+            usd_proceeds=undelegate.usd,
+            cost_basis=total_basis,
+            realized_gain_loss=realized_gain_loss,
+            gain_type=gain_type,
+            consumed_lots=consumed_lots,
+            created_tao_lot_id="",  # No TAO lot created for direct ALPHA expenses
+            network_fee_tao=network_fee_tao,
+            network_fee_usd=network_fee_usd,
+            extrinsic_id=undelegate.extrinsic_id,
+            notes=f"Alpha expense to {undelegate.transfer_address.ss58[:8]}... at block {undelegate.block_number}"
+        )
 
-            # Create expense record
-            expense = Expense(
-                expense_id=self._next_expense_id(),
-                timestamp=undelegate.timestamp_unix,
-                block_number=undelegate.block_number,
-                transfer_address=undelegate.transfer_address.ss58 if undelegate.transfer_address else "",
-                alpha_disposed=alpha_rao_needed / RAO_PER_TAO,
-                tao_received=0.0,  # No TAO received for ALPHA expenses
-                tao_price_usd=0.0,
-                usd_proceeds=undelegate.usd,
-                cost_basis=total_basis,
-                realized_gain_loss=realized_gain_loss,
-                gain_type=gain_type,
-                consumed_lots=consumed_lots,
-                created_tao_lot_id="",  # No TAO lot created for direct ALPHA expenses
-                network_fee_tao=network_fee_tao,
-                network_fee_usd=network_fee_usd,
-                extrinsic_id=undelegate.extrinsic_id,
-                notes=f"Alpha expense to {undelegate.transfer_address.ss58[:8]}... at block {undelegate.block_number}"
-            )
-
-            expenses.append(expense)
-
-        return expenses
+        return expense
 
     def _update_consumed_alpha_lots_for_expenses(self, expenses: list, alpha_lots: list):
         """Update income sheet with consumed lot amounts from expenses.
@@ -1481,69 +1528,9 @@ class ContractTracker(BittensorTracker):
 
         return deposits, tao_lots
 
-    def process_tao_transfers(self, start_time: Optional[int] = None, end_time: Optional[int] = None) -> list:
-        """Process TAO transfers over the specified time period.
 
-        Args:
-            start_time: Start timestamp (uses last processed if None)
-            end_time: End timestamp (defaults to now if None)
 
-        Returns:
-            list: List of processed transfer lots.
-        """
-        start_time, end_time = self._resolve_time_window(
-            "TAO transfers",
-            self.last_transfer_timestamp,
-            start_time,
-            end_time
-        )
-
-        # Skip if already fully processed
-        if start_time is None:
-            print("ℹ️  TAO transfers already fully processed for requested time range")
-            return []
-
-        # Get transfers from wallet to brokerage (using receiver filter)
-        brokerage_transfers = self.wallet_client.get_transfers(
-            account_address=self.coldkey_ss58,
-            start_time=start_time,
-            end_time=end_time,
-            sender=self.coldkey_ss58,
-            receiver=self.brokerage_ss58
-        )
-
-        if not brokerage_transfers:
-            print("ℹ️  No new TAO transfers found")
-            return []
-
-        # Pre-fetch TAO prices for actual transfer timestamps to avoid individual API calls
-        min_ts = min(t.timestamp_unix for t in brokerage_transfers)
-        max_ts = max(t.timestamp_unix for t in brokerage_transfers)
-        print(f"  Pre-fetching TAO prices for actual event timestamps...")
-        self.price_client.get_prices_in_range('TAO', min_ts, max_ts)
-
-        # Create transfers
-        tao_transfers = self._create_tao_transfers(brokerage_transfers)
-
-        if tao_transfers:
-            # Write transfers to sheet
-            transfer_rows = [transfer.to_sheet_row() for transfer in tao_transfers]
-        if tao_transfers:
-            # Add to memory
-            self.transfers.extend(tao_transfers)
-
-            # Note: tao_lots returned from _create_tao_transfers are already updated in memory
-
-            max_ts = max(transfer.timestamp for transfer in tao_transfers)
-            self.last_transfer_timestamp = max_ts
-
-            print(f"\n✓ Created {len(tao_transfers)} TAO transfers")
-        else:
-            print("ℹ️  No valid TAO transfers to process")
-
-        return tao_transfers
-
-    def _create_tao_transfers(self, transfers: list[TaoStatsTransfer]) -> tuple[list[TaoTransfer], list[TaoLotRow]]:
+    def _create_tao_transfer(self, transfer: TaoStatsTransfer) -> tuple[TaoTransfer, TaoLotRow]:
         """Create TaoTransfer records from transfer events.
         
         Args:
@@ -1552,70 +1539,65 @@ class ContractTracker(BittensorTracker):
         Returns:
             Tuple of (transfers list, tao_lots list)
         """
-        tao_transfers = []
-        for transfer in transfers:
-            # Total outflow = transfer amount + fee (work in RAO to avoid floating point errors)
-            total_outflow_rao = transfer.amount_rao + transfer.fee_rao
+        # Total outflow = transfer amount + fee (work in RAO to avoid floating point errors)
+        total_outflow_rao = transfer.amount_rao + transfer.fee_rao
 
-            # Consume TAO lots for total outflow (amount + fee)
-            # Both the transfer amount and fee reduce the wallet balance
-            consumed_lots, total_basis = self._consume_tao_lots(
-                total_outflow_rao,
-                transfer.timestamp_unix
+        # Consume TAO lots for total outflow (amount + fee)
+        # Both the transfer amount and fee reduce the wallet balance
+        consumed_lots, total_basis = self._consume_tao_lots(
+            total_outflow_rao,
+            transfer.timestamp_unix
+        )
+
+        if not consumed_lots:
+            raise ValueError(
+                f"Insufficient TAO lots to cover transfer of {total_outflow_rao / RAO_PER_TAO:.4f} TAO "
+                f"at block {transfer.block_number}. This indicates missing TAO lots or incorrect lot consumption."
             )
 
-            if not consumed_lots:
-                raise ValueError(
-                    f"Insufficient TAO lots to cover transfer of {total_outflow_rao / RAO_PER_TAO:.4f} TAO "
-                    f"at block {transfer.block_number}. This indicates missing TAO lots or incorrect lot consumption."
-                )
-
-            # Get TAO price for valuation
-            tao_price_usd = self.price_client.get_price_at_timestamp('TAO', transfer.timestamp_unix)
-            if not tao_price_usd:
-                raise PriceNotAvailableError(
-                    f"Could not get TAO price for transfer at block {transfer.block_number} "
-                    f"(timestamp: {transfer.timestamp_unix})"
-                )
-
-            # Calculate proceeds (only for the amount transferred to brokerage, not fees)
-            usd_proceeds = transfer.amount_tao * tao_price_usd
-
-            # Split cost basis proportionally between transfer and fee
-            fee_cost_basis = (total_basis * (transfer.fee_rao / total_outflow_rao)) if total_outflow_rao > 0 else 0.0
-
-            # Calculate gain/loss
-            realized_gain_loss = usd_proceeds - total_basis
-
-            # Determine gain type (short-term if held < 1 year)
-            oldest_lot_timestamp = min(c.acquisition_timestamp for c in consumed_lots)
-            holding_period_days = (transfer.timestamp_unix - oldest_lot_timestamp) / (24 * 60 * 60)
-            gain_type = GainType.LONG_TERM if holding_period_days >= 365 else GainType.SHORT_TERM
-
-            # Create transfer record
-            tao_transfer = TaoTransfer(
-                transfer_id=self._next_transfer_id(),
-                timestamp=transfer.timestamp_unix,
-                block_number=transfer.block_number,
-                tao_amount=transfer.amount_tao,
-                tao_price_usd=tao_price_usd,
-                usd_proceeds=usd_proceeds,
-                cost_basis=total_basis,
-                realized_gain_loss=realized_gain_loss,
-                gain_type=gain_type,
-                consumed_tao_lots=consumed_lots,
-                transaction_hash=transfer.transaction_hash or "",
-                extrinsic_id=transfer.extrinsic_id or "",
-                total_outflow_tao=transfer.amount_tao + transfer.fee_tao,
-                fee_tao=transfer.fee_tao,
-                fee_cost_basis_usd=fee_cost_basis,
-                notes=f"TAO transfer to brokerage at block {transfer.block_number}"
+        # Get TAO price for valuation
+        tao_price_usd = self.price_client.get_price_at_timestamp('TAO', transfer.timestamp_unix)
+        if not tao_price_usd:
+            raise PriceNotAvailableError(
+                f"Could not get TAO price for transfer at block {transfer.block_number} "
+                f"(timestamp: {transfer.timestamp_unix})"
             )
 
-            tao_transfers.append(tao_transfer)
+        # Calculate proceeds (only for the amount transferred to brokerage, not fees)
+        usd_proceeds = transfer.amount_tao * tao_price_usd
 
-        return tao_transfers
+        # Split cost basis proportionally between transfer and fee
+        fee_cost_basis = (total_basis * (transfer.fee_rao / total_outflow_rao)) if total_outflow_rao > 0 else 0.0
 
+        # Calculate gain/loss
+        realized_gain_loss = usd_proceeds - total_basis
+
+        # Determine gain type (short-term if held < 1 year)
+        oldest_lot_timestamp = min(c.acquisition_timestamp for c in consumed_lots)
+        holding_period_days = (transfer.timestamp_unix - oldest_lot_timestamp) / (24 * 60 * 60)
+        gain_type = GainType.LONG_TERM if holding_period_days >= 365 else GainType.SHORT_TERM
+
+        # Create transfer record
+        tao_transfer = TaoTransfer(
+            transfer_id=self._next_transfer_id(),
+            timestamp=transfer.timestamp_unix,
+            block_number=transfer.block_number,
+            tao_amount=transfer.amount_tao,
+            tao_price_usd=tao_price_usd,
+            usd_proceeds=usd_proceeds,
+            cost_basis=total_basis,
+            realized_gain_loss=realized_gain_loss,
+            gain_type=gain_type,
+            consumed_tao_lots=consumed_lots,
+            transaction_hash=transfer.transaction_hash or "",
+            extrinsic_id=transfer.extrinsic_id or "",
+            total_outflow_tao=transfer.amount_tao + transfer.fee_tao,
+            fee_tao=transfer.fee_tao,
+            fee_cost_basis_usd=fee_cost_basis,
+            notes=f"TAO transfer to brokerage at block {transfer.block_number}"
+        )
+
+        return tao_transfer
 
     def _consume_tao_lots(
         self, 
@@ -1887,6 +1869,29 @@ class ContractTracker(BittensorTracker):
                     print(f"  ✓ {name} sheet already empty")
             except Exception as e:
                 print(f"  Warning: Could not clear {name} sheet: {e}")
+        
+        # Clear in-memory data to match cleared sheets
+        self.alpha_lots = []
+        self.tao_lots = []
+        self.sales = []
+        self.expenses = []
+        self.deposits = []
+        self.transfers = []
+        
+        # Reset timestamps so processing starts fresh
+        self.last_contract_income_timestamp = 0
+        self.last_staking_income_timestamp = 0
+        self.last_income_timestamp = 0
+        self.last_deposit_timestamp = 0
+        self.last_disposal_timestamp = 0
+        
+        # Reset ID counters
+        self.alpha_lot_counter = 1
+        self.sale_counter = 1
+        self.expense_counter = 1
+        self.deposit_counter = 1
+        self.tao_lot_counter = 1
+        self.transfer_counter = 1
         
         print("✓ All sheets cleared\n")
 

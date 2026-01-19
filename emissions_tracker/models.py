@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Callable
 import json
 
 
@@ -338,6 +338,26 @@ class GainType(Enum):
     """Capital gain type based on holding period."""
     SHORT_TERM = "Short-term"
     LONG_TERM = "Long-term"
+
+
+class DisposalType(Enum):
+    """Type of disposal event for chronological processing."""
+    SALE = "sale"
+    EXPENSE = "expense"
+    TRANSFER = "transfer"
+
+
+@dataclass
+class DisposalEvent:
+    """Wrapper to sort different disposal types chronologically.
+    
+    Used to process sales, expenses, and transfers in timestamp order
+    rather than by type, ensuring correct lot consumption.
+    """
+    timestamp: int
+    disposal_type: DisposalType
+    event: Any  # TaoStatsDelegation or TaoStatsTransfer
+    process: Callable[[], Any]  # Callable that processes this event and returns the result
 
 
 @dataclass
