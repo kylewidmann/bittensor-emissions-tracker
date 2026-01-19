@@ -691,9 +691,7 @@ class ContractTracker(BittensorTracker):
         all_delegations, all_transfers = self._fetch_disposal_events(disposal_start, disposal_end)
         
         # Step 3: Create disposal events from fetched data
-        disposal_events = self._create_disposal_events(
-            all_delegations, all_transfers, disposal_start, disposal_end
-        )
+        disposal_events = self._create_disposal_events(all_delegations, all_transfers)
         
         if not disposal_events:
             print("ℹ️  No new disposal events found")
@@ -755,8 +753,6 @@ class ContractTracker(BittensorTracker):
         Args:
             all_delegations: All UNDELEGATE events in the time range
             all_transfers: All transfers in the time range
-            start_time: Start timestamp (for validation)
-            end_time: End timestamp (for validation)
         
         Returns:
             List of DisposalEvent objects with process callbacks
