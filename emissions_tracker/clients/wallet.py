@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
 
+from emissions_tracker.models import TaoStatsDelegation, TaoStatsStakeBalance, TaoStatsTransfer
+
 
 class WalletClientInterface(ABC):
     """Abstract interface for wallet/blockchain data clients."""
@@ -19,7 +21,7 @@ class WalletClientInterface(ABC):
         end_time: int,
         sender: Optional[str] = None,
         receiver: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
+    ) -> List[TaoStatsTransfer]:
         """
         Fetch TAO transfers for an account.
         
@@ -31,14 +33,7 @@ class WalletClientInterface(ABC):
             receiver: Optional receiver filter
             
         Returns:
-            List of transfer dicts with keys:
-                - timestamp: int
-                - from: str (SS58)
-                - to: str (SS58)
-                - amount: float (TAO)
-                - block_number: int
-                - transaction_hash: str
-                - tao_price_usd: Optional[float]
+            List of TaoStatsTransfer objects
         """
         pass
     
@@ -49,8 +44,10 @@ class WalletClientInterface(ABC):
         delegate: str,
         nominator: str,
         start_time: int,
-        end_time: int
-    ) -> List[Dict[str, Any]]:
+        end_time: int,
+        is_transfer: Optional[bool] = None,
+        action: Optional[str] = None
+    ) -> List[TaoStatsDelegation]:
         """
         Fetch delegation events (DELEGATE/UNDELEGATE).
         
@@ -60,6 +57,10 @@ class WalletClientInterface(ABC):
             nominator: Coldkey SS58
             start_time: Unix timestamp start
             end_time: Unix timestamp end
+            is_transfer: If True, only return DELEGATE events with transfers.
+                        If False, only return events without transfers.
+                        If None, return all events.
+            action: Optional action filter ('DELEGATE', 'UNDELEGATE', or None for all)
             
         Returns:
             List of delegation dicts with keys:
@@ -86,7 +87,7 @@ class WalletClientInterface(ABC):
         coldkey: str,
         start_time: int,
         end_time: int
-    ) -> List[Dict[str, Any]]:
+    ) -> List[TaoStatsStakeBalance]:
         """
         Fetch historical stake balance snapshots.
         

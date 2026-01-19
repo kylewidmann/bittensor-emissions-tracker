@@ -10,10 +10,18 @@ Tracks cryptocurrency income and disposals for tax accounting:
 """
 
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 
 from emissions_tracker.clients.taostats import TaoStatsAPIClient
-from emissions_tracker.tracker import BittensorEmissionTracker
+from emissions_tracker.config import TrackerSettings
+from emissions_tracker.models import SourceType
+from emissions_tracker.trackers.contract_tracker import ContractTracker
+
+
+def parse_date(date_str: str) -> int:
+    """Parse a YYYY-MM-DD date string to Unix timestamp (start of day UTC)."""
+    dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    return int(dt.timestamp())
 
 
 def run():
@@ -22,23 +30,38 @@ def run():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Run daily check (process all recent transactions)
+  # Run daily check (continue from last processed timestamp)
   python -m emissions_tracker.main --mode auto
 
-  # Process only income
-  python -m emissions_tracker.main --mode income --lookback 30
+  # Process a specific date range
+  python -m emissions_tracker.main --mode auto --start-date 2025-01-01 --end-date 2025-01-31
 
-  # Process only sales
-  python -m emissions_tracker.main --mode sales --lookback 14
+  # Process only income for a specific period
+  python -m emissions_tracker.main --mode income --start-date 2025-01-01
+
+  # Process only sales (continues from last processed)
+  python -m emissions_tracker.main --mode sales
 
   # Process only transfers  
-  python -m emissions_tracker.main --mode transfers --lookback 7
+  python -m emissions_tracker.main --mode transfers
 
   # Generate monthly journal entries
   python -m emissions_tracker.main --mode journal --month 2025-11
+  
+  # Generate journal entries for entire year
+  python -m emissions_tracker.main --mode journal --year 2025
+  
+  # Regenerate journal entries for entire year
+  python -m emissions_tracker.main --mode journal --year 2025 --regenerate
 
-  # Run with custom lookback period
-  python -m emissions_tracker.main --mode auto --lookback 30
+  # Initial seeding - process from specific start date
+  python -m emissions_tracker.main --mode auto --start-date 2024-11-01
+  
+  # Regenerate all data (clear and reprocess from date)
+  python -m emissions_tracker.main --mode auto --start-date 2024-01-01 --regenerate
+  
+  # Regenerate only transfers from date
+  python -m emissions_tracker.main --mode transfers --start-date 2024-01-01 --regenerate
         """
     )
     
@@ -56,11 +79,18 @@ Examples:
     )
     
     parser.add_argument(
-        '--lookback',
-        type=int,
+        '--start-date',
+        type=str,
         default=None,
-        help=('Days to look back for transactions. When omitted, the tracker '
-              'continues from the last processed timestamp; required for first-time runs.')
+        help=('Start date in YYYY-MM-DD format. When omitted, continues from the '
+              'last processed timestamp. Required for first-time runs.')
+    )
+    
+    parser.add_argument(
+        '--end-date',
+        type=str,
+        default=None,
+        help='End date in YYYY-MM-DD format. Defaults to now if not specified.'
     )
     
     parser.add_argument(
@@ -70,58 +100,96 @@ Examples:
         help='Month for journal entries in YYYY-MM format (default: last month)'
     )
     
+    parser.add_argument(
+        '--year',
+        type=int,
+        default=None,
+        help='Year for journal entries (generates all 12 months)'
+    )
+    
+    parser.add_argument(
+        '--regenerate',
+        action='store_true',
+        help='Clear existing data before processing (forces full regeneration)'
+    )
+    
     args = parser.parse_args()
+    
+    # Parse date arguments
+    start_time = parse_date(args.start_date) if args.start_date else None
+    end_time = parse_date(args.end_date) if args.end_date else None
+    
+    # Load configuration
+    config = TrackerSettings()
     
     # Initialize clients
     print("Initializing TaoStats API client...")
     taostats_client = TaoStatsAPIClient()
     
-    # Initialize tracker
-    print("Initializing tracker...")
-    tracker = BittensorEmissionTracker(
+    # Initialize tracker for smart contract emissions
+    print("Initializing Smart Contract tracker...")
+    tracker = ContractTracker(
         price_client=taostats_client,
         wallet_client=taostats_client
     )
     
+    # Handle regeneration if requested
+    if args.regenerate:
+        if not start_time:
+            print("Error: --start-date is required when using --regenerate to create opening lots")
+            return 1
+        
+        tracker.clear_all_sheets()
+        tracker.create_opening_lots(start_time)
+    
     # Execute based on mode
     if args.mode == 'auto':
-        tracker.run_daily_check(days_back=args.lookback)
+        tracker.run(start_time=start_time, end_time=end_time)
         
     elif args.mode == 'income':
-        income_window = (
-            f"last {args.lookback} days" if args.lookback is not None else "the period since your last run"
-        )
-        print(f"\nProcessing income for {income_window}...")
-        tracker.process_contract_income(days_back=args.lookback)
-        tracker.process_staking_emissions(days_back=args.lookback)
+        window_desc = _describe_window(args.start_date, args.end_date)
+        print(f"\nProcessing income for {window_desc}...")
+        tracker.process_contract_income(start_time=start_time, end_time=end_time)
+        tracker.process_staking_emissions(start_time=start_time, end_time=end_time)
         
     elif args.mode == 'sales':
-        sales_window = (
-            f"last {args.lookback} days" if args.lookback is not None else "the period since your last run"
-        )
-        print(f"\nProcessing sales for {sales_window}...")
-        tracker.process_sales(days_back=args.lookback)
+        window_desc = _describe_window(args.start_date, args.end_date)
+        print(f"\nProcessing sales for {window_desc}...")
+        tracker.process_alpha_sales(start_time=start_time, end_time=end_time)
         
     elif args.mode == 'transfers':
-        transfer_window = (
-            f"last {args.lookback} days" if args.lookback is not None else "the period since your last run"
-        )
-        print(f"\nProcessing transfers for {transfer_window}...")
-        tracker.process_transfers(days_back=args.lookback)
+        window_desc = _describe_window(args.start_date, args.end_date)
+        print(f"\nProcessing transfers for {window_desc}...")
+        tracker.process_tao_transfers(start_time=start_time, end_time=end_time)
         
     elif args.mode == 'journal':
-        month = args.month
-        if not month:
-            # Default to last month
-            today = datetime.now()
-            if today.month == 1:
-                month = f"{today.year - 1}-12"
-            else:
-                month = f"{today.year}-{today.month - 1:02d}"
-        print(f"\nGenerating journal entries for {month}...")
-        tracker.generate_monthly_journal_entries(month)
+        if args.year:
+            print(f"\nGenerating journal entries for all of {args.year}...")
+            tracker.generate_yearly_journal_entries(args.year)
+        else:
+            month = args.month
+            if not month:
+                # Default to last month
+                today = datetime.now()
+                if today.month == 1:
+                    month = f"{today.year - 1}-12"
+                else:
+                    month = f"{today.year}-{today.month - 1:02d}"
+            print(f"\nGenerating journal entries for {month}...")
+            tracker.generate_monthly_journal_entries(month)
     
     print("\n✓ Done!")
+
+
+def _describe_window(start_date: str | None, end_date: str | None) -> str:
+    """Generate a human-readable description of the time window."""
+    if start_date and end_date:
+        return f"{start_date} to {end_date}"
+    elif start_date:
+        return f"{start_date} to now"
+    else:
+        return "the period since your last run"
+
 
 if __name__ == "__main__":
     run()

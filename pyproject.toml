@@ -27,6 +27,7 @@ mypy = "^1.9.0"
 
 [tool.poetry.scripts]
 track-emissions = "emissions_tracker.main:run"
+track-mining = "emissions_tracker.mining:run"
 
 [build-system]
 requires = ["poetry-core"]

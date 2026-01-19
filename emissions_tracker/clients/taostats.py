@@ -10,6 +10,13 @@ from emissions_tracker.clients.price import PriceClient
 from emissions_tracker.clients.wallet import WalletClientInterface
 from emissions_tracker.config import TaoStatsSettings
 from emissions_tracker.exceptions import PriceNotAvailableError
+from emissions_tracker.models import (
+    TaoStatsAccountHistory,
+    TaoStatsTransfer,
+    TaoStatsDelegation,
+    TaoStatsStakeBalance,
+    TaoStatsAddress
+)
 
 
 class TaoStatsAPIClient(WalletClientInterface, PriceClient):
@@ -28,6 +35,7 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
         self._last_call_time = None
         self._price_bucket_cache = {}   # keyed by 15m bucket
         self._price_window_cache = {}   # keyed by (start, end)
+        self._rate_limit_seconds = self.config.rate_limit_seconds  # Configurable rate limit
 
     @property
     def name(self) -> str:
@@ -40,19 +48,19 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
         giveup=lambda e: e.response is None or e.response.status_code != 429,
         factor=6
     )
-    def _fetch_with_pagination(self, url: str, params: dict, per_page: int = 50, context: str = "") -> List[Dict[str, Any]]:
+    def _fetch_with_pagination(self, url: str, params: dict, per_page: int = 200, context: str = "") -> List[Dict[str, Any]]:
         """Helper to fetch all pages from an endpoint with throttling and lightweight progress."""
         all_data = []
         page = 1
         while True:
-            if self._last_call_time and time.time() - self._last_call_time < 12:
-                sleep_time = 12 - (time.time() - self._last_call_time)
-                time.sleep(sleep_time)  # Pace at 12s to stay under 5 req/min
+            if self._last_call_time and time.time() - self._last_call_time < self._rate_limit_seconds:
+                sleep_time = self._rate_limit_seconds - (time.time() - self._last_call_time)
+                time.sleep(sleep_time)  # Enforce configured rate limit
             params['page'] = page
-            params['per_page'] = per_page
+            params['limit'] = per_page
             if page == 1 or page % 5 == 0:
                 label = context or url
-                print(f"  Fetching {label}, page {page} (per_page={per_page})")
+                print(f"  Fetching {label}, page {page} (limit={per_page})")
             response = requests.get(url, headers=self.headers, params=params)
             response.raise_for_status()
             data = response.json()
@@ -74,37 +82,36 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
         end_time: int,
         sender: Optional[str] = None,
         receiver: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
+    ) -> List[TaoStatsTransfer]:
         """Fetch TAO transfers via Taostats API."""
         try:
             url = f"{self.base_url}/transfer/v1"
             params = {
                 "address": account_address,
-                "start_time": start_time,
-                "end_time": end_time
+                "timestamp_start": start_time,
+                "timestamp_end": end_time,
+                "order": "timestamp_asc"
             }
             if sender:
-                params["sender"] = sender
+                params["from"] = sender
             if receiver:
-                params["receiver"] = receiver
+                params["to"] = receiver
             
             transfer_data = self._fetch_with_pagination(url, params, per_page=500, context="transfers")
             
             transfers = []
             for t in transfer_data:
-                timestamp = int(datetime.fromisoformat(t['timestamp'].replace('Z', '+00:00')).timestamp())
-                amount = int(t['amount']) / 1e9  # RAO to TAO
-                
-                transfers.append({
-                    'timestamp': timestamp,
-                    'from': t['from']['ss58'],
-                    'to': t['to']['ss58'],
-                    'amount': amount,
-                    'block_number': t['block_number'],
-                    'transaction_hash': t['transaction_hash'],
-                    'extrinsic_id': t['extrinsic_id'],
-                    'tao_price_usd': None  # Will be fetched separately if needed
-                })
+                transfer = TaoStatsTransfer(
+                    block_number=t['block_number'],
+                    timestamp=t['timestamp'],
+                    transaction_hash=t['transaction_hash'],
+                    extrinsic_id=t['extrinsic_id'],
+                    amount=t['amount'],
+                    fee=t.get('fee'),
+                    from_address=TaoStatsAddress(ss58=t['from']['ss58'], hex=t['from']['hex']),
+                    to_address=TaoStatsAddress(ss58=t['to']['ss58'], hex=t['to']['hex'])
+                )
+                transfers.append(transfer)
             
             return transfers
         except Exception as e:
@@ -117,43 +124,55 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
         delegate: str,
         nominator: str,
         start_time: int,
-        end_time: int
-    ) -> List[Dict[str, Any]]:
-        """Fetch delegation/stake events via Taostats API."""
+        end_time: int,
+        is_transfer: Optional[bool] = None,
+        action: Optional[str] = None
+    ) -> List[TaoStatsDelegation]:
+        """Fetch delegation/stake events via Taostats API.
+        
+        Args:
+            is_transfer: If True, only return DELEGATE events with transfers to another address.
+                        If False, only return events without transfers.
+                        If None, return all events.
+            action: Optional action filter ('DELEGATE', 'UNDELEGATE', or None for all)
+        """
         try:
             url = f"{self.base_url}/delegation/v1"
             params = {
-                "action": "all",
+                "action": action.lower() if action else "all",
                 "netuid": netuid,
                 "delegate": delegate,
                 "nominator": nominator,
-                "start_time": start_time,
-                "end_time": end_time
+                "timestamp_start": start_time,
+                "timestamp_end": end_time,
+                "order": "timestamp_asc"
             }
+            if is_transfer is not None:
+                params["is_transfer"] = "true" if is_transfer else "false"
 
             delegation_data = self._fetch_with_pagination(url, params, per_page=500, context="delegations")
             
             delegations = []
             for d in delegation_data:
-                timestamp = int(datetime.fromisoformat(d['timestamp'].replace('Z', '+00:00')).timestamp())
-                tao_amount = float(d['amount']) / 1e9  # RAO to TAO
-                alpha_amount = float(d['alpha']) / 1e9  # RAO to ALPHA
-                
-                delegations.append({
-                    'timestamp': timestamp,
-                    'action': d['action'],
-                    'alpha': alpha_amount,
-                    'tao_amount': tao_amount,
-                    'usd': float(d['usd']),
-                    'alpha_price_in_usd': float(d['alpha_price_in_usd']) if d.get('alpha_price_in_usd') else None,
-                    'alpha_price_in_tao': float(d['alpha_price_in_tao']) if d.get('alpha_price_in_tao') else None,
-                    'slippage': float(d.get('slippage')) if d.get('slippage') is not None else 0.0,
-                    'block_number': d['block_number'],
-                    'extrinsic_id': d['extrinsic_id'],
-                    'is_transfer': d.get('is_transfer'),
-                    'transfer_address': d.get('transfer_address', {}).get('ss58') if d.get('transfer_address') else None,
-                    'fee': float(d.get('fee', 0)) / 1e9
-                })
+                delegation = TaoStatsDelegation(
+                    block_number=int(d['block_number']),
+                    timestamp=d['timestamp'],
+                    action=d['action'],
+                    nominator=TaoStatsAddress(ss58=d['nominator']['ss58'], hex=d['nominator']['hex']),
+                    delegate=TaoStatsAddress(ss58=d['delegate']['ss58'], hex=d['delegate']['hex']),
+                    netuid=int(d['netuid']),
+                    amount=int(d['amount']),
+                    alpha=int(d['alpha']),
+                    usd=float(d['usd']),
+                    alpha_price_in_usd=d.get('alpha_price_in_usd'),
+                    alpha_price_in_tao=d.get('alpha_price_in_tao'),
+                    slippage=d.get('slippage'),
+                    extrinsic_id=d['extrinsic_id'],
+                    is_transfer=d.get('is_transfer'),
+                    transfer_address=TaoStatsAddress(ss58=d['transfer_address']['ss58'], hex=d['transfer_address']['hex']) if d.get('transfer_address') else None,
+                    fee=d.get('fee')
+                )
+                delegations.append(delegation)
             
             return delegations
         except Exception as e:
@@ -168,7 +187,7 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
         coldkey: str,
         start_time: int,
         end_time: int
-    ) -> List[Dict[str, Any]]:
+    ) -> List[TaoStatsStakeBalance]:
         """Fetch historical stake balance snapshots via Taostats API."""
         try:
             url = f"{self.base_url}/dtao/stake_balance/history/v1"
@@ -176,8 +195,8 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
                 "netuid": netuid,
                 "hotkey": hotkey,
                 "coldkey": coldkey,
-                "start_time": start_time,
-                "end_time": end_time,
+                "timestamp_start": start_time,
+                "timestamp_end": end_time,
                 "order": "timestamp_asc"
             }
 
@@ -185,19 +204,66 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
             
             balances = []
             for h in history_data:
-                timestamp = int(datetime.fromisoformat(h['timestamp'].replace('Z', '+00:00')).timestamp())
-                
-                balances.append({
-                    'timestamp': timestamp,
-                    'block_number': h['block_number'],
-                    'alpha_balance': int(h['balance']),  # Keep in RAO for precision
-                    'tao_equivalent': int(h['balance_as_tao'])  # Keep in RAO
-                })
+                balance = TaoStatsStakeBalance(
+                    block_number=h['block_number'],
+                    timestamp=h['timestamp'],
+                    hotkey_name=h['hotkey_name'],
+                    hotkey=TaoStatsAddress(ss58=h['hotkey']['ss58'], hex=h['hotkey']['hex']),
+                    coldkey=TaoStatsAddress(ss58=h['coldkey']['ss58'], hex=h['coldkey']['hex']),
+                    netuid=h['netuid'],
+                    balance=h['balance'],
+                    balance_as_tao=h['balance_as_tao']
+                )
+                balances.append(balance)
             
             return balances
         except Exception as e:
             print(f"Taostats API error in get_stake_balance_history: {e}")
             return []
+
+    def get_account_history(
+        self,
+        address: str,
+        start_time: int,
+        end_time: int
+    ) -> List[TaoStatsAccountHistory]:
+        """Fetch historical account balance snapshots via Taostats API.
+        
+        Returns daily account balance snapshots at midnight GMT.
+        """
+        url = f"{self.base_url}/account/history/v1"
+        params = {
+            "address": address,
+            "timestamp_start": start_time,
+            "timestamp_end": end_time,
+            "order": "timestamp_asc"
+        }
+
+        history_data = self._fetch_with_pagination(url, params, per_page=200, context="account_history")
+        
+        histories = []
+        for h in history_data:
+            history = TaoStatsAccountHistory(
+                address=TaoStatsAddress(ss58=h['address']['ss58'], hex=h['address']['hex']),
+                network=h['network'],
+                block_number=h['block_number'],
+                timestamp=h['timestamp'],
+                rank=h.get('rank'),
+                balance_free=h['balance_free'],
+                balance_reserved=h.get('balance_reserved', '0'),
+                balance_staked=h['balance_staked'],
+                balance_staked_alpha_as_tao=h.get('balance_staked_alpha_as_tao'),
+                balance_staked_root=h.get('balance_staked_root'),
+                root_claim_type=h.get('root_claim_type', ''),
+                balance_liquidity=h.get('balance_liquidity', '0'),
+                balance_total=h['balance_total'],
+                created_on_date=h.get('created_on_date'),
+                created_on_network=h.get('created_on_network'),
+                coldkey_swap=h.get('coldkey_swap')
+            )
+            histories.append(history)
+        
+        return histories
 
     @backoff.on_exception(
         backoff.expo,
@@ -212,11 +278,21 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
             if symbol != 'TAO':
                 raise PriceNotAvailableError(f"Taostats API only supports TAO, got {symbol}")
             
-            # Cache by 15-minute bucket to avoid repeat API calls while keeping throttle
+            # Check 15-minute bucket cache first
             bucket = int(timestamp // 900)
             if bucket in self._price_bucket_cache:
                 return self._price_bucket_cache[bucket]
             
+            # Check if we have this timestamp in any cached price range
+            for (range_start, range_end), prices in self._price_window_cache.items():
+                if range_start <= timestamp <= range_end:
+                    # Find closest price in the cached range
+                    closest = min(prices, key=lambda p: abs(p['timestamp'] - timestamp))
+                    price = closest['price']
+                    self._price_bucket_cache[bucket] = price
+                    return price
+            
+            # Fall back to individual API call if not in cache
             buffer = 1800  # 30 minutes in seconds
             url = f"{self.base_url}/price/history/v1"
             params = {
@@ -224,7 +300,7 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
                 "timestamp_start": timestamp - buffer,
                 "timestamp_end": timestamp + buffer,
                 "order": "timestamp_asc",
-                "per_page": 50
+                "per_page": 200
             }
             
             data = self._fetch_with_pagination(url, params, context="price_at_timestamp")

@@ -1,7 +1,9 @@
 from pathlib import Path
 from typing import Optional
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
+
+from emissions_tracker.models import CostBasisMethod
 
 
 class TrackerSettings(BaseSettings):
@@ -10,17 +12,37 @@ class TrackerSettings(BaseSettings):
     # Wallet addresses
     brokerage_ss58: str = Field(..., alias="BROKER_SS58", description="Kraken deposit address")
     validator_ss58: str = Field(..., alias="VALIDATOR_SS58", description="Validator hotkey")
-    wallet_ss58: str = Field(..., alias="WALLET_SS58", description="Personal coldkey wallet")
+    payout_coldkey_ss58: str = Field(..., alias="PAYOUT_COLDKEY_SS58", description="Coldkey wallet that receives smart contract payouts")
     smart_contract_ss58: str = Field(..., alias="SMART_CONTRACT_SS58", description="Smart contract address for filtering contract income")
     
+    # Mining tracker addresses (optional)
+    miner_hotkey_ss58: str = Field(None, alias="MINER_HOTKEY_SS58", description="Miner hotkey for mining emissions tracking")
+    miner_coldkey_ss58: str = Field(None, alias="MINER_COLDKEY_SS58", description="Miner coldkey for mining emissions tracking (if different from payout_coldkey_ss58)")
+    
     # Google Sheets
-    tracker_sheet_id: str = Field(..., alias="TRACKER_SHEET_ID", description="Google Sheet ID for tracking")
+    tracker_sheet_id: str = Field(..., alias="TRACKER_SHEET_ID", description="Google Sheet ID for smart contract tracking")
+    mining_tracker_sheet_id: str = Field(None, alias="MINING_TRACKER_SHEET_ID", description="Google Sheet ID for mining emissions tracking")
     tracker_google_credentials: str = Field(..., alias="TRACKER_GOOGLE_CREDENTIALS", description="Path to Google service account credentials")
     
     # Subnet configuration
     subnet_id: int = Field(64, alias="SUBNET_ID", description="Bittensor subnet ID")
     # Lot consumption strategy: HIFO (default) or FIFO. HIFO = Highest cost-basis first.
-    lot_strategy: str = Field("HIFO", alias="LOT_STRATEGY", description="Lot consumption strategy: HIFO or FIFO")
+    lot_strategy: CostBasisMethod = Field(CostBasisMethod.HIFO, alias="LOT_STRATEGY", description="Lot consumption strategy: CostBasisMethod.HIFO or CostBasisMethod.FIFO")
+    
+    @field_validator('lot_strategy', mode='before')
+    @classmethod
+    def parse_lot_strategy(cls, v):
+        """Parse lot_strategy from string to enum if needed."""
+        if isinstance(v, str):
+            return CostBasisMethod[v.upper()]
+        return v
+    
+    # API rate limiting
+    taostats_rate_limit_seconds: float = Field(
+        1.0, 
+        alias="TAOSTATS_RATE_LIMIT_SECONDS",
+        description="Minimum seconds between TaoStats API requests (default: 1.0 for 60 req/min)"
+    )
 
 
 class WaveAccountSettings(BaseSettings):
@@ -36,6 +58,11 @@ class WaveAccountSettings(BaseSettings):
         "Staking Income - Alpha", 
         alias="WAVE_STAKING_INCOME_ACCOUNT",
         description="Wave account for staking/emissions income"
+    )
+    mining_income_account: str = Field(
+        "Mining Income - Alpha",
+        alias="WAVE_MINING_INCOME_ACCOUNT",
+        description="Wave account for mining emissions income"
     )
     
     # Asset accounts
@@ -54,10 +81,15 @@ class WaveAccountSettings(BaseSettings):
         alias="WAVE_TRANSFER_PROCEEDS_ACCOUNT",
         description="Wave account for USD proceeds when TAO is transferred off-chain"
     )
-    transfer_fee_account: str = Field(
-        "Blockchain Fees - TAO",
-        alias="WAVE_TRANSFER_FEE_ACCOUNT",
-        description="Wave account for on-chain transfer fees paid in TAO"
+    blockchain_fee_account: str = Field(
+        "Blockchain Fees",
+        alias="WAVE_BLOCKCHAIN_FEE_ACCOUNT",
+        description="Wave account for on-chain transaction fees (paid in ALPHA or TAO)"
+    )
+    business_checking_account: str = Field(
+        "Business Checking",
+        alias="WAVE_BUSINESS_CHECKING_ACCOUNT",
+        description="Wave account for business bank account (used for TAO purchases)"
     )
     
     # Gain/Loss accounts
@@ -91,6 +123,11 @@ class TaoStatsSettings(BaseSettings):
         "https://api.taostats.io/api",
         alias="TAOSTATS_BASE_URL",
         description="TaoStats API base URL"
+    )
+    rate_limit_seconds: float = Field(
+        1.0,
+        alias="TAOSTATS_RATE_LIMIT_SECONDS",
+        description="Minimum seconds between API requests (default: 1.0 for 60 req/min)"
     )
 
 
