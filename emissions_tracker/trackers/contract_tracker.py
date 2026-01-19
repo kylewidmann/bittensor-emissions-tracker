@@ -752,15 +752,15 @@ class ContractTracker(BittensorTracker):
                     new_status = lot.status.value
                     
                     updates.append({
-                        'range': f'Income!{rao_remaining_col}{lot.row}',
+                        'range': f'{rao_remaining_col}{lot.row}',
                         'values': [[new_remaining_rao]]
                     })
                     updates.append({
-                        'range': f'Income!{remaining_col}{lot.row}',
+                        'range': f'{remaining_col}{lot.row}',
                         'values': [[new_remaining]]
                     })
                     updates.append({
-                        'range': f'Income!{status_col}{lot.row}',
+                        'range': f'{status_col}{lot.row}',
                         'values': [[new_status]]
                     })
                     updated_count += 1
@@ -939,15 +939,15 @@ class ContractTracker(BittensorTracker):
                     new_status = lot.status.value
                     
                     updates.append({
-                        'range': f'Income!{rao_remaining_col}{lot.row}',
+                        'range': f'{rao_remaining_col}{lot.row}',
                         'values': [[new_remaining_rao]]
                     })
                     updates.append({
-                        'range': f'Income!{remaining_col}{lot.row}',
+                        'range': f'{remaining_col}{lot.row}',
                         'values': [[new_remaining]]
                     })
                     updates.append({
-                        'range': f'Income!{status_col}{lot.row}',
+                        'range': f'{status_col}{lot.row}',
                         'values': [[new_status]]
                     })
                     updated_count += 1
@@ -1511,15 +1511,15 @@ class ContractTracker(BittensorTracker):
                     new_status = lot.status.value
                     
                     updates.append({
-                        'range': f'TAO Lots!{rao_remaining_col}{lot.row}',
+                        'range': f'{rao_remaining_col}{lot.row}',
                         'values': [[new_remaining_rao]]
                     })
                     updates.append({
-                        'range': f'TAO Lots!{remaining_col}{lot.row}',
+                        'range': f'{remaining_col}{lot.row}',
                         'values': [[new_remaining]]
                     })
                     updates.append({
-                        'range': f'TAO Lots!{status_col}{lot.row}',
+                        'range': f'{status_col}{lot.row}',
                         'values': [[new_status]]
                     })
                     updated_count += 1
