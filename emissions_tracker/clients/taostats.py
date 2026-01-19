@@ -194,8 +194,8 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
                 "netuid": netuid,
                 "hotkey": hotkey,
                 "coldkey": coldkey,
-                "start_time": start_time,
-                "end_time": end_time,
+                "timestamp_start": start_time,
+                "timestamp_end": end_time,
                 "order": "timestamp_asc"
             }
 
@@ -233,11 +233,21 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
             if symbol != 'TAO':
                 raise PriceNotAvailableError(f"Taostats API only supports TAO, got {symbol}")
             
-            # Cache by 15-minute bucket to avoid repeat API calls while keeping throttle
+            # Check 15-minute bucket cache first
             bucket = int(timestamp // 900)
             if bucket in self._price_bucket_cache:
                 return self._price_bucket_cache[bucket]
             
+            # Check if we have this timestamp in any cached price range
+            for (range_start, range_end), prices in self._price_window_cache.items():
+                if range_start <= timestamp <= range_end:
+                    # Find closest price in the cached range
+                    closest = min(prices, key=lambda p: abs(p['timestamp'] - timestamp))
+                    price = closest['price']
+                    self._price_bucket_cache[bucket] = price
+                    return price
+            
+            # Fall back to individual API call if not in cache
             buffer = 1800  # 30 minutes in seconds
             url = f"{self.base_url}/price/history/v1"
             params = {

@@ -1005,7 +1005,6 @@ class ContractTracker(BittensorTracker):
             return []
 
         # Get all delegation events (DELEGATE and UNDELEGATE) in the same period
-        # TODO: Possibly just use stake balance differences without delegations?
         delegations = self.wallet_client.get_delegations(
             netuid=self.subnet_id,
             delegate=self.validator_ss58,
@@ -1013,6 +1012,10 @@ class ContractTracker(BittensorTracker):
             start_time=start_time,
             end_time=end_time
         )
+
+        # Pre-fetch all TAO prices for the time range to avoid individual API calls
+        print(f"  Pre-fetching TAO prices for date range...")
+        self.price_client.get_prices_in_range('TAO', start_time, end_time)
 
         # Calculate daily emissions
         alpha_lots = self._calculate_daily_emissions(stake_balances, delegations)
@@ -1157,6 +1160,10 @@ class ContractTracker(BittensorTracker):
             print("ℹ️  No new TAO deposits found")
             return []
 
+        # Pre-fetch all TAO prices for the time range to avoid individual API calls
+        print(f"  Pre-fetching TAO prices for date range...")
+        self.price_client.get_prices_in_range('TAO', start_time, end_time)
+
         # Create deposits and TAO lots
         deposits, tao_lots = self._create_tao_deposits(deposit_transfers)
 
@@ -1275,6 +1282,10 @@ class ContractTracker(BittensorTracker):
         if not brokerage_transfers:
             print("ℹ️  No new TAO transfers found")
             return []
+
+        # Pre-fetch all TAO prices for the time range to avoid individual API calls
+        print(f"  Pre-fetching TAO prices for date range...")
+        self.price_client.get_prices_in_range('TAO', start_time, end_time)
 
         # Create transfers
         tao_transfers, tao_lots = self._create_tao_transfers(brokerage_transfers)
