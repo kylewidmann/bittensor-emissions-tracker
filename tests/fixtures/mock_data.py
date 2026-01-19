@@ -11,7 +11,7 @@ from tests.utils import consume_alpha_lots_for_expense, consume_alpha_lots_for_s
 from datetime import datetime, timezone, timedelta
 
 # Test data directory
-TEST_DATA_DIR = Path(__file__).parent.parent / "data" / "all"
+TEST_DATA_DIR = Path(__file__).parent.parent / "data" / "contract"
 SECONDS_PER_DAY = 86400
 
 
