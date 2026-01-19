@@ -9,9 +9,9 @@ from emissions_tracker.clients.price import PriceClient
 from emissions_tracker.clients.wallet import WalletClientInterface
 from emissions_tracker.exceptions import PriceNotAvailableError
 from emissions_tracker.models import (
-    AlphaLot, AlphaLotConsumption, AlphaSale, CostBasisMethod, GainType, LotStatus,
-    SourceType, TaoLot, TaoLotConsumption, TaoStatsStakeBalance, TaoStatsTransfer,
-    TaoTransfer, TaoStatsDelegation
+    AlphaLot, AlphaLotConsumption, AlphaSale, CostBasisMethod, DisposalEvent,
+    DisposalType, GainType, LotStatus, SourceType, TaoLot, TaoLotConsumption,
+    TaoStatsStakeBalance, TaoStatsTransfer, TaoTransfer, TaoStatsDelegation
 )
 
 SECONDS_PER_DAY = 86400
@@ -610,3 +610,138 @@ class BittensorTracker:
                 alpha_lots.append(lot)
         
         return alpha_lots
+
+    # -------------------------------------------------------------------------
+    # Disposal Processing Framework
+    # -------------------------------------------------------------------------
+
+    def process_disposals(self, start_time: Optional[int] = None, end_time: Optional[int] = None):
+        """Process all disposal events (sales, expenses, transfers) in chronological order.
+        
+        This ensures correct lot consumption by processing events in the order they occurred,
+        rather than by type. A sale on Dec 15 won't consume lots needed for an expense on Nov 20.
+        
+        Args:
+            start_time: Start timestamp
+            end_time: End timestamp
+        """
+        # Step 1: Calculate single time window for all disposals
+        disposal_start, disposal_end = self._resolve_time_window(
+            "disposals", self.last_disposal_timestamp, start_time, end_time
+        )
+        if disposal_start is None:
+            print("ℹ️  No new disposal events to process")
+            return
+        
+        # Step 2: Fetch all events for the time window
+        all_delegations, all_transfers = self._fetch_disposal_events(disposal_start, disposal_end)
+        
+        # Step 3: Create disposal events from fetched data (subclass-specific)
+        disposal_events = self._create_disposal_events(all_delegations, all_transfers)
+        
+        if not disposal_events:
+            print("ℹ️  No new disposal events found")
+            return
+        
+        # Step 4: Sort by timestamp and process
+        disposal_events.sort(key=lambda x: x.timestamp)
+        
+        # Pre-fetch TAO prices for all events
+        min_ts = min(e.timestamp for e in disposal_events)
+        max_ts = max(e.timestamp for e in disposal_events)
+        print(f"  Pre-fetching TAO prices for disposal events...")
+        self.price_client.get_prices_in_range('TAO', min_ts, max_ts)
+        
+        # Step 5: Process each event in chronological order
+        self._execute_disposal_events(disposal_events)
+
+    def _fetch_disposal_events(
+        self,
+        start_time: int,
+        end_time: int
+    ) -> Tuple[List[TaoStatsDelegation], List[TaoStatsTransfer]]:
+        """Fetch all delegations and transfers for the time range.
+        
+        Args:
+            start_time: Start timestamp
+            end_time: End timestamp
+            
+        Returns:
+            Tuple of (all_delegations, all_transfers)
+        """
+        # Fetch all UNDELEGATE events (covers both sales and expenses)
+        all_delegations = self.wallet_client.get_delegations(
+            netuid=self.subnet_id,
+            delegate=self.validator_ss58,
+            nominator=self.coldkey_ss58,
+            start_time=start_time,
+            end_time=end_time,
+            action='UNDELEGATE'
+        )
+        
+        # Fetch all transfers (covers both fee transfers and brokerage transfers)
+        all_transfers = self.wallet_client.get_transfers(
+            account_address=self.coldkey_ss58,
+            start_time=start_time,
+            end_time=end_time,
+            sender=self.coldkey_ss58
+        )
+        
+        return all_delegations, all_transfers
+
+    @abstractmethod
+    def _create_disposal_events(
+        self,
+        all_delegations: List[TaoStatsDelegation],
+        all_transfers: List[TaoStatsTransfer],
+    ) -> List[DisposalEvent]:
+        """Create disposal events from fetched data.
+        
+        Subclasses implement this to define which disposal types apply to them.
+        
+        Args:
+            all_delegations: All UNDELEGATE events in the time range
+            all_transfers: All transfers in the time range
+        
+        Returns:
+            List of DisposalEvent objects with process callbacks
+        """
+        ...
+
+    def _execute_disposal_events(self, disposal_events: List[DisposalEvent]):
+        """Execute disposal events and update state.
+        
+        Args:
+            disposal_events: Sorted list of disposal events to process
+        """
+        sales_created = 0
+        expenses_created = 0
+        transfers_created = 0
+        
+        for disposal in disposal_events:
+            result = disposal.process()
+            
+            if disposal.disposal_type == DisposalType.SALE:
+                sale, tao_lot = result
+                self.sales.append(sale)
+                self.tao_lots.append(tao_lot)
+                sales_created += 1
+                
+            elif disposal.disposal_type == DisposalType.EXPENSE:
+                self.expenses.append(result)
+                expenses_created += 1
+                
+            elif disposal.disposal_type == DisposalType.TRANSFER:
+                self.transfers.append(result)
+                transfers_created += 1
+            
+            # Update unified disposal timestamp
+            self.last_disposal_timestamp = max(self.last_disposal_timestamp, disposal.timestamp)
+        
+        # Print summary
+        if sales_created:
+            print(f"\n✓ Created {sales_created} alpha sales")
+        if expenses_created:
+            print(f"✓ Created {expenses_created} expenses")
+        if transfers_created:
+            print(f"✓ Created {transfers_created} TAO transfers")
