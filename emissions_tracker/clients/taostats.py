@@ -92,9 +92,9 @@ class TaoStatsAPIClient(WalletClientInterface, PriceClient):
                 "order": "timestamp_asc"
             }
             if sender:
-                params["sender"] = sender
+                params["from"] = sender
             if receiver:
-                params["receiver"] = receiver
+                params["to"] = receiver
             
             transfer_data = self._fetch_with_pagination(url, params, per_page=500, context="transfers")
             

@@ -1135,18 +1135,12 @@ class ContractTracker(BittensorTracker):
             return []
 
         # Get incoming transfers TO the coldkey (deposits)
-        incoming_transfers = self.wallet_client.get_transfers(
+        deposit_transfers = self.wallet_client.get_transfers(
             account_address=self.coldkey_ss58,
             start_time=start_time,
             end_time=end_time,
             receiver=self.coldkey_ss58  # Filter for transfers TO coldkey
         )
-
-        # Filter out transfers from brokerage (those are withdrawals, not deposits we track)
-        deposit_transfers = [
-            t for t in incoming_transfers
-            if t.from_address.ss58 != self.brokerage_ss58
-        ]
 
         if not deposit_transfers:
             print("ℹ️  No new TAO deposits found")
