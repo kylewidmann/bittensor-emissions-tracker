@@ -538,21 +538,22 @@ class MiningTracker(BittensorTracker):
         print("✓ All sheets cleared\n")
 
     def create_opening_lots(self, start_time: int):
-        """Create opening ALPHA lot based on balance from the day before start_time.
+        """Create opening ALPHA and TAO lots based on balance from the day before start_time.
         
         Args:
             start_time: Unix timestamp of the first day to process.
-                       Opening lot will be created from balance at end of previous day.
+                       Opening lots will be created from balance at end of previous day.
         """
         print(f"\nCreating opening lots for start date...")
         self._create_opening_alpha_lot(start_time)
+        self._create_opening_tao_lot(start_time)
         print("✓ Opening lots created\n")
 
     def _create_opening_alpha_lot(self, start_time: int):
         """Create an opening ALPHA lot from the balance before start_time."""
         # Get balance at midnight before start_time
         previous_day_end = start_time - 1
-        
+
         stake_balances = self.wallet_client.get_stake_balance_history(
             netuid=self.subnet_id,
             hotkey=self.hotkey_ss58,
@@ -598,3 +599,58 @@ class MiningTracker(BittensorTracker):
         
         self.alpha_lots.append(lot)
         print(f"  Created opening ALPHA lot: {lot.lot_id} with {latest_balance.balance_as_alpha_float:.4f} ALPHA (${usd_fmv:.2f})")
+
+    def _create_opening_tao_lot(self, start_time: int):
+        """Create an opening TAO lot from account history before start_time.
+        
+        Args:
+            start_time: The start time for processing - will fetch balance from the previous day
+        """
+        print("  Creating opening TAO lot from account history...")
+        
+        # Get account balance from the previous day (end of day)
+        # Start: beginning of previous day (start_time - 2 days)
+        # End: end of previous day (start_time - 1 second)
+        prev_day_start = start_time - (2 * SECONDS_PER_DAY)
+        prev_day_end = start_time - 1
+        
+        account_histories = self.wallet_client.get_account_history(
+            address=self.coldkey_ss58,
+            start_time=prev_day_start,
+            end_time=prev_day_end
+        )
+        
+        if not account_histories:
+            print("    No account history found for previous day, skipping opening TAO lot")
+            return
+        
+        # Use the last balance from that day as the opening lot
+        opening_history = account_histories[-1]
+        tao_balance_rao = opening_history.balance_free_rao
+        
+        if tao_balance_rao == 0:
+            print("    Opening balance is zero, skipping opening TAO lot")
+            return
+        
+        # Get TAO price at that time
+        tao_price = self.price_client.get_price_at_timestamp('TAO', opening_history.timestamp_unix)
+        
+        tao_amount = tao_balance_rao / RAO_PER_TAO
+        usd_basis = tao_amount * tao_price
+        
+        lot = TaoLot(
+            lot_id=self._next_tao_lot_id(),
+            timestamp=opening_history.timestamp_unix,
+            block_number=opening_history.block_number,
+            rao=tao_balance_rao,
+            rao_remaining=tao_balance_rao,
+            usd_basis=usd_basis,
+            usd_per_tao=tao_price,
+            source_sale_id="",
+            extrinsic_id="",
+            status=LotStatus.OPEN,
+            notes="Opening balance lot"
+        )
+        
+        self.tao_lots.append(lot)
+        print(f"  Created opening TAO lot: {lot.lot_id} with {tao_amount:.4f} TAO (${usd_basis:.2f})")
