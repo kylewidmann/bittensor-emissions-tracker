@@ -519,7 +519,7 @@ class BittensorTracker:
             
             max_ts = max(lot.timestamp for lot in alpha_lots)
             self.last_staking_income_timestamp = max_ts
-            self.last_income_timestamp = max(self.last_contract_income_timestamp, self.last_staking_income_timestamp)
+            self.last_income_timestamp = max(self.last_income_timestamp, self.last_staking_income_timestamp)
             
             print(f"\n✓ Created {len(alpha_lots)} staking emission lots")
         else:
