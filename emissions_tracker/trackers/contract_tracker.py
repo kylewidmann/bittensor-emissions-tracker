@@ -1053,10 +1053,14 @@ class ContractTracker(BittensorTracker):
             end_ts,
         )
 
-        for entry in entries:
-            self.journal_sheet.append_row(entry.to_sheet_row())
-
-        self._print_journal_summary(year_month, len(entries), summary)
+        if entries:
+            # Batch write all entries at once
+            rows = [entry.to_sheet_row() for entry in entries]
+            self._append_rows_with_retry(self.journal_sheet, rows)
+            self._print_journal_summary(year_month, len(entries), summary)
+        else:
+            print(f"  No data for {year_month}, skipping")
+        
         return entries
 
     def generate_yearly_journal_entries(self, year: int) -> List[JournalEntry]:

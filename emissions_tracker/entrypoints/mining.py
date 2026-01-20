@@ -187,11 +187,7 @@ Examples:
     elif args.mode == 'journal':
         if args.year:
             print(f"\nGenerating journal entries for all of {args.year}...")
-            # MiningTracker doesn't have generate_yearly_journal_entries yet
-            # Generate each month individually
-            for month in range(1, 13):
-                year_month = f"{args.year}-{month:02d}"
-                tracker.generate_monthly_journal_entries(year_month)
+            tracker.generate_yearly_journal_entries(args.year)
         else:
             month = args.month
             if not month:

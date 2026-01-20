@@ -423,11 +423,89 @@ class MiningTracker(BittensorTracker):
             end_ts,
         )
 
-        for entry in entries:
-            self.journal_sheet.append_row(entry.to_sheet_row())
-
-        self._print_journal_summary(year_month, len(entries), summary)
+        if entries:
+            # Batch write all entries at once
+            rows = [entry.to_sheet_row() for entry in entries]
+            self._append_rows_with_retry(self.journal_sheet, rows)
+            self._print_journal_summary(year_month, len(entries), summary)
+        else:
+            print(f"  No data for {year_month}, skipping")
+        
         return entries
+
+    def generate_yearly_journal_entries(self, year: int) -> List[JournalEntry]:
+        """Generate journal entries for all months in a given year.
+        
+        Reads all sheet data once to avoid rate limits, then processes each month.
+        """
+        print(f"\n{'='*60}")
+        print(f"Generating journal entries for entire year {year}")
+        print(f"{'='*60}")
+
+        # Read all sheets once at the start to avoid rate limits
+        print("\nLoading data from sheets...")
+        income_records = self.income_sheet.get_all_records()
+        sales_records = self.sales_sheet.get_all_records()
+        transfer_records = self.transfers_sheet.get_all_records()
+        print("✓ Data loaded\n")
+
+        # Mining has no expenses or deposits
+        expense_records = []
+        deposit_records = []
+
+        all_entries = []
+        all_rows = []
+
+        for month in range(1, 13):
+            year_month = f"{year}-{month:02d}"
+
+            try:
+                period_start = datetime.strptime(year_month, "%Y-%m").replace(tzinfo=timezone.utc)
+                first_day_next_month = (period_start.replace(day=28) + timedelta(days=4)).replace(day=1)
+                start_ts = int(period_start.timestamp())
+                end_ts = int(first_day_next_month.timestamp())
+            except ValueError:
+                continue
+
+            print(f"\n{'='*60}")
+            print(f"Generating journal entries for {year_month}...")
+            print(f"{'='*60}")
+
+            try:
+                entries, summary = aggregate_monthly_journal_entries(
+                    year_month,
+                    income_records,
+                    sales_records,
+                    expense_records,
+                    transfer_records,
+                    deposit_records,
+                    self.wave_config,
+                    start_ts,
+                    end_ts,
+                )
+
+                if entries:
+                    for entry in entries:
+                        all_rows.append(entry.to_sheet_row())
+                        all_entries.append(entry)
+                    self._print_journal_summary(year_month, len(entries), summary)
+                else:
+                    print(f"  No data for {year_month}, skipping")
+
+            except ValueError as e:
+                print(f"  Skipping {year_month}: {e}")
+                continue
+
+        # Batch write all journal entries at once
+        if all_rows:
+            print(f"\nWriting {len(all_rows)} journal entries to sheet...")
+            self._append_rows_with_retry(self.journal_sheet, all_rows)
+            print("✓ Journal entries written")
+        else:
+            print("\nNo journal entries to write")
+
+        print(f"\n✓ Generated {len(all_entries)} total journal entries for {year}")
+        return all_entries
 
     def _print_journal_summary(self, year_month: str, entry_count: int, summary: dict):
         """Print a summary of the generated journal entries."""
