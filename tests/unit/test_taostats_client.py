@@ -149,7 +149,7 @@ def test_get_transfers_params(
             "Authorization": "test-api-key",
             "Content-Type": "application/json"
         },
-        params=expected_params
+        params=expected_params,
     )
     
     # Verify the result returns model objects
@@ -275,7 +275,7 @@ def test_get_delegations_params(
             "Authorization": "test-api-key",
             "Content-Type": "application/json"
         },
-        params=expected_params
+        params=expected_params,
     )
     
     # Verify the result returns model objects
@@ -349,7 +349,7 @@ def test_get_stake_balance_history_params(
                 "Authorization": "test-api-key",
                 "Content-Type": "application/json"
             },
-            params=expected_params
+            params=expected_params,
         )
         
         # Verify the result returns model objects
@@ -403,7 +403,7 @@ def test_get_price_at_timestamp_params(
             "Authorization": "test-api-key",
             "Content-Type": "application/json"
         },
-        params=expected_params
+        params=expected_params,
     )
     
     # Verify the result
@@ -464,7 +464,7 @@ def test_get_prices_in_range_params(
             "Authorization": "test-api-key",
             "Content-Type": "application/json"
         },
-        params=expected_params
+        params=expected_params,
     )
     
     # Verify the result format
@@ -519,7 +519,7 @@ def test_get_current_price_params(
             "Authorization": "test-api-key",
             "Content-Type": "application/json"
         },
-        params=expected_params
+        params=expected_params,
     )
     
     # Verify the result
