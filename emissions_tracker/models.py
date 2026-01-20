@@ -356,6 +356,7 @@ class SourceType(Enum):
     MINING = "Mining"
     SALE = "Sale"       # TAO lot from ALPHA sale
     DEPOSIT = "Deposit" # TAO lot from incoming TAO transfer
+    OPENING_BALANCE = "Opening Balance"  # Opening balance lot for initial seeding
 
 
 class CostBasisMethod(Enum):
@@ -436,7 +437,7 @@ class AlphaLot:
         ("USD/Alpha", "usd_per_alpha", float, None),
         ("TAO Equivalent", "tao_equivalent", _float_or_zero, 0.0),
         ("Long Term Date", None, None, None),  # Computed from timestamp
-        ("Status", "status", lambda x: LotStatus(x), LotStatus.OPEN),
+        ("Status", "status", LotStatus, LotStatus.OPEN),
         ("Notes", "notes", _identity, ""),
     ]
     
@@ -587,7 +588,7 @@ class TaoLot:
         ("USD/TAO", "usd_per_tao", float, None),
         ("Source Sale ID", "source_sale_id", _identity, ""),
         ("Extrinsic ID", "extrinsic_id", _opt_str, ""),
-        ("Status", "status", lambda x: LotStatus(x), LotStatus.OPEN),
+        ("Status", "status", LotStatus, LotStatus.OPEN),
         ("Notes", "notes", _identity, ""),
     ]
     

@@ -151,37 +151,49 @@ class MiningTracker(BittensorTracker):
         self.last_disposal_timestamp = max(disposal_timestamps)
 
     def _reset_income_lots_if_sales_empty(self):
-        """Reset income lots to OPEN status if sales sheet is empty.
-        
-        This allows reprocessing of lots if the sales sheet was cleared manually.
-        """
+        """Reset ALPHA lot remaining amounts/status if sales sheet is empty."""
         try:
-            sales_records = self._get_records_with_retry(self.sales_sheet)
-            if not sales_records:
-                # Sales sheet is empty, reset all income lots to OPEN
-                income_records = self._get_records_with_retry(self.income_sheet)
-                if income_records:
-                    # Check if any lots are not OPEN
-                    has_consumed = any(r.get('Status') != 'OPEN' for r in income_records)
-                    if has_consumed:
-                        print("  ⚠️  Sales sheet empty but income lots have consumed status - resetting...")
-                        # Clear and rewrite income sheet with all lots as OPEN
-                        rows_to_write = []
-                        for record in income_records:
-                            # Reset status and consumption fields
-                            record['Status'] = 'OPEN'
-                            record['Remaining Alpha'] = record.get('Alpha Amount', 0)
-                            lot = AlphaLot.from_record(record)
-                            lot.status = LotStatus.OPEN
-                            lot.remaining_alpha = lot.alpha_amount
-                            rows_to_write.append(lot.to_sheet_row())
-                        
-                        # Clear and rewrite
-                        all_values = self.income_sheet.get_all_values()
-                        if len(all_values) > 1:
-                            self.income_sheet.batch_clear([f'A2:Z{len(all_values)}'])
-                        self._append_rows_with_retry(self.income_sheet, rows_to_write)
-                        print(f"  ✓ Reset {len(rows_to_write)} income lots to OPEN")
+            sales_records = self.sales_sheet.get_all_records()
+        except Exception as e:
+            print(f"  Warning: Could not check sales sheet: {e}")
+            return
+
+        if sales_records:
+            return
+
+        try:
+            records = self.income_sheet.get_all_records()
+        except Exception as e:
+            print(f"  Warning: Could not load income records: {e}")
+            return
+
+        # Get column positions from AlphaLot headers
+        from emissions_tracker.utils import col_idx_to_letter
+        headers = AlphaLot.sheet_headers()
+
+        rao_remaining_col = col_idx_to_letter('Alpha RAO Remaining', headers)
+        status_col = col_idx_to_letter('Status', headers)
+
+        updates = []
+        
+        for idx, record in enumerate(records, start=2):  # Start at 2 (row 1 is header)
+            alpha_rao = record.get('Alpha RAO', 0)
+            if alpha_rao > 0:
+                updates.append({
+                    'range': f'{rao_remaining_col}{idx}',
+                    'values': [[alpha_rao]]
+                })
+                updates.append({
+                    'range': f'{status_col}{idx}',
+                    'values': [['Open']]
+                })
+
+        if not updates:
+            return
+
+        try:
+            self.income_sheet.batch_update(updates, value_input_option='RAW')
+            print(f"  Reset {len(updates)//2} income lots to Open status")
         except Exception as e:
             print(f"  Warning: Could not reset income lots: {e}")
 
@@ -555,27 +567,34 @@ class MiningTracker(BittensorTracker):
         
         # Get the last balance before start_time
         latest_balance = max(stake_balances, key=lambda x: x.timestamp_unix)
-        alpha_balance = latest_balance.stake / RAO_PER_TAO
+        alpha_rao = latest_balance.balance_as_alpha_rao
         
-        if alpha_balance <= 0:
+        if alpha_rao <= 0:
             print("  No alpha balance for opening lot")
             return
         
-        # Get price at the balance timestamp
+        # Get TAO price at that time
         tao_price = self.price_client.get_price_at_timestamp('TAO', latest_balance.timestamp_unix)
+        
+        # Calculate USD values
+        tao_equivalent = latest_balance.balance_as_tao_float
+        usd_fmv = tao_equivalent * tao_price
+        usd_per_alpha = usd_fmv / latest_balance.balance_as_alpha_float if latest_balance.balance_as_alpha_float > 0 else 0.0
         
         # Create opening lot
         lot = AlphaLot(
             lot_id=self._next_alpha_lot_id(),
             timestamp=latest_balance.timestamp_unix,
-            alpha_amount=alpha_balance,
-            tao_amount=0,  # Opening balance - no TAO equivalent tracked
-            usd_value=alpha_balance * tao_price,  # Approximate USD value
-            tao_price_at_receipt=tao_price,
+            block_number=latest_balance.block_number,
             source_type=SourceType.OPENING_BALANCE,
+            alpha_rao=alpha_rao,
+            alpha_rao_remaining=alpha_rao,
+            usd_fmv=usd_fmv,
+            usd_per_alpha=usd_per_alpha,
+            tao_equivalent=tao_equivalent,
             status=LotStatus.OPEN,
-            remaining_alpha=alpha_balance
+            notes="Opening balance lot"
         )
         
         self.alpha_lots.append(lot)
-        print(f"  Created opening ALPHA lot: {lot.lot_id} with {alpha_balance:.4f} ALPHA")
+        print(f"  Created opening ALPHA lot: {lot.lot_id} with {latest_balance.balance_as_alpha_float:.4f} ALPHA (${usd_fmv:.2f})")
