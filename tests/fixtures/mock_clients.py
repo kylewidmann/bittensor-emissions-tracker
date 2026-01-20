@@ -27,25 +27,31 @@ class MockTaoStatsClient(WalletClientInterface, PriceClient):
     returning properly typed model objects.
     """
     
-    def __init__(self):
-        """Initialize mock client and load test data."""
+    def __init__(self, data_dir=None):
+        """Initialize mock client and load test data.
+        
+        Args:
+            data_dir: Path to data directory. Defaults to TEST_DATA_DIR (tests/data/all/).
+                     Can be set to tests/data/mining/ for mining tracker tests.
+        """
+        self.data_dir = data_dir or TEST_DATA_DIR
         self._load_test_data()
     
     def _load_test_data(self):
-        """Load all test data files."""
+        """Load all test data files from the configured data directory."""
         # Load delegations/stake events
-        with open(TEST_DATA_DIR / "stake_events.json") as f:
+        with open(self.data_dir / "stake_events.json") as f:
             self._raw_delegations = json.load(f)["data"]
         
         # Load transfers
-        with open(TEST_DATA_DIR / "transfers.json") as f:
+        with open(self.data_dir / "transfers.json") as f:
             self._raw_transfers = json.load(f)["data"]
         
         # Load stake balance history
-        with open(TEST_DATA_DIR / "stake_balance.json") as f:
+        with open(self.data_dir / "stake_balance.json") as f:
             self._raw_stake_balance = json.load(f)["data"]
         
-        # Load price data (dict with dates as keys)
+        # Load price data (always from main directory, shared across all tests)
         with open(TEST_DATA_DIR / "historical_tao_prices.json") as f:
             price_dict = json.load(f)
             # Convert dict to list for easier searching
@@ -301,10 +307,11 @@ class MockTaoStatsClient(WalletClientInterface, PriceClient):
 @pytest.fixture
 def mock_taostats_client():
     """
-    Pytest fixture that provides a mock TaoStats client with test data.
+    Pytest fixture that provides a mock TaoStats client with contract test data.
     
     The client automatically filters data based on method arguments,
     so tests don't need to manually setup return values.
+    Uses data from tests/data/all/ directory.
     
     Usage:
         def test_something(mock_taostats_client):
@@ -319,3 +326,17 @@ def mock_taostats_client():
             # Returns only matching delegations from test data
     """
     return MockTaoStatsClient()
+
+
+@pytest.fixture
+def mock_mining_taostats_client():
+    """
+    Pytest fixture that provides a mock TaoStats client for mining tracker tests.
+    
+    Uses data from tests/data/mining/ directory which contains only mining-specific
+    data (stake balance history). Delegations and transfers are empty for mining tests.
+    """
+    from pathlib import Path
+    mining_data_dir = TEST_DATA_DIR.parent / "mining"
+    return MockTaoStatsClient(data_dir=mining_data_dir)
+

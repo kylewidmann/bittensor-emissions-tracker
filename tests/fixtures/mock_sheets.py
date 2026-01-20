@@ -516,13 +516,15 @@ def mock_sheets():
     """
     mock_env = MockSheetsEnvironment()
     
-    # Patch gspread module in tracker
-    with patch('emissions_tracker.trackers.contract_tracker.gspread', mock_env.gspread_module):
+    # Patch gspread module in both trackers
+    with patch('emissions_tracker.trackers.contract_tracker.gspread', mock_env.gspread_module), \
+         patch('emissions_tracker.trackers.mining_tracker.gspread', mock_env.gspread_module):
         # Patch ServiceAccountCredentials (tracker checks if it's None)
         mock_creds_class = MagicMock()
         mock_creds_class.from_json_keyfile_name.return_value = MagicMock()
         
-        with patch('emissions_tracker.trackers.contract_tracker.ServiceAccountCredentials', mock_creds_class):
+        with patch('emissions_tracker.trackers.contract_tracker.ServiceAccountCredentials', mock_creds_class), \
+             patch('emissions_tracker.trackers.mining_tracker.ServiceAccountCredentials', mock_creds_class):
             yield mock_env
 
 @pytest.fixture()
