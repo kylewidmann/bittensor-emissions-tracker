@@ -44,7 +44,7 @@ class ContractTracker(BittensorTracker):
         self.wave_config = WaveAccountSettings()
         
         # Tracker-specific configuration
-        self.validator_ss58 = self.config.validator_ss58
+        self.hotkey_ss58 = self.config.validator_ss58
         self.coldkey_ss58 = self.config.payout_coldkey_ss58
         self.sheet_id = self.config.tracker_sheet_id
         self.smart_contract_ss58 = self.config.smart_contract_ss58
@@ -54,7 +54,7 @@ class ContractTracker(BittensorTracker):
         self.subnet_id = self.config.subnet_id
         
         print(f"Initializing Contract tracker:")
-        print(f"  Tracking Hotkey: {self.validator_ss58}")
+        print(f"  Tracking Hotkey: {self.hotkey_ss58}")
         print(f"  Coldkey: {self.coldkey_ss58}")
         print(f"  Brokerage: {self.brokerage_ss58}")
         print(f"  Smart Contract: {self.smart_contract_ss58}")
@@ -214,7 +214,7 @@ class ContractTracker(BittensorTracker):
         
         stake_balances = self.wallet_client.get_stake_balance_history(
             netuid=self.subnet_id,
-            hotkey=self.validator_ss58,
+            hotkey=self.hotkey_ss58,
             coldkey=self.coldkey_ss58,
             start_time=prev_day_start,
             end_time=prev_day_end
@@ -575,7 +575,7 @@ class ContractTracker(BittensorTracker):
                 ))
             
             # Expenses: UNDELEGATE with transfer to non-validator
-            elif d.transfer_address and d.transfer_address.ss58 != self.validator_ss58:
+            elif d.transfer_address and d.transfer_address.ss58 != self.hotkey_ss58:
                 disposal_events.append(DisposalEvent(
                     timestamp=ts,
                     disposal_type=DisposalType.EXPENSE,
@@ -622,7 +622,7 @@ class ContractTracker(BittensorTracker):
         # Implementation for processing contract income
         delegation_events = self.wallet_client.get_delegations(
             netuid=self.subnet_id,
-            delegate=self.validator_ss58,
+            delegate=self.hotkey_ss58,
             nominator=self.coldkey_ss58,
             start_time=start_time,
             end_time=end_time,
@@ -651,7 +651,7 @@ class ContractTracker(BittensorTracker):
         smart_contract_delegations = [
             d for d in delegations 
             if d.nominator.ss58 == self.coldkey_ss58 
-            and d.delegate.ss58 == self.validator_ss58
+            and d.delegate.ss58 == self.hotkey_ss58
             and d.transfer_address
             and d.transfer_address.ss58 == self.smart_contract_ss58
         ]

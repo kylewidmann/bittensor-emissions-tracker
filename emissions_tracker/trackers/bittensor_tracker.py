@@ -485,7 +485,7 @@ class BittensorTracker:
         # Get stake balance history for the extended date range
         stake_balances = self.wallet_client.get_stake_balance_history(
             netuid=self.subnet_id,
-            hotkey=self.validator_ss58,
+            hotkey=self.hotkey_ss58,
             coldkey=self.coldkey_ss58,
             start_time=extended_start_time,
             end_time=end_time
@@ -498,7 +498,7 @@ class BittensorTracker:
         # Get all delegation events (DELEGATE and UNDELEGATE) in the same period
         delegations = self.wallet_client.get_delegations(
             netuid=self.subnet_id,
-            delegate=self.validator_ss58,
+            delegate=self.hotkey_ss58,
             nominator=self.coldkey_ss58,
             start_time=start_time,
             end_time=end_time
@@ -672,7 +672,7 @@ class BittensorTracker:
         # Fetch all UNDELEGATE events (covers both sales and expenses)
         all_delegations = self.wallet_client.get_delegations(
             netuid=self.subnet_id,
-            delegate=self.validator_ss58,
+            delegate=self.hotkey_ss58,
             nominator=self.coldkey_ss58,
             start_time=start_time,
             end_time=end_time,
