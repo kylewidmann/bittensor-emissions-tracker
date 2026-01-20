@@ -80,6 +80,11 @@ def aggregate_monthly_journal_entries(
             summary["staking_income"] += usd_fmv  # Add to staking_income summary for now
             _add_amount(wave_config.alpha_asset_account, "debit", usd_fmv, f"Mining lot {note}: ${usd_fmv:.2f}")
             _add_amount(wave_config.mining_income_account, "credit", usd_fmv, f"Mining lot {note}: ${usd_fmv:.2f}")
+        elif source_type == SourceType.OPENING_BALANCE.value:
+            # Opening balance: Debit asset account, Credit equity account
+            # This establishes the initial asset value on the books
+            _add_amount(wave_config.alpha_asset_account, "debit", usd_fmv, f"Opening balance lot {note}: ${usd_fmv:.2f}")
+            _add_amount("Opening Balance Equity", "credit", usd_fmv, f"Opening balance lot {note}: ${usd_fmv:.2f}")
 
     # ------------------------- Sales (ALPHA -> TAO) -------------------------
     for sale in sales_records:

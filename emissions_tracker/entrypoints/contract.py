@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-Bittensor ALPHA/TAO Subledger Tracker
+Bittensor Smart Contract Emissions Tracker
 
-Tracks cryptocurrency income and disposals for tax accounting:
+Tracks smart contract emissions for tax accounting:
 - ALPHA income (Contract + Staking emissions)
-- ALPHA → TAO sales with FIFO lot consumption
+- ALPHA → TAO sales with FIFO/HIFO lot consumption
+- TAO deposits from external sources
+- Expenses (ALPHA transfers to third parties)
 - TAO → Kraken transfers with capital gains tracking
 - Monthly Wave journal entry generation
 """
@@ -14,7 +16,6 @@ from datetime import datetime, timezone
 
 from emissions_tracker.clients.taostats import TaoStatsAPIClient
 from emissions_tracker.config import TrackerSettings
-from emissions_tracker.models import SourceType
 from emissions_tracker.trackers.contract_tracker import ContractTracker
 
 
@@ -26,42 +27,42 @@ def parse_date(date_str: str) -> int:
 
 def run():
     parser = argparse.ArgumentParser(
-        description='Bittensor ALPHA/TAO Subledger Tracker',
+        description='Bittensor Smart Contract Emissions Tracker',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   # Run daily check (continue from last processed timestamp)
-  python -m emissions_tracker.main --mode auto
+  track-contract --mode auto
 
   # Process a specific date range
-  python -m emissions_tracker.main --mode auto --start-date 2025-01-01 --end-date 2025-01-31
+  track-contract --mode auto --start-date 2025-01-01 --end-date 2025-01-31
 
   # Process only income for a specific period
-  python -m emissions_tracker.main --mode income --start-date 2025-01-01
+  track-contract --mode income --start-date 2025-01-01
 
   # Process only sales (continues from last processed)
-  python -m emissions_tracker.main --mode sales
+  track-contract --mode sales
 
   # Process only transfers  
-  python -m emissions_tracker.main --mode transfers
+  track-contract --mode transfers
 
   # Generate monthly journal entries
-  python -m emissions_tracker.main --mode journal --month 2025-11
+  track-contract --mode journal --month 2025-11
   
   # Generate journal entries for entire year
-  python -m emissions_tracker.main --mode journal --year 2025
+  track-contract --mode journal --year 2025
   
   # Regenerate journal entries for entire year
-  python -m emissions_tracker.main --mode journal --year 2025 --regenerate
+  track-contract --mode journal --year 2025 --regenerate
 
   # Initial seeding - process from specific start date
-  python -m emissions_tracker.main --mode auto --start-date 2024-11-01
+  track-contract --mode auto --start-date 2024-11-01
   
   # Regenerate all data (clear and reprocess from date)
-  python -m emissions_tracker.main --mode auto --start-date 2024-01-01 --regenerate
+  track-contract --mode auto --start-date 2024-01-01 --regenerate
   
   # Regenerate only transfers from date
-  python -m emissions_tracker.main --mode transfers --start-date 2024-01-01 --regenerate
+  track-contract --mode transfers --start-date 2024-01-01 --regenerate
         """
     )
     
@@ -155,12 +156,12 @@ Examples:
     elif args.mode == 'sales':
         window_desc = _describe_window(args.start_date, args.end_date)
         print(f"\nProcessing sales for {window_desc}...")
-        tracker.process_alpha_sales(start_time=start_time, end_time=end_time)
+        tracker.process_disposals(start_time=start_time, end_time=end_time)
         
     elif args.mode == 'transfers':
         window_desc = _describe_window(args.start_date, args.end_date)
         print(f"\nProcessing transfers for {window_desc}...")
-        tracker.process_tao_transfers(start_time=start_time, end_time=end_time)
+        tracker.process_disposals(start_time=start_time, end_time=end_time)
         
     elif args.mode == 'journal':
         if args.year:

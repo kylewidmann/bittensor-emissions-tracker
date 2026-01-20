@@ -13,7 +13,8 @@ from datetime import datetime
 from emissions_tracker.clients.wallet import WalletClientInterface
 from emissions_tracker.clients.price import PriceClient
 from emissions_tracker.models import (
-    TaoStatsDelegation, TaoStatsTransfer, TaoStatsStakeBalance, TaoStatsAddress
+    TaoStatsDelegation, TaoStatsTransfer, TaoStatsStakeBalance, TaoStatsAddress,
+    TaoStatsAccountHistory
 )
 from emissions_tracker.exceptions import PriceNotAvailableError
 from tests.fixtures.mock_data import TEST_DATA_DIR
@@ -27,25 +28,39 @@ class MockTaoStatsClient(WalletClientInterface, PriceClient):
     returning properly typed model objects.
     """
     
-    def __init__(self):
-        """Initialize mock client and load test data."""
+    def __init__(self, data_dir=None):
+        """Initialize mock client and load test data.
+        
+        Args:
+            data_dir: Path to data directory. Defaults to TEST_DATA_DIR (tests/data/all/).
+                     Can be set to tests/data/mining/ for mining tracker tests.
+        """
+        self.data_dir = data_dir or TEST_DATA_DIR
         self._load_test_data()
     
     def _load_test_data(self):
-        """Load all test data files."""
+        """Load all test data files from the configured data directory."""
         # Load delegations/stake events
-        with open(TEST_DATA_DIR / "stake_events.json") as f:
+        with open(self.data_dir / "stake_events.json") as f:
             self._raw_delegations = json.load(f)["data"]
         
         # Load transfers
-        with open(TEST_DATA_DIR / "transfers.json") as f:
+        with open(self.data_dir / "transfers.json") as f:
             self._raw_transfers = json.load(f)["data"]
         
         # Load stake balance history
-        with open(TEST_DATA_DIR / "stake_balance.json") as f:
+        with open(self.data_dir / "stake_balance.json") as f:
             self._raw_stake_balance = json.load(f)["data"]
         
-        # Load price data (dict with dates as keys)
+        # Load account history
+        account_history_path = self.data_dir / "account_history.json"
+        if account_history_path.exists():
+            with open(account_history_path) as f:
+                self._raw_account_history = json.load(f)["data"]
+        else:
+            self._raw_account_history = []
+        
+        # Load price data (always from main directory, shared across all tests)
         with open(TEST_DATA_DIR / "historical_tao_prices.json") as f:
             price_dict = json.load(f)
             # Convert dict to list for easier searching
@@ -251,6 +266,56 @@ class MockTaoStatsClient(WalletClientInterface, PriceClient):
         
         return filtered
     
+    def get_account_history(
+        self,
+        address: str,
+        start_time: int,
+        end_time: int
+    ) -> List[TaoStatsAccountHistory]:
+        """Filter and return account history matching criteria."""
+        filtered = []
+        
+        for history in self._raw_account_history:
+            # Parse timestamp
+            history_ts = int(datetime.fromisoformat(
+                history['timestamp'].replace('Z', '+00:00')
+            ).timestamp())
+            
+            # Apply filters
+            if history_ts < start_time or history_ts > end_time:
+                continue
+            
+            if history['address']['ss58'] != address:
+                continue
+            
+            # Convert to TaoStatsAccountHistory model
+            history_obj = TaoStatsAccountHistory(
+                address=TaoStatsAddress(
+                    ss58=history['address']['ss58'],
+                    hex=history['address']['hex']
+                ),
+                network=history['network'],
+                block_number=history['block_number'],
+                timestamp=history['timestamp'],
+                rank=history.get('rank'),
+                balance_free=history['balance_free'],
+                balance_reserved=history.get('balance_reserved', '0'),
+                balance_staked=history['balance_staked'],
+                balance_staked_alpha_as_tao=history.get('balance_staked_alpha_as_tao'),
+                balance_staked_root=history.get('balance_staked_root'),
+                root_claim_type=history.get('root_claim_type', ''),
+                balance_liquidity=history.get('balance_liquidity', '0'),
+                balance_total=history['balance_total'],
+                created_on_date=history.get('created_on_date'),
+                created_on_network=history.get('created_on_network'),
+                coldkey_swap=history.get('coldkey_swap')
+            )
+            filtered.append(history_obj)
+        
+        # Sort by timestamp ascending to match real API behavior (order="timestamp_asc")
+        filtered.sort(key=lambda h: datetime.fromisoformat(h.timestamp.replace('Z', '+00:00')).timestamp())
+        return filtered
+    
     def get_price_at_timestamp(self, symbol: str, timestamp: int) -> float:
         """Get price at specific timestamp (finds closest)."""
         if symbol != 'TAO':
@@ -301,10 +366,11 @@ class MockTaoStatsClient(WalletClientInterface, PriceClient):
 @pytest.fixture
 def mock_taostats_client():
     """
-    Pytest fixture that provides a mock TaoStats client with test data.
+    Pytest fixture that provides a mock TaoStats client with contract test data.
     
     The client automatically filters data based on method arguments,
     so tests don't need to manually setup return values.
+    Uses data from tests/data/all/ directory.
     
     Usage:
         def test_something(mock_taostats_client):
@@ -319,3 +385,17 @@ def mock_taostats_client():
             # Returns only matching delegations from test data
     """
     return MockTaoStatsClient()
+
+
+@pytest.fixture
+def mock_mining_taostats_client():
+    """
+    Pytest fixture that provides a mock TaoStats client for mining tracker tests.
+    
+    Uses data from tests/data/mining/ directory which contains only mining-specific
+    data (stake balance history). Delegations and transfers are empty for mining tests.
+    """
+    from pathlib import Path
+    mining_data_dir = TEST_DATA_DIR.parent / "mining"
+    return MockTaoStatsClient(data_dir=mining_data_dir)
+

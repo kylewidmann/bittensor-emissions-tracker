@@ -11,7 +11,7 @@ from tests.utils import consume_alpha_lots_for_expense, consume_alpha_lots_for_s
 from datetime import datetime, timezone, timedelta
 
 # Test data directory
-TEST_DATA_DIR = Path(__file__).parent.parent / "data" / "all"
+TEST_DATA_DIR = Path(__file__).parent.parent / "data" / "contract"
 SECONDS_PER_DAY = 86400
 
 
@@ -496,93 +496,29 @@ def compute_expected_staking_emission_lots(
     historical_prices: HistoricalPrices,
     get_alpha_lot_id: Callable[[], str],
 ) -> Callable[[datetime, datetime], list[AlphaLot]]:
-    """Compute expected staking emissions from raw data.
+    """Compute expected staking emissions from raw contract data.
     
-    This replicates the logic in process_staking_emissions:
-    - For each balance point (skip first), calculate balance delta
-    - Subtract DELEGATE events with is_transfer=True in window
-    - Add back UNDELEGATE events in window
-    - Sum up all positive emissions
-    
-    Args:
-        balance_history: List of balance snapshots
-        delegation_events: List of delegation/undelegation events
-        start_date: Start of date range
-        end_date: End of date range
-        
-    Returns:
-        Tuple of (count of emission lots, total alpha emitted)
+    Returns a function that computes emission lots for a given date range.
     """
 
     def _compute_expected_staking_emissions(
         start_date: datetime,
         end_date: datetime
     ) -> list[AlphaLot]:
-        """Compute expected staking emissions from raw data.
+        """Compute expected staking emissions from raw data."""
+        from tests.utils import compute_staking_emissions_from_balances
         
-        This replicates the logic in process_staking_emissions:
-        - For each balance point (skip first), calculate balance delta
-        - Subtract DELEGATE events with is_transfer=True in window
-        - Add back UNDELEGATE events in window
-        - Sum up all positive emissions
-        
-        Args:
-            balance_history: List of balance snapshots
-            delegation_events: List of delegation/undelegation events
-            start_date: Start of date range
-            end_date: End of date range
-            
-        Returns:
-            List of emission lot dictionaries with usd_fmv and other values
-        """ 
-        # Extend window back by 1 day to get previous day's balance (matches tracker behavior)
-        start_ts = int(start_date.timestamp()) - SECONDS_PER_DAY
+        start_ts = int(start_date.timestamp())
         end_ts = int(end_date.timestamp())
         
-        # Filter balance history to date range
-        daily_balances = filter_balances_by_date_range(daily_stake_balances, start_ts, end_ts)
-
-        emission_lots = []
-        for i in range(1, len(daily_balances)):
-            prev_day = daily_balances[i - 1]
-            curr_day = daily_balances[i]
-
-            # Get all events for current day
-            day_events = daily_stake_events.get(curr_day.day, [])
-            
-            alpha_inflow_rao = sum(e.alpha for e in day_events if e.action == 'DELEGATE')
-            alpha_outflow_rao = sum(e.alpha for e in day_events if e.action == 'UNDELEGATE')
-            
-            # Calculate alpha emissions in RAO
-            # Balance change from end of previous day to end of current day (in RAO)
-            balance_change_alpha_rao = curr_day.balance_as_alpha_rao - prev_day.balance_as_alpha_rao
-            
-            alpha_price_tao_rao = curr_day.balance_as_tao_rao / curr_day.balance_as_alpha_rao           
- 
-            emissions_alpha_rao = balance_change_alpha_rao - alpha_inflow_rao + alpha_outflow_rao
-
-            # Get TAO price for current day
-            timestamp = curr_day.timestamp_unix + SECONDS_PER_DAY - 1  # End of day timestamp
-            tao_price = historical_prices.get_price_for_timestamp(timestamp)
-            emissions_tao = (emissions_alpha_rao * alpha_price_tao_rao) / 1e9  # Convert new Alpha RAO to TAO RAO
-            emissions_alpha = emissions_alpha_rao / 1e9  # Convert to TAO
-            usd_fmv = emissions_tao * tao_price
-            usd_per_alpha = usd_fmv / emissions_alpha if emissions_tao > 0 else 0
-
-
-            emission_lots.append(AlphaLot(
-                lot_id=get_alpha_lot_id(),
-                timestamp=curr_day.timestamp_unix,
-                block_number=curr_day.block_number,
-                alpha_rao=emissions_alpha_rao,
-                alpha_rao_remaining=emissions_alpha_rao,
-                tao_equivalent=emissions_tao,
-                usd_per_alpha=usd_per_alpha,
-                usd_fmv=usd_fmv,
-                source_type=SourceType.STAKING
-            ))
-        
-        return emission_lots
+        return compute_staking_emissions_from_balances(
+            daily_stake_balances=daily_stake_balances,
+            daily_stake_events=daily_stake_events,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            get_tao_price_at_timestamp=historical_prices.get_price_for_timestamp,
+            get_lot_id=get_alpha_lot_id,
+        )
     
     return _compute_expected_staking_emissions
 

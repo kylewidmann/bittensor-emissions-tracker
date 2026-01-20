@@ -1,0 +1,11 @@
+{
+  "pagination": {
+    "current_page": 1,
+    "per_page": 200,
+    "total_items": 0,
+    "total_pages": 0,
+    "next_page": null,
+    "prev_page": null
+  },
+  "data": []
+}
