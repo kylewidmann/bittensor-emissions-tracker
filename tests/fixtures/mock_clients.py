@@ -13,7 +13,8 @@ from datetime import datetime
 from emissions_tracker.clients.wallet import WalletClientInterface
 from emissions_tracker.clients.price import PriceClient
 from emissions_tracker.models import (
-    TaoStatsDelegation, TaoStatsTransfer, TaoStatsStakeBalance, TaoStatsAddress
+    TaoStatsDelegation, TaoStatsTransfer, TaoStatsStakeBalance, TaoStatsAddress,
+    TaoStatsAccountHistory
 )
 from emissions_tracker.exceptions import PriceNotAvailableError
 from tests.fixtures.mock_data import TEST_DATA_DIR
@@ -50,6 +51,14 @@ class MockTaoStatsClient(WalletClientInterface, PriceClient):
         # Load stake balance history
         with open(self.data_dir / "stake_balance.json") as f:
             self._raw_stake_balance = json.load(f)["data"]
+        
+        # Load account history
+        account_history_path = self.data_dir / "account_history.json"
+        if account_history_path.exists():
+            with open(account_history_path) as f:
+                self._raw_account_history = json.load(f)["data"]
+        else:
+            self._raw_account_history = []
         
         # Load price data (always from main directory, shared across all tests)
         with open(TEST_DATA_DIR / "historical_tao_prices.json") as f:
@@ -255,6 +264,56 @@ class MockTaoStatsClient(WalletClientInterface, PriceClient):
             )
             filtered.append(balance_obj)
         
+        return filtered
+    
+    def get_account_history(
+        self,
+        address: str,
+        start_time: int,
+        end_time: int
+    ) -> List[TaoStatsAccountHistory]:
+        """Filter and return account history matching criteria."""
+        filtered = []
+        
+        for history in self._raw_account_history:
+            # Parse timestamp
+            history_ts = int(datetime.fromisoformat(
+                history['timestamp'].replace('Z', '+00:00')
+            ).timestamp())
+            
+            # Apply filters
+            if history_ts < start_time or history_ts > end_time:
+                continue
+            
+            if history['address']['ss58'] != address:
+                continue
+            
+            # Convert to TaoStatsAccountHistory model
+            history_obj = TaoStatsAccountHistory(
+                address=TaoStatsAddress(
+                    ss58=history['address']['ss58'],
+                    hex=history['address']['hex']
+                ),
+                network=history['network'],
+                block_number=history['block_number'],
+                timestamp=history['timestamp'],
+                rank=history.get('rank'),
+                balance_free=history['balance_free'],
+                balance_reserved=history.get('balance_reserved', '0'),
+                balance_staked=history['balance_staked'],
+                balance_staked_alpha_as_tao=history.get('balance_staked_alpha_as_tao'),
+                balance_staked_root=history.get('balance_staked_root'),
+                root_claim_type=history.get('root_claim_type', ''),
+                balance_liquidity=history.get('balance_liquidity', '0'),
+                balance_total=history['balance_total'],
+                created_on_date=history.get('created_on_date'),
+                created_on_network=history.get('created_on_network'),
+                coldkey_swap=history.get('coldkey_swap')
+            )
+            filtered.append(history_obj)
+        
+        # Sort by timestamp ascending to match real API behavior (order="timestamp_asc")
+        filtered.sort(key=lambda h: datetime.fromisoformat(h.timestamp.replace('Z', '+00:00')).timestamp())
         return filtered
     
     def get_price_at_timestamp(self, symbol: str, timestamp: int) -> float:

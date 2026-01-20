@@ -8,6 +8,84 @@ from typing import List, Dict
 
 from emissions_tracker.models import AlphaLot, AlphaSale, CostBasisMethod, Expense, GainType, AlphaLotConsumption, LotStatus, SourceType, TaoLot, TaoLotConsumption, TaoStatsDelegation, TaoStatsStakeBalance, TaoStatsTransfer, TaoTransfer
 
+SECONDS_PER_DAY = 86400
+
+
+def compute_staking_emissions_from_balances(
+    daily_stake_balances: Dict[str, TaoStatsStakeBalance],
+    daily_stake_events: Dict[str, List[TaoStatsDelegation]],
+    start_ts: int,
+    end_ts: int,
+    get_tao_price_at_timestamp,
+    get_lot_id,
+) -> List[AlphaLot]:
+    """Generic function to compute staking emissions from balance history and events.
+    
+    Works for both contract and mining trackers. For mining, just pass empty daily_stake_events.
+    
+    Args:
+        daily_stake_balances: Dict of daily stake balance records keyed by day string
+        daily_stake_events: Dict of daily stake events keyed by day string (empty for mining)
+        start_ts: Start timestamp (unix seconds)
+        end_ts: End timestamp (unix seconds)
+        get_tao_price_at_timestamp: Function that takes timestamp and returns TAO price
+        get_lot_id: Function that returns next lot ID
+        
+    Returns:
+        List of AlphaLot objects representing emissions
+    """
+    # Extend window back by 1 day to get previous day's balance (matches tracker behavior)
+    extended_start = start_ts - SECONDS_PER_DAY
+    
+    # Filter balance history to date range
+    daily_balances = filter_balances_by_date_range(daily_stake_balances, extended_start, end_ts)
+    
+    emission_lots = []
+    for i in range(1, len(daily_balances)):
+        prev_day = daily_balances[i - 1]
+        curr_day = daily_balances[i]
+
+        # Get all events for current day (empty list for mining)
+        day_events = daily_stake_events.get(curr_day.day, [])
+        
+        alpha_inflow_rao = sum(e.alpha for e in day_events if e.action == 'DELEGATE')
+        alpha_outflow_rao = sum(e.alpha for e in day_events if e.action == 'UNDELEGATE')
+        
+        # Calculate alpha emissions in RAO
+        # Balance change from end of previous day to end of current day (in RAO)
+        balance_change_alpha_rao = curr_day.balance_as_alpha_rao - prev_day.balance_as_alpha_rao
+        
+        alpha_price_tao_rao = curr_day.balance_as_tao_rao / curr_day.balance_as_alpha_rao
+        
+        emissions_alpha_rao = balance_change_alpha_rao - alpha_inflow_rao + alpha_outflow_rao
+        
+        # Skip if no emissions (or balance decreased)
+        if emissions_alpha_rao <= 0:
+            continue
+        
+        # Get TAO price for current day
+        timestamp = curr_day.timestamp_unix + SECONDS_PER_DAY - 1  # End of day timestamp
+        tao_price = get_tao_price_at_timestamp(timestamp)
+        
+        emissions_tao = (emissions_alpha_rao * alpha_price_tao_rao) / 1e9  # Convert new Alpha RAO to TAO
+        emissions_alpha = emissions_alpha_rao / 1e9  # Convert to ALPHA
+        usd_fmv = emissions_tao * tao_price
+        usd_per_alpha = usd_fmv / emissions_alpha if emissions_alpha > 0 else 0
+
+        emission_lots.append(AlphaLot(
+            lot_id=get_lot_id(),
+            timestamp=curr_day.timestamp_unix,
+            block_number=curr_day.block_number,
+            alpha_rao=emissions_alpha_rao,
+            alpha_rao_remaining=emissions_alpha_rao,
+            tao_equivalent=emissions_tao,
+            usd_per_alpha=usd_per_alpha,
+            usd_fmv=usd_fmv,
+            source_type=SourceType.STAKING
+        ))
+    
+    return emission_lots
+
 
 
 def filter_balances_by_date_range(
