@@ -450,13 +450,14 @@ class BittensorTracker:
         Returns:
             Tuple of (AlphaSale, TaoLot) objects
         """
-        # Find matching fee transfer
+        # Find matching fee transfer (may be absent when unstaking to same coldkey - no transfer)
         fee_transfer = transfers_by_extrinsic.get(undelegate.extrinsic_id)
-        if not fee_transfer:
+        if undelegate.nominator.ss58 != self.coldkey_ss58 and not fee_transfer:
             raise ValueError(
                 f"No fee transfer found for extrinsic {undelegate.extrinsic_id} "
                 f"at block {undelegate.block_number}. This indicates a data integrity issue."
             )
+        fee_amount = fee_transfer.amount_rao + fee_transfer.fee_rao if fee_transfer else undelegate.fee or 0
 
         # Consume ALPHA lots for this sale
         alpha_rao_needed = int(undelegate.alpha)
@@ -472,11 +473,11 @@ class BittensorTracker:
             )
 
         # Calculate TAO received: delegation.amount - transfer.amount - transfer.fee
-        tao_received_rao = int(undelegate.amount) - fee_transfer.amount_rao - fee_transfer.fee_rao
+        tao_received_rao = int(undelegate.amount) - fee_amount
         tao_received = tao_received_rao / RAO_PER_TAO
         
         # Network fee is the total amount deducted (transfer amount + transfer fee)
-        network_fee_tao = (fee_transfer.amount_rao + fee_transfer.fee_rao) / RAO_PER_TAO
+        network_fee_tao = fee_amount / RAO_PER_TAO
 
         # Get TAO price for valuation
         tao_price_usd = undelegate.usd / (undelegate.amount / RAO_PER_TAO)
