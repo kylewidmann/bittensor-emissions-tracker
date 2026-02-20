@@ -81,11 +81,6 @@ class ContractTracker(BittensorTracker):
         print("  Loading state from sheets...")
         self._load_state()
         print("  ✓ State loaded")
-
-        # If derived sheets were cleared, reopen income lots so they can be reprocessed
-        print("  Checking if income lots need reset...")
-        self._reset_income_lots_if_sales_empty()
-        print("  ✓ Income lots check complete")
         
         # Counters for ID generation
         print("  Loading counters...")
@@ -313,51 +308,26 @@ class ContractTracker(BittensorTracker):
         self.tao_lots.append(lot)
         print(f"    Created opening TAO lot: {lot.lot_id} with {tao_amount:.4f} TAO (${usd_basis:.2f})")
 
-    def _reset_income_lots_if_sales_empty(self):
-        """Reset ALPHA lot remaining amounts/status if sales sheet is empty."""
-        try:
-            sales_records = self.sales_sheet.get_all_records()
-        except Exception as e:
-            print(f"  Warning: Could not check sales sheet: {e}")
-            return
+    def _get_regen_disposal_sheets(self):
+        return [
+            (self.sales_sheet, "Sales", "Timestamp"),
+            (self.expenses_sheet, "Expenses", "Timestamp"),
+            (self.transfers_sheet, "Transfers", "Timestamp"),
+            (self.deposits_sheet, "Deposits", "Timestamp"),
+        ]
 
-        if sales_records:
-            return
-
-        try:
-            records = self.income_sheet.get_all_records()
-        except Exception as e:
-            print(f"  Warning: Could not load income records: {e}")
-            return
-
-        # Get column positions from AlphaLot headers
-        headers = AlphaLot.sheet_headers()
-
-        rao_remaining_col = col_idx_to_letter('Alpha RAO Remaining', headers)
-        status_col = col_idx_to_letter('Status', headers)
-
-        updates = []
-        
-        for idx, record in enumerate(records, start=2):  # Start at 2 (row 1 is header)
-            alpha_rao = record.get('Alpha RAO', 0)
-            if alpha_rao > 0:
-                updates.append({
-                    'range': f'{rao_remaining_col}{idx}',
-                    'values': [[alpha_rao]]
-                })
-                updates.append({
-                    'range': f'{status_col}{idx}',
-                    'values': [['Open']]
-                })
-
-        if not updates:
-            return
-
-        try:
-            self.income_sheet.batch_update(updates, value_input_option='RAW')
-            print(f"  Reset {len(updates)//2} income lots to Open status")
-        except Exception as e:
-            print(f"  Warning: Could not reset income lots: {e}")
+    def _reset_regen_timestamps(self, start_time: int) -> None:
+        cutoff = start_time - 1
+        if self.last_contract_income_timestamp >= start_time:
+            self.last_contract_income_timestamp = cutoff
+        if self.last_staking_income_timestamp >= start_time:
+            self.last_staking_income_timestamp = cutoff
+        if self.last_income_timestamp >= start_time:
+            self.last_income_timestamp = cutoff
+        if self.last_deposit_timestamp >= start_time:
+            self.last_deposit_timestamp = cutoff
+        if self.last_disposal_timestamp >= start_time:
+            self.last_disposal_timestamp = cutoff
 
     def _load_counters(self):
         """Load ID counters from existing data."""
@@ -1139,7 +1109,7 @@ class ContractTracker(BittensorTracker):
         return all_entries
 
     def clear_all_sheets(self):
-        """Clear all transaction sheets (for regeneration)."""
+        """Clear all transaction sheets (for full regeneration)."""
         print("\n⚠️  Clearing all transaction sheets...")
         
         sheets_to_clear = [

@@ -156,13 +156,12 @@ Examples:
         wallet_client=taostats_client
     )
     
-    # Handle regeneration if requested
+    # Handle regeneration if requested (optional --end-date; when provided, lots past end are deleted)
     if args.regenerate:
         if not start_time:
-            print("Error: --start-date is required when using --regenerate to create opening lots")
+            print("Error: --start-date is required when using --regenerate")
             return 1
-        
-        tracker.clear_all_sheets()
+        tracker.regenerate_from(start_time, end_time=end_time)
         tracker.create_opening_lots(start_time)
     
     # Execute based on mode

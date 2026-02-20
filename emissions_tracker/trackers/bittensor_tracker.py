@@ -1,6 +1,7 @@
 from abc import abstractmethod
 import time
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import Any, List, Optional, Tuple
 
 import backoff
@@ -13,6 +14,7 @@ from emissions_tracker.models import (
     DisposalType, GainType, LotStatus, SourceType, TaoLot, TaoLotConsumption,
     TaoStatsStakeBalance, TaoStatsTransfer, TaoTransfer, TaoStatsDelegation
 )
+from emissions_tracker.utils import col_idx_to_letter
 
 SECONDS_PER_DAY = 86400
 RAO_PER_TAO = 10 ** 9
@@ -138,6 +140,151 @@ class BittensorTracker:
             worksheet.sort((timestamp_col, 'asc'), range=range_str)
         except Exception as e:
             print(f"  Warning: Could not sort {label} sheet: {e}")
+
+    # -------------------------------------------------------------------------
+    # Regenerate helpers (shared by ContractTracker and MiningTracker)
+    # -------------------------------------------------------------------------
+
+    def _delete_sheet_rows_where_timestamp_gte(
+        self, worksheet, timestamp_col: str, min_timestamp: int, label: str
+    ) -> int:
+        """Delete rows where record[timestamp_col] >= min_timestamp. Returns count deleted."""
+        try:
+            records = worksheet.get_all_records()
+        except Exception as e:
+            print(f"  Warning: Could not read {label} sheet: {e}")
+            return 0
+        rows_to_delete = [
+            idx for idx, rec in enumerate(records, start=2)
+            if rec.get(timestamp_col, 0) >= min_timestamp
+        ]
+        for row_idx in reversed(rows_to_delete):
+            worksheet.delete_rows(row_idx)
+        if rows_to_delete:
+            print(f"  ✓ Cleared {len(rows_to_delete)} {label.lower()} rows (timestamp >= {min_timestamp})")
+        return len(rows_to_delete)
+
+    def _delete_sheet_rows_where_timestamp_between(
+        self, worksheet, timestamp_col: str, min_ts: int, max_ts: int, label: str
+    ) -> int:
+        """Delete rows where min_ts <= record[timestamp_col] <= max_ts. Returns count deleted."""
+        try:
+            records = worksheet.get_all_records()
+        except Exception as e:
+            print(f"  Warning: Could not read {label} sheet: {e}")
+            return 0
+        rows_to_delete = [
+            idx for idx, rec in enumerate(records, start=2)
+            if min_ts <= rec.get(timestamp_col, 0) <= max_ts
+        ]
+        for row_idx in reversed(rows_to_delete):
+            worksheet.delete_rows(row_idx)
+        if rows_to_delete:
+            print(f"  ✓ Cleared {len(rows_to_delete)} {label.lower()} rows (timestamp in range)")
+        return len(rows_to_delete)
+
+    def _delete_sheet_rows_where_timestamp_gt(
+        self, worksheet, timestamp_col: str, max_timestamp: int, label: str
+    ) -> int:
+        """Delete rows where record[timestamp_col] > max_timestamp. Returns count deleted."""
+        try:
+            records = worksheet.get_all_records()
+        except Exception as e:
+            print(f"  Warning: Could not read {label} sheet: {e}")
+            return 0
+        rows_to_delete = [
+            idx for idx, rec in enumerate(records, start=2)
+            if rec.get(timestamp_col, 0) > max_timestamp
+        ]
+        for row_idx in reversed(rows_to_delete):
+            worksheet.delete_rows(row_idx)
+        if rows_to_delete:
+            print(f"  ✓ Deleted {len(rows_to_delete)} {label.lower()} rows (timestamp > {max_timestamp})")
+        return len(rows_to_delete)
+
+    def _reset_alpha_lots_from(
+        self, income_sheet, start_time: int, end_time: Optional[int] = None
+    ) -> None:
+        """Set Alpha RAO Remaining = Alpha RAO and Status = Open for lots in [start_time, end_time].
+        If end_time is None, reset all lots with Timestamp >= start_time."""
+        try:
+            records = income_sheet.get_all_records()
+        except Exception as e:
+            print(f"  Warning: Could not load income sheet: {e}")
+            return
+        headers = AlphaLot.sheet_headers()
+        rao_col = col_idx_to_letter('Alpha RAO Remaining', headers)
+        status_col = col_idx_to_letter('Status', headers)
+        updates = []
+        for idx, rec in enumerate(records, start=2):
+            ts = rec.get('Timestamp', 0)
+            if ts < start_time or (end_time is not None and ts > end_time) or rec.get('Alpha RAO', 0) <= 0:
+                continue
+            updates.append({'range': f'{rao_col}{idx}', 'values': [[rec['Alpha RAO']]]})
+            updates.append({'range': f'{status_col}{idx}', 'values': [['Open']]})
+        if updates:
+            income_sheet.batch_update(updates, value_input_option='RAW')
+            print(f"  ✓ Reset {len(updates) // 2} ALPHA lots in range")
+
+    def _reset_tao_lots_from(
+        self, tao_lots_sheet, start_time: int, end_time: Optional[int] = None
+    ) -> None:
+        """Set TAO RAO Remaining = TAO RAO and Status = Open for lots in [start_time, end_time].
+        If end_time is None, reset all lots with Timestamp >= start_time."""
+        try:
+            records = tao_lots_sheet.get_all_records()
+        except Exception as e:
+            print(f"  Warning: Could not load TAO lots sheet: {e}")
+            return
+        headers = TaoLot.sheet_headers()
+        rao_col = col_idx_to_letter('TAO RAO Remaining', headers)
+        status_col = col_idx_to_letter('Status', headers)
+        updates = []
+        for idx, rec in enumerate(records, start=2):
+            ts = rec.get('Timestamp', 0)
+            if ts < start_time or (end_time is not None and ts > end_time) or rec.get('TAO RAO', 0) <= 0:
+                continue
+            updates.append({'range': f'{rao_col}{idx}', 'values': [[rec['TAO RAO']]]})
+            updates.append({'range': f'{status_col}{idx}', 'values': [['Open']]})
+        if updates:
+            tao_lots_sheet.batch_update(updates, value_input_option='RAW')
+            print(f"  ✓ Reset {len(updates) // 2} TAO lots in range")
+
+    @abstractmethod
+    def _get_regen_disposal_sheets(self) -> List[Tuple[Any, str, str]]:
+        """Return list of (worksheet, label, timestamp_column_name) for disposal sheets to clear from start_time."""
+        ...
+
+    @abstractmethod
+    def _reset_regen_timestamps(self, start_time: int) -> None:
+        """Set last_* timestamps to start_time - 1 so processing resumes from start_time."""
+        ...
+
+    def regenerate_from(self, start_time: int, end_time: Optional[int] = None) -> None:
+        """Reset lots and clear all disposal rows from start_time onward. Optional end_time only deletes lots past it.
+        Subclasses provide disposal sheets via _get_regen_disposal_sheets() and timestamp reset via _reset_regen_timestamps().
+        """
+        resolved_end = end_time if end_time is not None else int(time.time())
+        print(
+            f"\n⚠️  Regenerating from {datetime.fromtimestamp(start_time, tz=timezone.utc).date()} "
+            f"to {datetime.fromtimestamp(resolved_end, tz=timezone.utc).date()}..."
+        )
+        # Reset lots from start_time onward (no upper bound; consumption order is preserved by clearing all disposals)
+        self._reset_alpha_lots_from(self.income_sheet, start_time, end_time=None)
+        self._reset_tao_lots_from(self.tao_lots_sheet, start_time, end_time=None)
+        # Clear everything from start_date on disposal sheets (not "between" — avoids breaking consumption order)
+        for worksheet, label, ts_col in self._get_regen_disposal_sheets():
+            self._delete_sheet_rows_where_timestamp_gte(worksheet, ts_col, start_time, label)
+        # If end_date given, delete income/TAO lots past it
+        if end_time is not None:
+            self._delete_sheet_rows_where_timestamp_gt(
+                self.income_sheet, "Timestamp", end_time, "Income"
+            )
+            self._delete_sheet_rows_where_timestamp_gt(
+                self.tao_lots_sheet, "Timestamp", end_time, "TAO Lots"
+            )
+        self._reset_regen_timestamps(start_time)
+        print("✓ Regenerate complete\n")
 
     # -------------------------------------------------------------------------
     # Lot Consumption (FIFO/HIFO strategies)
