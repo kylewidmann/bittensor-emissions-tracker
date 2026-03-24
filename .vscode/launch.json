@@ -8,7 +8,15 @@
             "name": "Contract Tracker",
             "type": "debugpy",
             "request": "launch",
-            "program": "emissions_tracker/main.py",
+            "module": "emissions_tracker.entrypoints.contract",
+            "console": "integratedTerminal",
+            "args": "${command:pickArgs}"
+        },
+        {
+            "name": "Mining Tracker",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "emissions_tracker.entrypoints.mining",
             "console": "integratedTerminal",
             "args": "${command:pickArgs}"
         }

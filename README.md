@@ -25,8 +25,10 @@ Both trackers use the same underlying logic but maintain separate Google Sheets 
 ### 1. Install Dependencies
 
 ```bash
-pip install -r requirements.txt
+poetry install
 ```
+
+This installs the package and registers the `track-contract` and `track-mining` CLI commands. You can also run entrypoints with `python -m emissions_tracker.entrypoints.contract` or `python -m emissions_tracker.entrypoints.mining`.
 
 ### 2. Configure Environment Variables
 
@@ -71,19 +73,19 @@ Track validator staking rewards and smart contract income:
 
 ```bash
 # Run daily check (all transaction types)
-python -m emissions_tracker.main --mode auto
+track-contract --mode auto
 
 # Process only income
-python -m emissions_tracker.main --mode income --lookback 30
+track-contract --mode income --lookback 30
 
 # Process only sales (ALPHA → TAO conversions)
-python -m emissions_tracker.main --mode sales --lookback 14
+track-contract --mode sales --lookback 14
 
 # Process only transfers (TAO → Kraken)
-python -m emissions_tracker.main --mode transfers --lookback 7
+track-contract --mode transfers --lookback 7
 
 # Generate monthly journal entries
-python -m emissions_tracker.main --mode journal --month 2025-11
+track-contract --mode journal --month 2025-11
 ```
 
 ### Mining Tracker
@@ -92,19 +94,19 @@ Track mining emissions from your hotkey:
 
 ```bash
 # Run daily check (all transaction types)
-python -m emissions_tracker.mining --mode auto
+track-mining --mode auto
 
 # Process only mining emissions
-python -m emissions_tracker.mining --mode income --lookback 30
+track-mining --mode income --lookback 30
 
 # Process only undelegations (ALPHA → TAO)
-python -m emissions_tracker.mining --mode sales --lookback 14
+track-mining --mode sales --lookback 14
 
 # Process only transfers (TAO → Kraken)
-python -m emissions_tracker.mining --mode transfers --lookback 7
+track-mining --mode transfers --lookback 7
 
 # Generate monthly journal entries
-python -m emissions_tracker.mining --mode journal --month 2025-11
+track-mining --mode journal --month 2025-11
 ```
 
 ## Architecture
@@ -125,7 +127,8 @@ ALPHA Income → Track Cost Basis → Undelegate (ALPHA → TAO) → Transfer to
 | **Income Sources** | Contract + Staking | Mining emissions |
 | **Google Sheet** | `TRACKER_SHEET_ID` | `MINING_TRACKER_SHEET_ID` |
 | **Wave Account** | Staking Income - Alpha | Mining Income - Alpha |
-| **Entry Point** | `emissions_tracker.main` | `emissions_tracker.mining` |
+| **CLI (after `poetry install`)** | `track-contract` | `track-mining` |
+| **`python -m` equivalent** | `python -m emissions_tracker.entrypoints.contract` | `python -m emissions_tracker.entrypoints.mining` |
 
 ### Shared Components
 
@@ -168,22 +171,31 @@ All other accounts (asset, gains/losses, fees) are shared.
 ### Running Tests
 
 ```bash
-make test
+make test-local   # recommended: Poetry + coverage on host
+# or
+make test         # Docker Compose
 ```
 
 ### Code Structure
 
 ```
 emissions_tracker/
-├── main.py           # Smart Contract tracker entry point
-├── mining.py         # Mining tracker entry point (NEW)
-├── tracker.py        # Core BittensorEmissionTracker class
-├── config.py         # Configuration settings
-├── models.py         # Data models (AlphaLot, TaoLot, etc.)
-└── clients/
-    ├── price.py      # Price fetching interface
-    ├── wallet.py     # Wallet/blockchain interface
-    └── taostats.py   # TaoStats API client
+├── entrypoints/
+│   ├── contract.py   # Smart contract tracker CLI
+│   └── mining.py     # Mining tracker CLI
+├── trackers/
+│   ├── contract_tracker.py
+│   ├── mining_tracker.py
+│   └── bittensor_tracker.py
+├── clients/
+│   ├── price.py
+│   ├── wallet.py
+│   └── taostats.py
+├── journal.py
+├── config.py
+├── models.py
+├── utils.py
+└── exceptions.py
 ```
 
 ## Troubleshooting

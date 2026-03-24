@@ -30,14 +30,14 @@ export WAVE_MINING_INCOME_ACCOUNT="Mining Income - Alpha"
 
 ```bash
 # First time: use --lookback to specify how far back to process
-python -m emissions_tracker.mining --mode auto --lookback 90
+track-mining --mode auto --lookback 90
 ```
 
 ## Daily Usage
 
 ```bash
 # Run daily check (processes new transactions since last run)
-python -m emissions_tracker.mining --mode auto
+track-mining --mode auto
 ```
 
 ## What Gets Tracked?
@@ -69,7 +69,7 @@ python -m emissions_tracker.mining --mode auto
 
 | Feature | Smart Contract | Mining |
 |---------|----------------|--------|
-| **Command** | `python -m emissions_tracker.main` | `python -m emissions_tracker.mining` |
+| **Command** | `track-contract` (or `python -m emissions_tracker.entrypoints.contract`) | `track-mining` (or `python -m emissions_tracker.entrypoints.mining`) |
 | **Hotkey** | Validator hotkey (`VALIDATOR_SS58`) | Miner hotkey (`MINER_HOTKEY_SS58`) |
 | **Google Sheet** | `TRACKER_SHEET_ID` | `MINING_TRACKER_SHEET_ID` |
 | **Income Types** | Contract + Staking | Mining |
