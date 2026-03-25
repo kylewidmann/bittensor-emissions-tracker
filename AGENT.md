@@ -4,7 +4,7 @@
 
 ## Project Identity
 
-**Bittensor Emissions Tracker** is a tax-accounting tool for Bittensor emissions. It supports two workflows—**Smart Contract** (validator staking and contract income) and **Mining** (miner hotkey rewards)—each writing to its own Google Sheets sub-ledger. The codebase is a batch-style Python application (CLI entrypoints), not a web service.
+**Bittensor Emissions Tracker** is a tax-accounting tool for Bittensor emissions. It supports three workflows—**Smart Contract** (validator staking and contract income), **Mining** (miner hotkey rewards), and **Payment** (third-party TAO payments received and transferred to brokerage)—each writing to its own Google Sheets sub-ledger. The codebase is a batch-style Python application (CLI entrypoints), not a web service.
 
 ## Stack (Non-Negotiable)
 
@@ -47,8 +47,8 @@ This is not an async HTTP API: do not default to “async-first service” patte
 | Area | Purpose |
 |------|---------|
 | **`emissions_tracker/clients/`** | External integrations (TaoStats API, wallet/substrate, pricing) |
-| **`emissions_tracker/trackers/`** | Contract tracker, mining tracker, shared Bittensor tracking |
-| **`emissions_tracker/entrypoints/`** | CLI runners (`contract`, `mining`) |
+| **`emissions_tracker/trackers/`** | Contract tracker, mining tracker, payment tracker, shared Bittensor tracking |
+| **`emissions_tracker/entrypoints/`** | CLI runners (`contract`, `mining`, `payment`) |
 | **`emissions_tracker/journal.py`** | Wave journal entry generation |
 | **`emissions_tracker/utils.py`** | Shared helpers |
 | **`tests/`** | Unit and integration tests, fixtures, sample API JSON |
@@ -60,11 +60,13 @@ After `poetry install`, Poetry exposes:
 
 - **`track-contract`** → `emissions_tracker.entrypoints.contract:run`
 - **`track-mining`** → `emissions_tracker.entrypoints.mining:run`
+- **`track-payment`** → `emissions_tracker.entrypoints.payment:run`
 
 Equivalent without console scripts:
 
 - `python -m emissions_tracker.entrypoints.contract`
 - `python -m emissions_tracker.entrypoints.mining`
+- `python -m emissions_tracker.entrypoints.payment`
 
 ## Development Commands
 

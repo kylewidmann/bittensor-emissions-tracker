@@ -1,0 +1,33 @@
+{
+  "pagination": {
+    "current_page": 1,
+    "per_page": 50,
+    "total_items": 1,
+    "total_pages": 1,
+    "next_page": null,
+    "prev_page": null
+  },
+  "data": [
+    {
+      "address": {
+        "ss58": "5FakePaymentColdkey1111111111111111111111",
+        "hex": "0xpppp1111111111111111111111111111111111111111111111111111111111pp"
+      },
+      "network": "finney",
+      "block_number": 1790000,
+      "timestamp": "2025-11-13T23:59:48Z",
+      "rank": 9999,
+      "balance_free": "1000000000",
+      "balance_reserved": "0",
+      "balance_staked": "0",
+      "balance_staked_alpha_as_tao": "0",
+      "balance_staked_root": "0",
+      "root_claim_type": "Delegate",
+      "balance_liquidity": "0",
+      "balance_total": "1000000000",
+      "created_on_date": "2025-10-01",
+      "created_on_network": "finney",
+      "coldkey_swap": null
+    }
+  ]
+}

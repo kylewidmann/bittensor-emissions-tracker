@@ -1,0 +1,84 @@
+{
+  "pagination": {
+    "current_page": 1,
+    "per_page": 50,
+    "total_items": 4,
+    "total_pages": 1,
+    "next_page": null,
+    "prev_page": null
+  },
+  "data": [
+    {
+      "id": "finney-1800100-0010",
+      "to": {
+        "ss58": "5FakePaymentColdkey1111111111111111111111",
+        "hex": "0xpppp1111111111111111111111111111111111111111111111111111111111pp"
+      },
+      "from": {
+        "ss58": "5FakeThirdParty1111111111111111111111111111",
+        "hex": "0xtttt2222222222222222222222222222222222222222222222222222222222tt"
+      },
+      "network": "finney",
+      "block_number": 1800100,
+      "timestamp": "2025-11-15T12:00:00Z",
+      "amount": "5000000000",
+      "fee": "10000",
+      "transaction_hash": "0xpay00000001aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "extrinsic_id": "1800100-0010"
+    },
+    {
+      "id": "finney-1820200-0020",
+      "to": {
+        "ss58": "5FakePaymentColdkey1111111111111111111111",
+        "hex": "0xpppp1111111111111111111111111111111111111111111111111111111111pp"
+      },
+      "from": {
+        "ss58": "5FakeThirdParty1111111111111111111111111111",
+        "hex": "0xtttt2222222222222222222222222222222222222222222222222222222222tt"
+      },
+      "network": "finney",
+      "block_number": 1820200,
+      "timestamp": "2025-11-20T12:00:00Z",
+      "amount": "3000000000",
+      "fee": "10000",
+      "transaction_hash": "0xpay00000002aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "extrinsic_id": "1820200-0020"
+    },
+    {
+      "id": "finney-1840300-0030",
+      "to": {
+        "ss58": "5FakeBroker1111111111111111111111111111",
+        "hex": "0xaaaa1111111111111111111111111111111111111111111111111111111111aa"
+      },
+      "from": {
+        "ss58": "5FakePaymentColdkey1111111111111111111111",
+        "hex": "0xpppp1111111111111111111111111111111111111111111111111111111111pp"
+      },
+      "network": "finney",
+      "block_number": 1840300,
+      "timestamp": "2025-11-25T12:00:00Z",
+      "amount": "4000000000",
+      "fee": "15000",
+      "transaction_hash": "0xpay00000003aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "extrinsic_id": "1840300-0030"
+    },
+    {
+      "id": "finney-1860400-0040",
+      "to": {
+        "ss58": "5FakeBroker1111111111111111111111111111",
+        "hex": "0xaaaa1111111111111111111111111111111111111111111111111111111111aa"
+      },
+      "from": {
+        "ss58": "5FakePaymentColdkey1111111111111111111111",
+        "hex": "0xpppp1111111111111111111111111111111111111111111111111111111111pp"
+      },
+      "network": "finney",
+      "block_number": 1860400,
+      "timestamp": "2025-12-01T12:00:00Z",
+      "amount": "3500000000",
+      "fee": "15000",
+      "transaction_hash": "0xpay00000004aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "extrinsic_id": "1860400-0040"
+    }
+  ]
+}

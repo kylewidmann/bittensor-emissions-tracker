@@ -794,14 +794,21 @@ class BittensorTracker:
         # Step 4: Sort by timestamp and process
         disposal_events.sort(key=lambda x: x.timestamp)
         
-        # Pre-fetch TAO prices for all events
+        self._prefetch_disposal_prices(disposal_events)
+        
+        # Step 5: Process each event in chronological order
+        self._execute_disposal_events(disposal_events)
+
+    def _prefetch_disposal_prices(self, disposal_events: List[DisposalEvent]) -> None:
+        """Bulk-fetch TAO prices covering all disposal events.
+
+        Subclasses may override this to use per-event lookups when disposals
+        are sparse and the time window is wide.
+        """
         min_ts = min(e.timestamp for e in disposal_events)
         max_ts = max(e.timestamp for e in disposal_events)
         print(f"  Pre-fetching TAO prices for disposal events...")
         self.price_client.get_prices_in_range('TAO', min_ts, max_ts)
-        
-        # Step 5: Process each event in chronological order
-        self._execute_disposal_events(disposal_events)
 
     def _fetch_disposal_events(
         self,

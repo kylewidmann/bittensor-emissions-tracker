@@ -6,52 +6,56 @@ and filter it based on method arguments.
 """
 
 import json
-import pytest
-from typing import List, Optional
 from datetime import datetime
+from typing import List, Optional
 
-from emissions_tracker.clients.wallet import WalletClientInterface
+import pytest
+
 from emissions_tracker.clients.price import PriceClient
-from emissions_tracker.models import (
-    TaoStatsDelegation, TaoStatsTransfer, TaoStatsStakeBalance, TaoStatsAddress,
-    TaoStatsAccountHistory
-)
+from emissions_tracker.clients.wallet import WalletClientInterface
 from emissions_tracker.exceptions import PriceNotAvailableError
+from emissions_tracker.models import (
+    TaoStatsAccountHistory,
+    TaoStatsAddress,
+    TaoStatsDelegation,
+    TaoStatsStakeBalance,
+    TaoStatsTransfer,
+)
 from tests.fixtures.mock_data import TEST_DATA_DIR
 
 
 class MockTaoStatsClient(WalletClientInterface, PriceClient):
     """
     Mock TaoStats client that returns filtered data from test fixtures.
-    
+
     Loads real test data and filters based on method arguments,
     returning properly typed model objects.
     """
-    
+
     def __init__(self, data_dir=None):
         """Initialize mock client and load test data.
-        
+
         Args:
             data_dir: Path to data directory. Defaults to TEST_DATA_DIR (tests/data/all/).
                      Can be set to tests/data/mining/ for mining tracker tests.
         """
         self.data_dir = data_dir or TEST_DATA_DIR
         self._load_test_data()
-    
+
     def _load_test_data(self):
         """Load all test data files from the configured data directory."""
         # Load delegations/stake events
         with open(self.data_dir / "stake_events.json") as f:
             self._raw_delegations = json.load(f)["data"]
-        
+
         # Load transfers
         with open(self.data_dir / "transfers.json") as f:
             self._raw_transfers = json.load(f)["data"]
-        
+
         # Load stake balance history
         with open(self.data_dir / "stake_balance.json") as f:
             self._raw_stake_balance = json.load(f)["data"]
-        
+
         # Load account history
         account_history_path = self.data_dir / "account_history.json"
         if account_history_path.exists():
@@ -59,17 +63,17 @@ class MockTaoStatsClient(WalletClientInterface, PriceClient):
                 self._raw_account_history = json.load(f)["data"]
         else:
             self._raw_account_history = []
-        
+
         # Load price data (always from main directory, shared across all tests)
         with open(TEST_DATA_DIR / "historical_tao_prices.json") as f:
             price_dict = json.load(f)
             # Convert dict to list for easier searching
             self._raw_prices = list(price_dict.values())
-    
+
     @property
     def name(self) -> str:
         return "Mock TaoStats API"
-    
+
     def get_delegations(
         self,
         netuid: int,
@@ -78,300 +82,307 @@ class MockTaoStatsClient(WalletClientInterface, PriceClient):
         start_time: int,
         end_time: int,
         is_transfer: Optional[bool] = None,
-        action: Optional[str] = None
+        action: Optional[str] = None,
     ) -> List[TaoStatsDelegation]:
         """Filter and return delegation events matching criteria.
-        
+
         Matches the real TaoStats API behavior where netuid, delegate, and nominator
         are required filters.
         """
         filtered = []
-        
+
         for event in self._raw_delegations:
             # Parse timestamp
-            event_ts = int(datetime.fromisoformat(
-                event['timestamp'].replace('Z', '+00:00')
-            ).timestamp())
-            
+            event_ts = int(
+                datetime.fromisoformat(
+                    event["timestamp"].replace("Z", "+00:00")
+                ).timestamp()
+            )
+
             # Apply time filter (inclusive on both ends)
             if event_ts < start_time or event_ts > end_time:
                 continue
-            
+
             # Apply netuid filter (required)
-            if event['netuid'] != netuid:
+            if event["netuid"] != netuid:
                 continue
-            
+
             # Apply delegate filter (required)
-            if event['delegate']['ss58'] != delegate:
+            if event["delegate"]["ss58"] != delegate:
                 continue
-            
+
             # Apply nominator filter (required)
-            if event['nominator']['ss58'] != nominator:
+            if event["nominator"]["ss58"] != nominator:
                 continue
-            
+
             # Filter by action if specified
             if action is not None:
-                if event['action'] != action.upper():
+                if event["action"] != action.upper():
                     continue
-            
+
             # Filter by is_transfer if specified
             # NOTE: Only filter if is_transfer is explicitly True or False
             # If None, include all events regardless of transfer status
             if is_transfer is not None:
-                event_is_transfer = event.get('is_transfer', False)
+                event_is_transfer = event.get("is_transfer", False)
                 if is_transfer != event_is_transfer:
                     continue
-            
+
             # Convert to TaoStatsDelegation model
             delegation = TaoStatsDelegation(
-                block_number=int(event['block_number']),
-                timestamp=event['timestamp'],
-                action=event['action'],
+                block_number=int(event["block_number"]),
+                timestamp=event["timestamp"],
+                action=event["action"],
                 nominator=TaoStatsAddress(
-                    ss58=event['nominator']['ss58'],
-                    hex=event['nominator']['hex']
+                    ss58=event["nominator"]["ss58"], hex=event["nominator"]["hex"]
                 ),
                 delegate=TaoStatsAddress(
-                    ss58=event['delegate']['ss58'],
-                    hex=event['delegate']['hex']
+                    ss58=event["delegate"]["ss58"], hex=event["delegate"]["hex"]
                 ),
-                netuid=int(event['netuid']),
-                amount=int(event['amount']),
-                alpha=int(event['alpha']),
-                usd=float(event['usd']),
-                alpha_price_in_usd=event.get('alpha_price_in_usd'),
-                alpha_price_in_tao=event.get('alpha_price_in_tao'),
-                slippage=event.get('slippage'),
-                extrinsic_id=event['extrinsic_id'],
-                is_transfer=event.get('is_transfer'),
-                transfer_address=TaoStatsAddress(
-                    ss58=event['transfer_address']['ss58'],
-                    hex=event['transfer_address']['hex']
-                ) if event.get('transfer_address') else None,
-                fee=event.get('fee')
+                netuid=int(event["netuid"]),
+                amount=int(event["amount"]),
+                alpha=int(event["alpha"]),
+                usd=float(event["usd"]),
+                alpha_price_in_usd=event.get("alpha_price_in_usd"),
+                alpha_price_in_tao=event.get("alpha_price_in_tao"),
+                slippage=event.get("slippage"),
+                extrinsic_id=event["extrinsic_id"],
+                is_transfer=event.get("is_transfer"),
+                transfer_address=(
+                    TaoStatsAddress(
+                        ss58=event["transfer_address"]["ss58"],
+                        hex=event["transfer_address"]["hex"],
+                    )
+                    if event.get("transfer_address")
+                    else None
+                ),
+                fee=event.get("fee"),
             )
             filtered.append(delegation)
-        
+
         # Sort by timestamp ascending to match real API behavior (order="timestamp_asc")
-        filtered.sort(key=lambda d: datetime.fromisoformat(d.timestamp.replace('Z', '+00:00')).timestamp())
+        filtered.sort(
+            key=lambda d: datetime.fromisoformat(
+                d.timestamp.replace("Z", "+00:00")
+            ).timestamp()
+        )
         return filtered
-    
+
     def get_transfers(
         self,
         account_address: str,
         start_time: int,
         end_time: int,
         sender: Optional[str] = None,
-        receiver: Optional[str] = None
+        receiver: Optional[str] = None,
     ) -> List[TaoStatsTransfer]:
         """Filter and return transfers matching criteria."""
         filtered = []
-        
+
         for transfer in self._raw_transfers:
             # Parse timestamp
-            transfer_ts = int(datetime.fromisoformat(
-                transfer['timestamp'].replace('Z', '+00:00')
-            ).timestamp())
-            
+            transfer_ts = int(
+                datetime.fromisoformat(
+                    transfer["timestamp"].replace("Z", "+00:00")
+                ).timestamp()
+            )
+
             # Apply filters
             if transfer_ts < start_time or transfer_ts > end_time:
                 continue
-            
+
             # Check if account_address is sender or receiver
-            is_sender = transfer['from']['ss58'] == account_address
-            is_receiver = transfer['to']['ss58'] == account_address
-            
+            is_sender = transfer["from"]["ss58"] == account_address
+            is_receiver = transfer["to"]["ss58"] == account_address
+
             if not (is_sender or is_receiver):
                 continue
-            
+
             # Apply sender filter if specified
-            if sender and transfer['from']['ss58'] != sender:
+            if sender and transfer["from"]["ss58"] != sender:
                 continue
-            
+
             # Apply receiver filter if specified
-            if receiver and transfer['to']['ss58'] != receiver:
+            if receiver and transfer["to"]["ss58"] != receiver:
                 continue
-            
+
             # Convert to TaoStatsTransfer model
             transfer_obj = TaoStatsTransfer(
-                block_number=transfer['block_number'],
-                timestamp=transfer['timestamp'],
-                transaction_hash=transfer['transaction_hash'],
-                extrinsic_id=transfer['extrinsic_id'],
-                amount=transfer['amount'],
-                fee=transfer.get('fee'),
+                block_number=transfer["block_number"],
+                timestamp=transfer["timestamp"],
+                transaction_hash=transfer["transaction_hash"],
+                extrinsic_id=transfer["extrinsic_id"],
+                amount=transfer["amount"],
+                fee=transfer.get("fee"),
                 from_address=TaoStatsAddress(
-                    ss58=transfer['from']['ss58'],
-                    hex=transfer['from']['hex']
+                    ss58=transfer["from"]["ss58"], hex=transfer["from"]["hex"]
                 ),
                 to_address=TaoStatsAddress(
-                    ss58=transfer['to']['ss58'],
-                    hex=transfer['to']['hex']
-                )
+                    ss58=transfer["to"]["ss58"], hex=transfer["to"]["hex"]
+                ),
             )
             filtered.append(transfer_obj)
-        
+
         # Sort by timestamp ascending to match real API behavior (order="timestamp_asc")
-        filtered.sort(key=lambda t: datetime.fromisoformat(t.timestamp.replace('Z', '+00:00')).timestamp())
+        filtered.sort(
+            key=lambda t: datetime.fromisoformat(
+                t.timestamp.replace("Z", "+00:00")
+            ).timestamp()
+        )
         return filtered
-    
+
     def get_stake_balance_history(
-        self,
-        netuid: int,
-        hotkey: str,
-        coldkey: str,
-        start_time: int,
-        end_time: int
+        self, netuid: int, hotkey: str, coldkey: str, start_time: int, end_time: int
     ) -> List[TaoStatsStakeBalance]:
         """Filter and return stake balance history matching criteria."""
         filtered = []
-        
+
         for balance in self._raw_stake_balance:
             # Parse timestamp
-            balance_ts = int(datetime.fromisoformat(
-                balance['timestamp'].replace('Z', '+00:00')
-            ).timestamp())
-            
+            balance_ts = int(
+                datetime.fromisoformat(
+                    balance["timestamp"].replace("Z", "+00:00")
+                ).timestamp()
+            )
+
             # Apply filters
             if balance_ts < start_time or balance_ts > end_time:
                 continue
-            
-            if balance['netuid'] != netuid:
+
+            if balance["netuid"] != netuid:
                 continue
-            
-            if balance['hotkey']['ss58'] != hotkey:
+
+            if balance["hotkey"]["ss58"] != hotkey:
                 continue
-            
-            if balance['coldkey']['ss58'] != coldkey:
+
+            if balance["coldkey"]["ss58"] != coldkey:
                 continue
-            
+
             # Convert to TaoStatsStakeBalance model
             balance_obj = TaoStatsStakeBalance(
-                block_number=balance['block_number'],
-                timestamp=balance['timestamp'],
-                hotkey_name=balance.get('hotkey_name', ''),
+                block_number=balance["block_number"],
+                timestamp=balance["timestamp"],
+                hotkey_name=balance.get("hotkey_name", ""),
                 hotkey=TaoStatsAddress(
-                    ss58=balance['hotkey']['ss58'],
-                    hex=balance['hotkey']['hex']
+                    ss58=balance["hotkey"]["ss58"], hex=balance["hotkey"]["hex"]
                 ),
                 coldkey=TaoStatsAddress(
-                    ss58=balance['coldkey']['ss58'],
-                    hex=balance['coldkey']['hex']
+                    ss58=balance["coldkey"]["ss58"], hex=balance["coldkey"]["hex"]
                 ),
-                netuid=balance['netuid'],
-                balance=balance['balance'],
-                balance_as_tao=balance['balance_as_tao']
+                netuid=balance["netuid"],
+                balance=balance["balance"],
+                balance_as_tao=balance["balance_as_tao"],
             )
             filtered.append(balance_obj)
-        
+
         return filtered
-    
+
     def get_account_history(
-        self,
-        address: str,
-        start_time: int,
-        end_time: int
+        self, address: str, start_time: int, end_time: int
     ) -> List[TaoStatsAccountHistory]:
         """Filter and return account history matching criteria."""
         filtered = []
-        
+
         for history in self._raw_account_history:
             # Parse timestamp
-            history_ts = int(datetime.fromisoformat(
-                history['timestamp'].replace('Z', '+00:00')
-            ).timestamp())
-            
+            history_ts = int(
+                datetime.fromisoformat(
+                    history["timestamp"].replace("Z", "+00:00")
+                ).timestamp()
+            )
+
             # Apply filters
             if history_ts < start_time or history_ts > end_time:
                 continue
-            
-            if history['address']['ss58'] != address:
+
+            if history["address"]["ss58"] != address:
                 continue
-            
+
             # Convert to TaoStatsAccountHistory model
             history_obj = TaoStatsAccountHistory(
                 address=TaoStatsAddress(
-                    ss58=history['address']['ss58'],
-                    hex=history['address']['hex']
+                    ss58=history["address"]["ss58"], hex=history["address"]["hex"]
                 ),
-                network=history['network'],
-                block_number=history['block_number'],
-                timestamp=history['timestamp'],
-                rank=history.get('rank'),
-                balance_free=history['balance_free'],
-                balance_reserved=history.get('balance_reserved', '0'),
-                balance_staked=history['balance_staked'],
-                balance_staked_alpha_as_tao=history.get('balance_staked_alpha_as_tao'),
-                balance_staked_root=history.get('balance_staked_root'),
-                root_claim_type=history.get('root_claim_type', ''),
-                balance_liquidity=history.get('balance_liquidity', '0'),
-                balance_total=history['balance_total'],
-                created_on_date=history.get('created_on_date'),
-                created_on_network=history.get('created_on_network'),
-                coldkey_swap=history.get('coldkey_swap')
+                network=history["network"],
+                block_number=history["block_number"],
+                timestamp=history["timestamp"],
+                rank=history.get("rank"),
+                balance_free=history["balance_free"],
+                balance_reserved=history.get("balance_reserved", "0"),
+                balance_staked=history["balance_staked"],
+                balance_staked_alpha_as_tao=history.get("balance_staked_alpha_as_tao"),
+                balance_staked_root=history.get("balance_staked_root"),
+                root_claim_type=history.get("root_claim_type", ""),
+                balance_liquidity=history.get("balance_liquidity", "0"),
+                balance_total=history["balance_total"],
+                created_on_date=history.get("created_on_date"),
+                created_on_network=history.get("created_on_network"),
+                coldkey_swap=history.get("coldkey_swap"),
             )
             filtered.append(history_obj)
-        
+
         # Sort by timestamp ascending to match real API behavior (order="timestamp_asc")
-        filtered.sort(key=lambda h: datetime.fromisoformat(h.timestamp.replace('Z', '+00:00')).timestamp())
+        filtered.sort(
+            key=lambda h: datetime.fromisoformat(
+                h.timestamp.replace("Z", "+00:00")
+            ).timestamp()
+        )
         return filtered
-    
+
     def get_price_at_timestamp(self, symbol: str, timestamp: int) -> float:
         """Get price at specific timestamp (finds closest)."""
-        if symbol != 'TAO':
+        if symbol != "TAO":
             raise PriceNotAvailableError(f"Only TAO prices available, got {symbol}")
-        
+
         if not self._raw_prices:
             raise PriceNotAvailableError("No price data available")
-        
+
         # Find closest price by timestamp
-        closest = min(
-            self._raw_prices,
-            key=lambda p: abs(p['timestamp'] - timestamp)
-        )
-        
-        return float(closest['price'])
-    
-    def get_prices_in_range(self, symbol: str, start_time: int, end_time: int) -> List[dict]:
+        closest = min(self._raw_prices, key=lambda p: abs(p["timestamp"] - timestamp))
+
+        return float(closest["price"])
+
+    def get_prices_in_range(
+        self, symbol: str, start_time: int, end_time: int
+    ) -> List[dict]:
         """Get all prices within time range."""
-        if symbol != 'TAO':
+        if symbol != "TAO":
             raise PriceNotAvailableError(f"Only TAO prices available, got {symbol}")
-        
+
         filtered = []
         for price_data in self._raw_prices:
-            price_ts = price_data['timestamp']
-            
+            price_ts = price_data["timestamp"]
+
             if start_time <= price_ts <= end_time:
-                filtered.append({
-                    'timestamp': price_ts,
-                    'price': float(price_data['price'])
-                })
-        
-        return sorted(filtered, key=lambda x: x['timestamp'])
-    
+                filtered.append(
+                    {"timestamp": price_ts, "price": float(price_data["price"])}
+                )
+
+        return sorted(filtered, key=lambda x: x["timestamp"])
+
     def get_current_price(self, symbol: str) -> float:
         """Get most recent price."""
-        if symbol != 'TAO':
+        if symbol != "TAO":
             raise PriceNotAvailableError(f"Only TAO prices available, got {symbol}")
-        
+
         if not self._raw_prices:
             raise PriceNotAvailableError("No price data available")
-        
+
         # Get most recent price
-        latest = max(self._raw_prices, key=lambda p: p['timestamp'])
-        
-        return float(latest['price'])
+        latest = max(self._raw_prices, key=lambda p: p["timestamp"])
+
+        return float(latest["price"])
 
 
 @pytest.fixture
 def mock_taostats_client():
     """
     Pytest fixture that provides a mock TaoStats client with contract test data.
-    
+
     The client automatically filters data based on method arguments,
     so tests don't need to manually setup return values.
     Uses data from tests/data/all/ directory.
-    
+
     Usage:
         def test_something(mock_taostats_client):
             # Client returns filtered data from test fixtures
@@ -391,11 +402,22 @@ def mock_taostats_client():
 def mock_mining_taostats_client():
     """
     Pytest fixture that provides a mock TaoStats client for mining tracker tests.
-    
+
     Uses data from tests/data/mining/ directory which contains only mining-specific
     data (stake balance history). Delegations and transfers are empty for mining tests.
     """
-    from pathlib import Path
+
     mining_data_dir = TEST_DATA_DIR.parent / "mining"
     return MockTaoStatsClient(data_dir=mining_data_dir)
 
+
+@pytest.fixture
+def mock_payment_taostats_client():
+    """
+    Pytest fixture that provides a mock TaoStats client for payment tracker tests.
+
+    Uses data from tests/data/payment/ directory which contains inbound payment
+    transfers and outbound brokerage transfers.
+    """
+    payment_data_dir = TEST_DATA_DIR.parent / "payment"
+    return MockTaoStatsClient(data_dir=payment_data_dir)

@@ -28,6 +28,7 @@ mypy = "^1.9.0"
 [tool.poetry.scripts]
 track-contract = "emissions_tracker.entrypoints.contract:run"
 track-mining = "emissions_tracker.entrypoints.mining:run"
+track-payment = "emissions_tracker.entrypoints.payment:run"
 
 [build-system]
 requires = ["poetry-core"]
