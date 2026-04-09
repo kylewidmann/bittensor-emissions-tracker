@@ -1,0 +1,8 @@
+Date,Type,Transaction ID,Received Quantity,Received Currency,Received Cost Basis (USD),Received Wallet,Sent Quantity,Sent Currency,Sent Cost Basis (USD),Sent Wallet,Fee Amount,Fee Currency
+2025-07-01T18:00:00.000000+00:00,deposit,9990000000000000001,10.00000000,tao,0.00,main_spotwallet,,,,,,
+2025-07-01T18:05:00.000000+00:00,trade,9990000000000000002,1745.00000000,usd,,main_spotwallet,5.00000000,tao,0.00,main_spotwallet,5.00000000,usd
+2025-07-15T10:30:00.000000+00:00,trade,9990000000000000003,1043.50000000,usd,,main_spotwallet,3.00000000,tao,0.00,main_spotwallet,0.01000000,tao
+2025-07-15T10:35:00.000000+00:00,trade,9990000000000000004,692.51000000,usd,,main_spotwallet,1.99000000,tao,0.00,main_spotwallet,0.00400000,tao
+2025-07-15T11:00:00.000000+00:00,withdrawal,9990000000000000005,,,,,3300.00000000,usd,,main_spotwallet,,
+2025-07-20T00:17:00.000000+00:00,income,9990000000000000006,0.01000000,tao,,earn_liquid,,,,,0.00200000,tao
+2025-08-01T18:00:00.000000+00:00,deposit,9990000000000000010,5.00000000,tao,0.00,main_spotwallet,,,,,,

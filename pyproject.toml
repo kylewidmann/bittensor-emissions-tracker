@@ -14,6 +14,7 @@ gspread = "^6.2.1"
 pydantic-settings = "^2.11.0"
 substrate-interface = "^1.7.11"
 backoff = "^2.2.1"
+pdfplumber = "^0.11"
 
 
 [tool.poetry.group.dev.dependencies]
@@ -29,6 +30,7 @@ mypy = "^1.9.0"
 track-contract = "emissions_tracker.entrypoints.contract:run"
 track-mining = "emissions_tracker.entrypoints.mining:run"
 track-payment = "emissions_tracker.entrypoints.payment:run"
+track-kraken = "emissions_tracker.entrypoints.kraken:run"
 
 [build-system]
 requires = ["poetry-core"]
