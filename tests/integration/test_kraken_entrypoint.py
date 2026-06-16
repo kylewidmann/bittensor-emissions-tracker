@@ -128,11 +128,10 @@ class TestKrakenEntrypointCSV:
         assert "Exchange Clearing - Kraken" in accounts
 
     def test_csv_journal_has_both_sections(self, tmp_path):
-        """Journal CSV contains both clearing and TAO Holdings entries.
+        """Journal CSV contains clearing entries (fees + price diff).
 
         The CSV parser sets rewards value_usd=0 (no FMV in CSV), so staking
-        entries only appear with PDF input. TAO fee entries still generate
-        TAO Holdings lines.
+        entries (TAO Holdings / Staking Income) only appear with PDF input.
         """
         journal_out = tmp_path / "journal.csv"
         mock_client = _mock_sheets_for_transfers(SYNTHETIC_SUBLEDGER)
@@ -176,7 +175,7 @@ class TestKrakenEntrypointCSV:
 
         accounts = [r["account"] for r in rows]
         assert "Exchange Clearing - Kraken" in accounts
-        assert "TAO Holdings" in accounts
+        assert "Exchange Fees - Kraken" in accounts
 
     def test_empty_month(self, tmp_path):
         """An empty month should produce no journal entries."""
@@ -297,4 +296,4 @@ class TestKrakenEntrypointPDF:
 
         accounts = set(r["account"] for r in rows)
         assert "Exchange Clearing - Kraken" in accounts
-        assert "TAO Holdings" in accounts
+        assert "Exchange Fees - Kraken" in accounts

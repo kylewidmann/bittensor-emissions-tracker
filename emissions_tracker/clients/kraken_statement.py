@@ -18,23 +18,18 @@ import pdfplumber
 class KrakenTrade:
     """A single trade pair extracted from a statement.
 
-    Fees are split by which side of the trade they reduce:
-    - fee_usd_cash: buy-side fee (reduces cash/USD balance)
-    - fee_usd_tao: sell-side fee (reduces TAO balance, expressed in USD)
-
-    May-Aug: fees on Buy USD side → fee_usd_cash
-    Sep+:    fees on Sell TAO side (Earn wallet) → fee_usd_tao
+    The fee is always USD regardless of which trade line it appears on.
+    Pre-Sep statements show it on the Buy USD line (cash fee); Sep+ show
+    it on the Sell TAO line (TAO consumed to pay fee).
+    ``tao_side_fee_usd`` captures the sell-side portion so the reconciler
+    can distinguish fees that reduced TAO vs fees that reduced USD.
     """
 
     date: str
     tao_sold: float
     usd_received: float
-    fee_usd_cash: float
-    fee_usd_tao: float
-
-    @property
-    def fee_usd(self) -> float:
-        return self.fee_usd_cash + self.fee_usd_tao
+    fee_usd: float
+    tao_side_fee_usd: float = 0.0
 
 
 @dataclass
@@ -102,14 +97,14 @@ class KrakenMonthSummary:
         return sum(t.fee_usd for t in self.trades)
 
     @property
-    def total_cash_fees_usd(self) -> float:
-        """Buy-side fees that reduce the cash balance."""
-        return sum(t.fee_usd_cash for t in self.trades)
+    def total_tao_side_fees_usd(self) -> float:
+        """Fees from the sell (TAO) side — paid by consuming TAO, not USD."""
+        return sum(t.tao_side_fee_usd for t in self.trades if t.tao_sold > 0)
 
     @property
-    def total_tao_fees_usd(self) -> float:
-        """Sell-side fees that reduce the TAO balance (expressed in USD)."""
-        return sum(t.fee_usd_tao for t in self.trades)
+    def total_cash_fees_usd(self) -> float:
+        """Fees from the buy (USD) side — deducted from USD proceeds."""
+        return self.total_fees_usd - self.total_tao_side_fees_usd
 
     @property
     def gross_tao_to_usd(self) -> float:
@@ -389,8 +384,8 @@ def _classify_entries(entries: list[dict], summary: KrakenMonthSummary) -> None:
                         date=pending_sell["date"],
                         tao_sold=tao_sold,
                         usd_received=usd_received,
-                        fee_usd_cash=buy_fee,
-                        fee_usd_tao=sell_fee,
+                        fee_usd=buy_fee + sell_fee,
+                        tao_side_fee_usd=sell_fee,
                     )
                 )
             elif not sell_is_tao and buy_is_tao:
@@ -403,8 +398,8 @@ def _classify_entries(entries: list[dict], summary: KrakenMonthSummary) -> None:
                         date=pending_sell["date"],
                         tao_sold=-tao_bought,
                         usd_received=-usd_spent,
-                        fee_usd_cash=sell_fee,
-                        fee_usd_tao=buy_fee,
+                        fee_usd=sell_fee + buy_fee,
+                        tao_side_fee_usd=buy_fee,
                     )
                 )
 
@@ -484,38 +479,36 @@ def parse_transactions_csv(
                     tao_sold = float(row.get("Sent Quantity", 0) or 0)
                     usd_received = float(row.get("Received Quantity", 0) or 0)
 
-                    fee_usd_cash = 0.0
-                    fee_usd_tao = 0.0
                     if fee_currency == "usd":
-                        fee_usd_cash = fee_amount
+                        fee_usd = fee_amount
                     elif fee_currency == "tao" and tao_sold > 0:
-                        price_per_tao = usd_received / tao_sold if tao_sold else 0
-                        fee_usd_tao = fee_amount * price_per_tao
+                        fee_usd = fee_amount * (usd_received / tao_sold)
+                    else:
+                        fee_usd = 0.0
 
                     summary.trades.append(
                         KrakenTrade(
                             date=date_short,
                             tao_sold=tao_sold,
                             usd_received=usd_received,
-                            fee_usd_cash=fee_usd_cash,
-                            fee_usd_tao=fee_usd_tao,
+                            fee_usd=fee_usd,
                         )
                     )
                 elif sent_currency == "usd" and recv_currency == "tao":
                     tao_bought = float(row.get("Received Quantity", 0) or 0)
                     usd_spent = float(row.get("Sent Quantity", 0) or 0)
-                    fee_usd_cash = fee_amount if fee_currency == "usd" else 0.0
-                    fee_usd_tao = 0.0
-                    if fee_currency == "tao" and tao_bought > 0:
-                        price_per_tao = usd_spent / tao_bought
-                        fee_usd_tao = fee_amount * price_per_tao
+                    if fee_currency == "usd":
+                        fee_usd = fee_amount
+                    elif fee_currency == "tao" and tao_bought > 0:
+                        fee_usd = fee_amount * (usd_spent / tao_bought)
+                    else:
+                        fee_usd = 0.0
                     summary.trades.append(
                         KrakenTrade(
                             date=date_short,
                             tao_sold=-tao_bought,
                             usd_received=-usd_spent,
-                            fee_usd_cash=fee_usd_cash,
-                            fee_usd_tao=fee_usd_tao,
+                            fee_usd=fee_usd,
                         )
                     )
 

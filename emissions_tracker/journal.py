@@ -18,12 +18,23 @@ def aggregate_monthly_journal_entries(
     wave_config: WaveAccountSettings,
     start_ts: int,
     end_ts: int,
-    deposit_income_account: Optional[str] = None,
+    tao_asset_account: Optional[str] = None,
+    alpha_asset_account: Optional[str] = None,
 ) -> Tuple[List[JournalEntry], Dict[str, float]]:
     """Aggregate sheet data into monthly journal entries.
 
     Returns the list of ``JournalEntry`` rows plus summary metrics for logging.
+
+    Args:
+        tao_asset_account: Override for the TAO asset account name. Each
+            tracker passes its own per-wallet account (e.g.
+            ``"TAO Holdings - Contract"``).
+        alpha_asset_account: Override for the ALPHA asset account name. Each
+            tracker passes its own per-wallet account (e.g.
+            ``"Alpha Holdings - Contract"``).
     """
+    tao_account = tao_asset_account or "TAO Holdings"
+    alpha_account = alpha_asset_account or "Alpha Holdings"
 
     account_totals: Dict[str, Dict[str, Any]] = defaultdict(
         lambda: {"debit": 0.0, "credit": 0.0, "notes": []}
@@ -74,7 +85,7 @@ def aggregate_monthly_journal_entries(
         if source_type == SourceType.CONTRACT.value:
             summary["contract_income"] += usd_fmv
             _add_amount(
-                wave_config.alpha_asset_account,
+                alpha_account,
                 "debit",
                 usd_fmv,
                 f"Contract lot {note}: ${usd_fmv:.2f}",
@@ -88,7 +99,7 @@ def aggregate_monthly_journal_entries(
         elif source_type == SourceType.STAKING.value:
             summary["staking_income"] += usd_fmv
             _add_amount(
-                wave_config.alpha_asset_account,
+                alpha_account,
                 "debit",
                 usd_fmv,
                 f"Staking lot {note}: ${usd_fmv:.2f}",
@@ -104,7 +115,7 @@ def aggregate_monthly_journal_entries(
                 "staking_income"
             ] += usd_fmv  # Add to staking_income summary for now
             _add_amount(
-                wave_config.alpha_asset_account,
+                alpha_account,
                 "debit",
                 usd_fmv,
                 f"Mining lot {note}: ${usd_fmv:.2f}",
@@ -115,11 +126,25 @@ def aggregate_monthly_journal_entries(
                 usd_fmv,
                 f"Mining lot {note}: ${usd_fmv:.2f}",
             )
-        elif source_type == SourceType.OPENING_BALANCE.value:
-            # Opening balance: Debit asset account, Credit equity account
-            # This establishes the initial asset value on the books
+        elif source_type == SourceType.TRANSFER_IN.value:
+            category = record.get("Category", "").strip()
+            if not category:
+                continue
             _add_amount(
-                wave_config.alpha_asset_account,
+                alpha_account,
+                "debit",
+                usd_fmv,
+                f"Inbound transfer {note}: ${usd_fmv:.2f}",
+            )
+            _add_amount(
+                category,
+                "credit",
+                usd_fmv,
+                f"Inbound transfer {note}: ${usd_fmv:.2f}",
+            )
+        elif source_type == SourceType.OPENING_BALANCE.value:
+            _add_amount(
+                alpha_account,
                 "debit",
                 usd_fmv,
                 f"Opening balance lot {note}: ${usd_fmv:.2f}",
@@ -166,13 +191,13 @@ def aggregate_monthly_journal_entries(
         summary["sales_slippage"] += slippage_usd
 
         _add_amount(
-            wave_config.tao_asset_account,
+            tao_account,
             "debit",
             proceeds,
             f"Sale {sale_id}: TAO proceeds ${proceeds:.2f}",
         )
         _add_amount(
-            wave_config.alpha_asset_account,
+            alpha_account,
             "credit",
             cost_basis,
             f"Sale {sale_id}: ALPHA cost basis ${cost_basis:.2f}",
@@ -184,7 +209,7 @@ def aggregate_monthly_journal_entries(
             _add_amount(
                 wave_config.blockchain_fee_account, "debit", sale_fee_usd, fee_note
             )
-            _add_amount(wave_config.tao_asset_account, "credit", sale_fee_usd, fee_note)
+            _add_amount(tao_account, "credit", sale_fee_usd, fee_note)
 
         bucket = gain_buckets.setdefault(gain_type, {"amount": 0.0, "notes": []})
         bucket["amount"] += gain_loss
@@ -230,7 +255,7 @@ def aggregate_monthly_journal_entries(
 
         # Credit ALPHA asset for cost basis
         _add_amount(
-            wave_config.alpha_asset_account,
+            alpha_account,
             "credit",
             cost_basis,
             f"Expense {expense_id}: ALPHA cost basis ${cost_basis:.2f}",
@@ -242,9 +267,7 @@ def aggregate_monthly_journal_entries(
             _add_amount(
                 wave_config.blockchain_fee_account, "debit", expense_fee_usd, fee_note
             )
-            _add_amount(
-                wave_config.alpha_asset_account, "credit", expense_fee_usd, fee_note
-            )
+            _add_amount(alpha_account, "credit", expense_fee_usd, fee_note)
 
         # Add gain/loss to appropriate bucket
         bucket = gain_buckets.setdefault(gain_type, {"amount": 0.0, "notes": []})
@@ -299,14 +322,14 @@ def aggregate_monthly_journal_entries(
             f"Transfer {transfer_id}: USD proceeds ${proceeds:.2f}",
         )
         _add_amount(
-            wave_config.tao_asset_account,
+            tao_account,
             "credit",
-            cost_basis,  # Use cost basis from consumed lots
+            cost_basis,
             f"Transfer {transfer_id}: TAO disposed ${cost_basis:.2f}",
         )
         if fee_cost_basis:
             _add_amount(
-                wave_config.tao_asset_account,
+                tao_account,
                 "credit",
                 fee_cost_basis,
                 f"Transfer {transfer_id}: Fee cost basis ${fee_cost_basis:.2f}",
@@ -323,10 +346,7 @@ def aggregate_monthly_journal_entries(
         bucket["amount"] += gain_loss
         bucket["notes"].append(f"Transfer {transfer_id}: ${gain_loss:.2f}")
 
-    # ------------------------- Deposits (Fiat → TAO purchases or payment income) --
-    deposit_credit_account = (
-        deposit_income_account or wave_config.business_checking_account
-    )
+    # ------------------------- Deposits (TAO received) --------------------------
     for deposit in deposit_records:
         ts = deposit.get("Timestamp")
         if ts is None:
@@ -337,22 +357,24 @@ def aggregate_monthly_journal_entries(
             continue
         if ts < start_ts or ts >= end_ts:
             continue
+
+        category = deposit.get("Category", "").strip()
+        if not category:
+            continue
         usd_fmv = deposit.get("USD FMV") or 0.0
         deposit_id = deposit.get("Deposit ID") or ""
 
         summary["deposit_total"] += usd_fmv
 
-        # Debit TAO asset (crypto acquired)
         _add_amount(
-            wave_config.tao_asset_account,
+            tao_account,
             "debit",
             usd_fmv,
             f"Deposit {deposit_id}: TAO deposit ${usd_fmv:.2f}",
         )
 
-        # Credit income account (payment received) or bank account (fiat purchase)
         _add_amount(
-            deposit_credit_account,
+            category,
             "credit",
             usd_fmv,
             f"Deposit {deposit_id}: ${usd_fmv:.2f}",
@@ -413,24 +435,52 @@ def aggregate_monthly_journal_entries(
                     notes or f"{gain_type} loss total ${abs(amount):.2f}",
                 )
 
+    account_desc_map = {
+        alpha_account: f"Alpha asset activity for {year_month}",
+        wave_config.contract_income_account: f"Contract income for {year_month}",
+        wave_config.staking_income_account: f"Staking emissions income for {year_month}",
+        wave_config.mining_income_account: f"Mining emissions income for {year_month}",
+        tao_account: f"TAO activity for {year_month}",
+        wave_config.transfer_proceeds_account: (
+            f"TAO transfer proceeds to Kraken for {year_month}"
+        ),
+        wave_config.blockchain_fee_account: (
+            f"On-chain transaction fees for {year_month}"
+        ),
+        wave_config.business_checking_account: f"Business checking for {year_month}",
+        wave_config.short_term_gain_account: (
+            f"Net short-term capital gains for {year_month}"
+        ),
+        wave_config.short_term_loss_account: (
+            f"Net short-term capital losses for {year_month}"
+        ),
+        wave_config.long_term_gain_account: (
+            f"Net long-term capital gains for {year_month}"
+        ),
+        wave_config.long_term_loss_account: (
+            f"Net long-term capital losses for {year_month}"
+        ),
+        "Opening Balance Equity": f"Opening balance equity for {year_month}",
+    }
+
     entries: List[JournalEntry] = []
     for account, values in sorted(account_totals.items()):
         debit = round(values["debit"], 2)
         credit = round(values["credit"], 2)
-        if abs(debit) < 0.005 and abs(credit) < 0.005:
+        net = round(debit - credit, 2)
+        if abs(net) < 0.005:
             continue
-        description = f"Aggregated journal for {year_month}: "
-        if values["notes"]:
-            description += ", ".join(values["notes"][:5])
-        else:
-            description += account
+        n_items = len(values["notes"])
+        description = account_desc_map.get(account, f"{account} for {year_month}")
+        if n_items:
+            description += f" ({n_items} entries)"
         entries.append(
             JournalEntry(
                 month=year_month,
                 entry_type="Monthly",
                 account=account,
-                debit=debit if debit >= 0.005 else 0.0,
-                credit=credit if credit >= 0.005 else 0.0,
+                debit=net if net > 0 else 0.0,
+                credit=abs(net) if net < 0 else 0.0,
                 description=description,
             )
         )
@@ -450,7 +500,7 @@ def aggregate_monthly_journal_entries(
                 account=target_account,
                 debit=0.0,
                 credit=0.0,
-                description=f"Aggregated journal for {year_month}: rounding adjustment",
+                description=f"Rounding adjustment for {year_month}",
             )
             entries.append(target_entry)
 
@@ -491,7 +541,13 @@ def aggregate_monthly_journal_entries(
 class JournalGenerator:
     """Generates Wave accounting journal entries from tracker sheet data."""
 
-    def __init__(self, wave_config: WaveAccountSettings, sheet_accessor):
+    def __init__(
+        self,
+        wave_config: WaveAccountSettings,
+        sheet_accessor,
+        tao_asset_account: Optional[str] = None,
+        alpha_asset_account: Optional[str] = None,
+    ):
         """
         Initialize the journal generator.
 
@@ -504,9 +560,13 @@ class JournalGenerator:
                 - transfers_sheet.get_all_records()
                 - journal_sheet (for writing)
                 - _append_rows_with_retry(sheet, rows)
+            tao_asset_account: Per-wallet TAO account name override
+            alpha_asset_account: Per-wallet ALPHA account name override
         """
         self.wave_config = wave_config
         self.sheets = sheet_accessor
+        self.tao_asset_account = tao_asset_account
+        self.alpha_asset_account = alpha_asset_account
 
     def generate_monthly(self, year: int, month: int) -> List[JournalEntry]:
         """Generate journal entries for a single month.
@@ -545,6 +605,8 @@ class JournalGenerator:
             wave_config=self.wave_config,
             start_ts=start_ts,
             end_ts=end_ts,
+            tao_asset_account=self.tao_asset_account,
+            alpha_asset_account=self.alpha_asset_account,
         )
 
         self._print_summary(year_month, len(entries), summary)
@@ -596,6 +658,8 @@ class JournalGenerator:
                     wave_config=self.wave_config,
                     start_ts=start_ts,
                     end_ts=end_ts,
+                    tao_asset_account=self.tao_asset_account,
+                    alpha_asset_account=self.alpha_asset_account,
                 )
 
                 if not entries:

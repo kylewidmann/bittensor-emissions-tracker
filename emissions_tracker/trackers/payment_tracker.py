@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -25,10 +25,12 @@ from emissions_tracker.utils import initialize_sheets
 
 RAO_PER_TAO = 10**9
 
-DEPOSITS_SHEET = "Deposits"
-TAO_LOTS_SHEET = "TAO Lots"
-TRANSFERS_SHEET = "Transfers"
-JOURNAL_SHEET = "Journal Entries"
+from emissions_tracker.sheet_names import (
+    DEPOSITS_SHEET,
+    JOURNAL_SHEET,
+    TAO_LOTS_SHEET,
+    TRANSFERS_SHEET,
+)
 
 SHEET_CONFIGS = [
     (DEPOSITS_SHEET, TaoDeposit.sheet_headers()),
@@ -82,19 +84,11 @@ class PaymentTracker(BittensorTracker):
         self._init_sheets()
         print("  ✓ Sheets initialized")
 
-        print("  Loading state from sheets...")
-        self._load_state()
-        print("  ✓ State loaded")
-
-        print("  Loading counters...")
-        self._load_counters()
-        print("  ✓ Counters loaded")
-
+        # In-memory storage
         print("  Loading data into memory...")
         self.deposits: List[TaoDeposit] = []
         self.tao_lots: List[TaoLot] = []
         self.transfers: List[TaoTransfer] = []
-        # No ALPHA lots, sales, or expenses for payment tracker
         self.alpha_lots: list = []
         self.sales: list = []
         self._load_all_data_from_sheets()
@@ -103,6 +97,10 @@ class PaymentTracker(BittensorTracker):
             f"{len(self.tao_lots)} TAO lots, "
             f"{len(self.transfers)} transfers"
         )
+
+        # Derive state from loaded data (no additional API calls)
+        self._load_state()
+        self._load_counters()
 
     def _init_sheets(self):
         """Ensure all worksheet tabs exist with correct headers and store references."""
@@ -113,37 +111,29 @@ class PaymentTracker(BittensorTracker):
         self.journal_sheet = self.sheet.worksheet(JOURNAL_SHEET)
 
     def _load_state(self):
-        """Read existing sheet data to determine where processing last left off.
-
-        Sets ``last_deposit_timestamp`` and ``last_disposal_timestamp`` so
-        subsequent runs only fetch new events from TaoStats.
-        """
+        """Derive last-processed timestamps from in-memory data."""
         self.last_deposit_timestamp = 0
         self.last_income_timestamp = 0
         self.last_disposal_timestamp = 0
 
-        try:
-            records = self._get_records_with_retry(self.deposits_sheet)
-            if records:
-                self.last_deposit_timestamp = max(r["Timestamp"] for r in records)
-                self.last_income_timestamp = self.last_deposit_timestamp
-        except Exception as e:
-            print(f"  Warning: Could not load deposit state: {e}")
+        if self.deposits:
+            self.last_deposit_timestamp = max(d.timestamp for d in self.deposits)
+            self.last_income_timestamp = self.last_deposit_timestamp
 
-        try:
-            records = self._get_records_with_retry(self.transfers_sheet)
-            if records:
-                self.last_disposal_timestamp = max(r["Timestamp"] for r in records)
-        except Exception as e:
-            print(f"  Warning: Could not load transfer state: {e}")
+        if self.transfers:
+            self.last_disposal_timestamp = max(t.timestamp for t in self.transfers)
+
+    def _get_regen_income_sheets(self):
+        return []
 
     def _get_regen_disposal_sheets(self):
         """Return disposal sheets to clear during regeneration.
 
-        Only the Transfers sheet contains disposal data for this tracker.
+        Includes deposits since they generate TAO lots that get recreated.
         """
         return [
-            (self.transfers_sheet, "Transfers", "Timestamp"),
+            (self.transfers_sheet, TRANSFERS_SHEET, "Timestamp"),
+            (self.deposits_sheet, DEPOSITS_SHEET, "Timestamp"),
         ]
 
     def _reset_regen_timestamps(self, start_time: int) -> None:
@@ -157,54 +147,19 @@ class PaymentTracker(BittensorTracker):
             self.last_disposal_timestamp = cutoff
 
     def _load_counters(self):
-        """Derive next auto-increment IDs (DEP-NNNN, TAO-NNNN, XFER-NNNN) from existing sheet rows."""
-        try:
-            records = self._get_records_with_retry(self.deposits_sheet)
-            if records:
-                ids = [
-                    r["Deposit ID"]
-                    for r in records
-                    if r.get("Deposit ID", "").startswith("DEP-")
-                ]
-                self.deposit_counter = (
-                    max([int(i.split("-")[1]) for i in ids], default=0) + 1
-                )
-            else:
-                self.deposit_counter = 1
-        except Exception:
-            self.deposit_counter = 1
+        """Derive ID counters from in-memory data."""
 
-        try:
-            records = self._get_records_with_retry(self.tao_lots_sheet)
-            if records:
-                ids = [
-                    r["TAO Lot ID"]
-                    for r in records
-                    if r.get("TAO Lot ID", "").startswith("TAO-")
-                ]
-                self.tao_lot_counter = (
-                    max([int(i.split("-")[1]) for i in ids], default=0) + 1
-                )
-            else:
-                self.tao_lot_counter = 1
-        except Exception:
-            self.tao_lot_counter = 1
+        def _max_id(items, attr, prefix):
+            ids = [
+                getattr(i, attr)
+                for i in items
+                if getattr(i, attr, "").startswith(prefix)
+            ]
+            return max([int(x.split("-")[1]) for x in ids], default=0) + 1
 
-        try:
-            records = self._get_records_with_retry(self.transfers_sheet)
-            if records:
-                ids = [
-                    r["Transfer ID"]
-                    for r in records
-                    if r.get("Transfer ID", "").startswith("XFER-")
-                ]
-                self.transfer_counter = (
-                    max([int(i.split("-")[1]) for i in ids], default=0) + 1
-                )
-            else:
-                self.transfer_counter = 1
-        except Exception:
-            self.transfer_counter = 1
+        self.deposit_counter = _max_id(self.deposits, "deposit_id", "DEP-")
+        self.tao_lot_counter = _max_id(self.tao_lots, "lot_id", "TAO-")
+        self.transfer_counter = _max_id(self.transfers, "transfer_id", "XFER-")
 
         print(
             f"  Counters: DEP={self.deposit_counter}, TAO={self.tao_lot_counter}, XFER={self.transfer_counter}"
@@ -291,7 +246,9 @@ class PaymentTracker(BittensorTracker):
             print("ℹ️  No new payment deposits found")
             return []
 
-        print(f"  Found {len(deposit_transfers)} inbound transfers, fetching prices on demand...")
+        print(
+            f"  Found {len(deposit_transfers)} inbound transfers, fetching prices on demand..."
+        )
 
         new_deposits, new_lots = self._create_payment_deposits(deposit_transfers)
 
@@ -376,7 +333,9 @@ class PaymentTracker(BittensorTracker):
 
     def _prefetch_disposal_prices(self, disposal_events) -> None:
         """Skip bulk price pre-fetch; per-event lookups are cheaper for sparse disposals."""
-        print(f"  {len(disposal_events)} disposal events — prices will be fetched on demand")
+        print(
+            f"  {len(disposal_events)} disposal events — prices will be fetched on demand"
+        )
 
     def _fetch_disposal_events(self, start_time, end_time):
         """Fetch raw blockchain data for disposal processing.
@@ -412,6 +371,7 @@ class PaymentTracker(BittensorTracker):
                         disposal_type=DisposalType.TRANSFER,
                         event=t,
                         process=lambda t=t: self._create_tao_transfer(t),
+                        extrinsic_id=t.extrinsic_id,
                     )
                 )
 
@@ -420,6 +380,42 @@ class PaymentTracker(BittensorTracker):
     # -------------------------------------------------------------------------
     # Journal Entry Generation
     # -------------------------------------------------------------------------
+
+    def _check_uncategorized_deposits(
+        self,
+        deposit_records: List[Dict[str, Any]],
+        start_ts: int,
+        end_ts: int,
+        period_name: str,
+    ):
+        """Check for uncategorized deposits and raise an error if found."""
+        uncategorized = [
+            dep
+            for dep in deposit_records
+            if start_ts <= int(dep["Timestamp"]) < end_ts
+            and not dep.get("Category", "").strip()
+        ]
+
+        if uncategorized:
+            print(
+                f"\n❌ ERROR: Found {len(uncategorized)} uncategorized deposit(s) in {period_name}"
+            )
+            print(
+                "Please categorize all deposits in the Deposits sheet before generating journal entries."
+            )
+            print("\nUncategorized deposits:")
+            for dep in uncategorized:
+                dep_date = datetime.fromtimestamp(int(dep["Timestamp"])).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+                dep_id = dep.get("Deposit ID", "unknown")
+                tao = dep.get("TAO Amount", 0)
+                print(f"  - {dep_id} ({dep_date}): {float(tao):.4f} TAO")
+            raise ValueError(
+                f"Cannot generate journal entries for {period_name}: "
+                f"{len(uncategorized)} uncategorized deposit(s) found. "
+                "Please update the Category column in the Deposits sheet."
+            )
 
     def generate_monthly_journal_entries(
         self, year_month: Optional[str] = None
@@ -455,6 +451,10 @@ class PaymentTracker(BittensorTracker):
         deposit_records = self.deposits_sheet.get_all_records()
         transfer_records = self.transfers_sheet.get_all_records()
 
+        self._check_uncategorized_deposits(
+            deposit_records, start_ts, end_ts, year_month
+        )
+
         entries, summary = aggregate_monthly_journal_entries(
             year_month,
             income_records=[],
@@ -465,7 +465,7 @@ class PaymentTracker(BittensorTracker):
             wave_config=self.wave_config,
             start_ts=start_ts,
             end_ts=end_ts,
-            deposit_income_account=self.wave_config.payment_income_account,
+            tao_asset_account=self.wave_config.payment_tao_asset_account,
         )
 
         if entries:
@@ -487,6 +487,15 @@ class PaymentTracker(BittensorTracker):
         deposit_records = self.deposits_sheet.get_all_records()
         transfer_records = self.transfers_sheet.get_all_records()
         print("✓ Data loaded\n")
+
+        year_start = datetime(year, 1, 1, tzinfo=timezone.utc)
+        year_end = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
+        self._check_uncategorized_deposits(
+            deposit_records,
+            int(year_start.timestamp()),
+            int(year_end.timestamp()),
+            str(year),
+        )
 
         all_entries: list[JournalEntry] = []
         all_rows: list[list] = []
@@ -520,7 +529,7 @@ class PaymentTracker(BittensorTracker):
                     wave_config=self.wave_config,
                     start_ts=start_ts,
                     end_ts=end_ts,
-                    deposit_income_account=self.wave_config.payment_income_account,
+                    tao_asset_account=self.wave_config.payment_tao_asset_account,
                 )
 
                 if entries:
@@ -573,17 +582,14 @@ class PaymentTracker(BittensorTracker):
         self.transfers.sort(key=lambda x: x.timestamp)
 
         sheets_to_clear = [
-            (self.deposits_sheet, "Deposits", len(self.deposits)),
-            (self.tao_lots_sheet, "TAO Lots", len(self.tao_lots)),
-            (self.transfers_sheet, "Transfers", len(self.transfers)),
+            (self.deposits_sheet, DEPOSITS_SHEET),
+            (self.tao_lots_sheet, TAO_LOTS_SHEET),
+            (self.transfers_sheet, TRANSFERS_SHEET),
         ]
 
-        for worksheet, name, _count in sheets_to_clear:
+        for worksheet, name in sheets_to_clear:
             try:
-                all_values = worksheet.get_all_values()
-                if len(all_values) > 1:
-                    last_row = len(all_values)
-                    worksheet.batch_clear([f"A2:Z{last_row}"])
+                worksheet.batch_clear(["A2:Z10000"])
             except Exception as e:
                 print(f"  Warning: Could not clear {name} sheet: {e}")
 
@@ -609,21 +615,16 @@ class PaymentTracker(BittensorTracker):
         print("\n🗑️  Clearing all sheets...")
 
         sheets_to_clear = [
-            (self.deposits_sheet, "Deposits"),
-            (self.tao_lots_sheet, "TAO Lots"),
-            (self.transfers_sheet, "Transfers"),
-            (self.journal_sheet, "Journal Entries"),
+            (self.deposits_sheet, DEPOSITS_SHEET),
+            (self.tao_lots_sheet, TAO_LOTS_SHEET),
+            (self.transfers_sheet, TRANSFERS_SHEET),
+            (self.journal_sheet, JOURNAL_SHEET),
         ]
 
         for worksheet, name in sheets_to_clear:
             try:
-                all_values = worksheet.get_all_values()
-                if len(all_values) > 1:
-                    last_row = len(all_values)
-                    worksheet.batch_clear([f"A2:Z{last_row}"])
-                    print(f"  ✓ Cleared {name} sheet ({last_row - 1} rows)")
-                else:
-                    print(f"  ✓ {name} sheet already empty")
+                worksheet.batch_clear(["A2:Z10000"])
+                print(f"  ✓ Cleared {name} sheet")
             except Exception as e:
                 print(f"  Warning: Could not clear {name} sheet: {e}")
 
@@ -682,8 +683,9 @@ class PaymentTracker(BittensorTracker):
         tao_amount = tao_balance_rao / RAO_PER_TAO
         usd_basis = tao_amount * tao_price
 
+        tao_lot_id = self._next_tao_lot_id()
         lot = TaoLot(
-            lot_id=self._next_tao_lot_id(),
+            lot_id=tao_lot_id,
             timestamp=opening_history.timestamp_unix,
             block_number=opening_history.block_number,
             rao=tao_balance_rao,
@@ -695,46 +697,23 @@ class PaymentTracker(BittensorTracker):
             status=LotStatus.OPEN,
             notes="Opening balance lot",
         )
-
         self.tao_lots.append(lot)
+
+        deposit = TaoDeposit(
+            deposit_id=self._next_deposit_id(),
+            timestamp=opening_history.timestamp_unix,
+            block_number=opening_history.block_number,
+            from_address="",
+            tao_amount=tao_amount,
+            tao_amount_rao=tao_balance_rao,
+            tao_price_usd=tao_price,
+            usd_fmv=usd_basis,
+            created_tao_lot_id=tao_lot_id,
+            category="Opening Balance Equity",
+            notes="Opening TAO balance lot",
+        )
+        self.deposits.append(deposit)
+
         print(
             f"  Created opening TAO lot: {lot.lot_id} with {tao_amount:.4f} TAO (${usd_basis:.2f})"
         )
-
-    def regenerate_from(self, start_time: int, end_time: Optional[int] = None) -> None:
-        """Re-process events from ``start_time`` by rewinding sheet and in-memory state.
-
-        Resets TAO lots to their pre-``start_time`` balances, deletes deposit
-        and transfer rows at or after ``start_time``, and rolls back timestamps
-        so the next ``run()`` re-fetches and reprocesses that window.
-        """
-        import time as _time
-        from datetime import timezone as _tz
-
-        resolved_end = end_time if end_time is not None else int(_time.time())
-        print(
-            f"\n⚠️  Regenerating from {datetime.fromtimestamp(start_time, tz=_tz.utc).date()} "
-            f"to {datetime.fromtimestamp(resolved_end, tz=_tz.utc).date()}..."
-        )
-
-        self._reset_tao_lots_from(self.tao_lots_sheet, start_time, end_time=None)
-
-        for worksheet, label, ts_col in self._get_regen_disposal_sheets():
-            self._delete_sheet_rows_where_timestamp_gte(
-                worksheet, ts_col, start_time, label
-            )
-
-        self._delete_sheet_rows_where_timestamp_gte(
-            self.deposits_sheet, "Timestamp", start_time, "Deposits"
-        )
-
-        if end_time is not None:
-            self._delete_sheet_rows_where_timestamp_gt(
-                self.tao_lots_sheet, "Timestamp", end_time, "TAO Lots"
-            )
-            self._delete_sheet_rows_where_timestamp_gt(
-                self.deposits_sheet, "Timestamp", end_time, "Deposits"
-            )
-
-        self._reset_regen_timestamps(start_time)
-        print("✓ Regenerate complete\n")

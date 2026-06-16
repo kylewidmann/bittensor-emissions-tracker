@@ -1,9 +1,8 @@
-from dataclasses import dataclass, field
+import json
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import List, Optional, Dict, Any, Callable, Tuple, Type, TypeVar, Union, ClassVar
-import json
-
+from typing import Any, Callable, ClassVar, Dict, List, Optional, Tuple, TypeVar
 
 # Type alias for field specifications
 # Format: (header_name, property_name, type_converter, default_value)
@@ -13,7 +12,7 @@ import json
 # - default_value: Default if missing (None means required)
 FieldSpec = Tuple[str, Optional[str], Optional[Callable[[Any], Any]], Any]
 
-T = TypeVar('T')
+T = TypeVar("T")
 
 
 def _identity(x: Any) -> Any:
@@ -44,22 +43,27 @@ def _int_or_zero(x: Any) -> int:
 
 # TaoStats API Response Models
 
+
 @dataclass
 class TaoStatsAddress:
     """Represents an address in TaoStats API responses."""
+
     ss58: str
     hex: str
+
 
 @dataclass
 class DailyBalance:
     """Represents the last balance snapshot for a given day."""
+
     day: str  # Date in 'YYYY-MM-DD' format
-    balance: 'TaoStatsStakeBalance'  # The balance snapshot for this day
+    balance: "TaoStatsStakeBalance"  # The balance snapshot for this day
 
 
 @dataclass
 class TaoStatsStakeBalance:
     """Represents a stake balance history entry from TaoStats API."""
+
     block_number: int
     timestamp: str
     hotkey_name: str
@@ -68,55 +72,59 @@ class TaoStatsStakeBalance:
     netuid: int
     balance: str  # RAO as string
     balance_as_tao: str  # RAO as string
-    
+
     @property
     def timestamp_unix(self) -> int:
         """Convert ISO timestamp to Unix timestamp."""
-        return int(datetime.fromisoformat(self.timestamp.replace('Z', '+00:00')).timestamp())
-    
+        return int(
+            datetime.fromisoformat(self.timestamp.replace("Z", "+00:00")).timestamp()
+        )
+
     @property
     def day(self) -> str:
         """Extract day in 'YYYY-MM-DD' format from timestamp."""
-        dt = datetime.fromisoformat(self.timestamp.replace('Z', '+00:00'))
-        return dt.strftime('%Y-%m-%d')
+        dt = datetime.fromisoformat(self.timestamp.replace("Z", "+00:00"))
+        return dt.strftime("%Y-%m-%d")
 
     @property
     def balance_as_alpha_rao(self) -> int:
         """Balance in RAO as integer."""
         return int(self.balance)
-    
+
     @property
     def balance_as_alpha_float(self) -> float:
         """Balance in TAO (converted from RAO)."""
         return int(self.balance) / 1e9
-    
+
     @property
     def balance_as_tao_rao(self) -> int:
         """Balance as TAO equivalent in RAO as integer."""
         return int(self.balance_as_tao)
-    
+
     @property
     def balance_as_tao_float(self) -> float:
         """Balance as TAO equivalent (converted from RAO)."""
         return int(self.balance_as_tao) / 1e9
 
     @classmethod
-    def from_json(cls, data: Dict[str, Any]) -> 'TaoStatsStakeBalance':
+    def from_json(cls, data: Dict[str, Any]) -> "TaoStatsStakeBalance":
         """Create a TaoStatsStakeBalance instance from JSON data."""
         return cls(
-            block_number=data['block_number'],
-            timestamp=data['timestamp'],
-            hotkey_name=data['hotkey_name'],
-            hotkey=TaoStatsAddress(**data['hotkey']),
-            coldkey=TaoStatsAddress(**data['coldkey']),
-            netuid=int(data['netuid']),
-            balance=data['balance'],
-            balance_as_tao=data['balance_as_tao']
+            block_number=data["block_number"],
+            timestamp=data["timestamp"],
+            hotkey_name=data["hotkey_name"],
+            hotkey=TaoStatsAddress(**data["hotkey"]),
+            coldkey=TaoStatsAddress(**data["coldkey"]),
+            netuid=int(data["netuid"]),
+            balance=data["balance"],
+            balance_as_tao=data["balance_as_tao"],
         )
+
 
 @dataclass
 class TaoStatsDelegation:
     """Represents a delegation event from TaoStats API."""
+
     block_number: int
     timestamp: str
     action: str
@@ -133,82 +141,93 @@ class TaoStatsDelegation:
     is_transfer: Optional[bool]
     transfer_address: Optional[TaoStatsAddress]
     fee: Optional[int]  # RAO
-    
+
     def __post_init__(self):
         """Convert optional numeric fields to proper types after initialization."""
         # Convert alpha_price_in_usd to float if not None
-        if self.alpha_price_in_usd is not None and not isinstance(self.alpha_price_in_usd, float):
+        if self.alpha_price_in_usd is not None and not isinstance(
+            self.alpha_price_in_usd, float
+        ):
             self.alpha_price_in_usd = float(self.alpha_price_in_usd)
-        
+
         # Convert alpha_price_in_tao to float if not None
-        if self.alpha_price_in_tao is not None and not isinstance(self.alpha_price_in_tao, float):
+        if self.alpha_price_in_tao is not None and not isinstance(
+            self.alpha_price_in_tao, float
+        ):
             self.alpha_price_in_tao = float(self.alpha_price_in_tao)
-        
+
         # Convert slippage to float if not None
         if self.slippage is not None and not isinstance(self.slippage, float):
             self.slippage = float(self.slippage)
-        
+
         # Convert fee to int if not None
         if self.fee is not None and not isinstance(self.fee, int):
             self.fee = int(self.fee)
-    
+
     @property
     def timestamp_unix(self) -> int:
         """Convert ISO timestamp to Unix timestamp."""
-        return int(datetime.fromisoformat(self.timestamp.replace('Z', '+00:00')).timestamp())
-    
+        return int(
+            datetime.fromisoformat(self.timestamp.replace("Z", "+00:00")).timestamp()
+        )
+
     @property
     def day(self) -> str:
         """Extract day in 'YYYY-MM-DD' format from timestamp."""
-        dt = datetime.fromisoformat(self.timestamp.replace('Z', '+00:00'))
-        return dt.strftime('%Y-%m-%d')
+        dt = datetime.fromisoformat(self.timestamp.replace("Z", "+00:00"))
+        return dt.strftime("%Y-%m-%d")
 
     @property
     def rao(self) -> int:
         """Amount in RAO as integer."""
         return int(self.amount)
-    
+
     @property
     def tao(self) -> float:
         """Amount in TAO (converted from RAO)."""
         return int(self.amount) / 1e9
-    
+
     @property
     def alpha_float(self) -> float:
         """Alpha (converted from RAO)."""
         return int(self.alpha) / 1e9
-    
+
     @property
     def fee_tao(self) -> float:
         """Fee in TAO (converted from RAO)."""
         return int(self.fee) / 1e9 if self.fee else 0.0
 
     @classmethod
-    def from_json(cls, data: Dict[str, Any]) -> 'TaoStatsDelegation':
+    def from_json(cls, data: Dict[str, Any]) -> "TaoStatsDelegation":
         """Create a TaoStatsDelegation instance from JSON data."""
         return cls(
-            block_number=int(data['block_number']),
-            timestamp=data['timestamp'],
-            action=data['action'],
-            nominator=TaoStatsAddress(**data['nominator']),
-            delegate=TaoStatsAddress(**data['delegate']),
-            netuid=int(data['netuid']),
-            amount=int(data['amount']),
-            alpha=int(data['alpha']),
-            usd=float(data['usd']),
-            alpha_price_in_usd=data.get('alpha_price_in_usd'),
-            alpha_price_in_tao=data.get('alpha_price_in_tao'),
-            slippage=data.get('slippage'),
-            extrinsic_id=data['extrinsic_id'],
-            is_transfer=data.get('is_transfer'),
-            transfer_address=TaoStatsAddress(**data['transfer_address']) if data.get('transfer_address') else None,
-            fee=data.get('fee')
+            block_number=int(data["block_number"]),
+            timestamp=data["timestamp"],
+            action=data["action"],
+            nominator=TaoStatsAddress(**data["nominator"]),
+            delegate=TaoStatsAddress(**data["delegate"]),
+            netuid=int(data["netuid"]),
+            amount=int(data["amount"]),
+            alpha=int(data["alpha"]),
+            usd=float(data["usd"]),
+            alpha_price_in_usd=data.get("alpha_price_in_usd"),
+            alpha_price_in_tao=data.get("alpha_price_in_tao"),
+            slippage=data.get("slippage"),
+            extrinsic_id=data["extrinsic_id"],
+            is_transfer=data.get("is_transfer"),
+            transfer_address=(
+                TaoStatsAddress(**data["transfer_address"])
+                if data.get("transfer_address")
+                else None
+            ),
+            fee=data.get("fee"),
         )
 
 
 @dataclass
 class TaoStatsTransfer:
     """Represents a transfer from TaoStats API."""
+
     block_number: int
     timestamp: str
     transaction_hash: str
@@ -217,27 +236,29 @@ class TaoStatsTransfer:
     fee: Optional[str]  # RAO as string
     from_address: TaoStatsAddress  # Note: API uses 'from' key
     to_address: TaoStatsAddress  # Note: API uses 'to' key
-    
+
     @property
     def timestamp_unix(self) -> int:
         """Convert ISO timestamp to Unix timestamp."""
-        return int(datetime.fromisoformat(self.timestamp.replace('Z', '+00:00')).timestamp())
-    
+        return int(
+            datetime.fromisoformat(self.timestamp.replace("Z", "+00:00")).timestamp()
+        )
+
     @property
     def amount_rao(self) -> int:
         """Amount in RAO as integer."""
         return int(self.amount)
-    
+
     @property
     def amount_tao(self) -> float:
         """Amount in TAO (converted from RAO)."""
         return int(self.amount) / 1e9
-    
+
     @property
     def fee_rao(self) -> int:
         """Fee in RAO as integer."""
         return int(self.fee) if self.fee else 0
-    
+
     @property
     def fee_tao(self) -> float:
         """Fee in TAO (converted from RAO)."""
@@ -249,23 +270,24 @@ class TaoStatsTransfer:
         return self.amount_rao + self.fee_rao
 
     @classmethod
-    def from_json(cls, data: Dict[str, Any]) -> 'TaoStatsTransfer':
+    def from_json(cls, data: Dict[str, Any]) -> "TaoStatsTransfer":
         """Create a TaoStatsTransfer instance from JSON data."""
         return cls(
-            block_number=int(data['block_number']),
-            timestamp=data['timestamp'],
-            transaction_hash=data['transaction_hash'],
-            extrinsic_id=data['extrinsic_id'],
-            amount=data['amount'],
-            fee=data.get('fee'),
-            from_address=TaoStatsAddress(**data['from']),
-            to_address=TaoStatsAddress(**data['to'])
+            block_number=int(data["block_number"]),
+            timestamp=data["timestamp"],
+            transaction_hash=data["transaction_hash"],
+            extrinsic_id=data["extrinsic_id"],
+            amount=data["amount"],
+            fee=data.get("fee"),
+            from_address=TaoStatsAddress(**data["from"]),
+            to_address=TaoStatsAddress(**data["to"]),
         )
 
 
 @dataclass
 class TaoStatsAccountHistory:
     """Represents an account history snapshot from TaoStats API."""
+
     address: TaoStatsAddress
     network: str
     block_number: int
@@ -282,91 +304,98 @@ class TaoStatsAccountHistory:
     created_on_date: str
     created_on_network: str
     coldkey_swap: Optional[str]
-    
+
     @property
     def timestamp_unix(self) -> int:
         """Convert ISO timestamp to Unix timestamp."""
-        return int(datetime.fromisoformat(self.timestamp.replace('Z', '+00:00')).timestamp())
-    
+        return int(
+            datetime.fromisoformat(self.timestamp.replace("Z", "+00:00")).timestamp()
+        )
+
     @property
     def day(self) -> str:
         """Extract day in 'YYYY-MM-DD' format from timestamp."""
-        dt = datetime.fromisoformat(self.timestamp.replace('Z', '+00:00'))
-        return dt.strftime('%Y-%m-%d')
-    
+        dt = datetime.fromisoformat(self.timestamp.replace("Z", "+00:00"))
+        return dt.strftime("%Y-%m-%d")
+
     @property
     def balance_free_rao(self) -> int:
         """Free balance in RAO as integer."""
         return int(self.balance_free)
-    
+
     @property
     def balance_free_tao(self) -> float:
         """Free balance in TAO (converted from RAO)."""
         return int(self.balance_free) / 1e9
-    
+
     @property
     def balance_staked_rao(self) -> int:
         """Staked balance in RAO as integer."""
         return int(self.balance_staked)
-    
+
     @property
     def balance_staked_tao(self) -> float:
         """Staked balance in TAO (converted from RAO)."""
         return int(self.balance_staked) / 1e9
-    
+
     @property
     def balance_total_rao(self) -> int:
         """Total balance in RAO as integer."""
         return int(self.balance_total)
-    
+
     @property
     def balance_total_tao(self) -> float:
         """Total balance in TAO (converted from RAO)."""
         return int(self.balance_total) / 1e9
-    
+
     @classmethod
-    def from_json(cls, data: Dict[str, Any]) -> 'TaoStatsAccountHistory':
+    def from_json(cls, data: Dict[str, Any]) -> "TaoStatsAccountHistory":
         """Create a TaoStatsAccountHistory instance from JSON data."""
         return cls(
-            address=TaoStatsAddress(**data['address']),
-            network=data['network'],
-            block_number=int(data['block_number']),
-            timestamp=data['timestamp'],
-            rank=int(data['rank']),
-            balance_free=data['balance_free'],
-            balance_reserved=data['balance_reserved'],
-            balance_staked=data['balance_staked'],
-            balance_staked_alpha_as_tao=data['balance_staked_alpha_as_tao'],
-            balance_staked_root=data['balance_staked_root'],
-            root_claim_type=data['root_claim_type'],
-            balance_liquidity=data['balance_liquidity'],
-            balance_total=data['balance_total'],
-            created_on_date=data['created_on_date'],
-            created_on_network=data['created_on_network'],
-            coldkey_swap=data.get('coldkey_swap')
+            address=TaoStatsAddress(**data["address"]),
+            network=data["network"],
+            block_number=int(data["block_number"]),
+            timestamp=data["timestamp"],
+            rank=int(data["rank"]),
+            balance_free=data["balance_free"],
+            balance_reserved=data["balance_reserved"],
+            balance_staked=data["balance_staked"],
+            balance_staked_alpha_as_tao=data["balance_staked_alpha_as_tao"],
+            balance_staked_root=data["balance_staked_root"],
+            root_claim_type=data["root_claim_type"],
+            balance_liquidity=data["balance_liquidity"],
+            balance_total=data["balance_total"],
+            created_on_date=data["created_on_date"],
+            created_on_network=data["created_on_network"],
+            coldkey_swap=data.get("coldkey_swap"),
         )
 
 
 # Business Logic Models
 
+
 class SourceType(Enum):
     """Income source type for ALPHA lots and TAO lots."""
+
     CONTRACT = "Contract"
     STAKING = "Staking"
     MINING = "Mining"
-    SALE = "Sale"       # TAO lot from ALPHA sale
-    DEPOSIT = "Deposit" # TAO lot from incoming TAO transfer
+    TRANSFER_IN = "Transfer In"  # Inbound staked ALPHA from another wallet
+    SALE = "Sale"  # TAO lot from ALPHA sale
+    DEPOSIT = "Deposit"  # TAO lot from incoming TAO transfer
     OPENING_BALANCE = "Opening Balance"  # Opening balance lot for initial seeding
 
 
 class CostBasisMethod(Enum):
     """Cost basis calculation method for lot consumption."""
+
     FIFO = "FIFO"  # First In First Out
     HIFO = "HIFO"  # Highest In First Out
 
 
 class LotStatus(Enum):
     """Status of a lot."""
+
     OPEN = "Open"
     PARTIAL = "Partial"
     CLOSED = "Closed"
@@ -374,12 +403,14 @@ class LotStatus(Enum):
 
 class GainType(Enum):
     """Capital gain type based on holding period."""
+
     SHORT_TERM = "Short-term"
     LONG_TERM = "Long-term"
 
 
 class DisposalType(Enum):
     """Type of disposal event for chronological processing."""
+
     SALE = "sale"
     EXPENSE = "expense"
     TRANSFER = "transfer"
@@ -388,23 +419,28 @@ class DisposalType(Enum):
 @dataclass
 class DisposalEvent:
     """Wrapper to sort different disposal types chronologically.
-    
+
     Used to process sales, expenses, and transfers in timestamp order
     rather than by type, ensuring correct lot consumption.
     """
+
     timestamp: int
     disposal_type: DisposalType
     event: Any  # TaoStatsDelegation or TaoStatsTransfer
-    process: Callable[[], Any]  # Callable that processes this event and returns the result
+    process: Callable[
+        [], Any
+    ]  # Callable that processes this event and returns the result
+    extrinsic_id: Optional[str] = None
 
 
 @dataclass
 class AlphaLot:
     """Represents an ALPHA income lot for FIFO tracking.
-    
+
     Uses RAO (integer) for all ALPHA amounts internally to avoid floating-point precision errors.
     1 ALPHA = 1e9 RAO (1,000,000,000 RAO).
     """
+
     lot_id: str
     timestamp: int
     block_number: int
@@ -416,11 +452,14 @@ class AlphaLot:
     tao_equivalent: float  # TAO equivalent at receipt
     extrinsic_id: Optional[str] = None
     transfer_address: Optional[str] = None
+    category: str = ""
     status: LotStatus = LotStatus.OPEN
     notes: str = ""
-    
+
     # Field map: (header, property, from_record_converter, default)
     # Properties set to None are computed/output-only
+    # NOTE: "Category" is placed at the end so adding it doesn't shift
+    # existing data rows in sheets that predate this column.
     FIELD_MAP: ClassVar[List[FieldSpec]] = [
         ("Lot ID", "lot_id", str, None),
         ("Date", None, None, None),  # Computed from timestamp
@@ -439,34 +478,37 @@ class AlphaLot:
         ("Long Term Date", None, None, None),  # Computed from timestamp
         ("Status", "status", LotStatus, LotStatus.OPEN),
         ("Notes", "notes", _identity, ""),
+        ("Category", "category", _identity, ""),
     ]
-    
+
     @property
     def alpha(self) -> float:
         """Original ALPHA amount (converted from RAO)."""
         return self.alpha_rao / 1e9
-    
+
     @property
     def alpha_remaining(self) -> float:
         """Remaining ALPHA amount (converted from RAO)."""
         return self.alpha_rao_remaining / 1e9
-    
+
     @property
     def date(self) -> str:
-        return datetime.fromtimestamp(self.timestamp).strftime('%Y-%m-%d %H:%M:%S')
-    
+        return datetime.fromtimestamp(self.timestamp).strftime("%Y-%m-%d %H:%M:%S")
+
     @property
     def long_term_date(self) -> str:
         """Date when lot becomes eligible for long-term capital gains (1 year)."""
-        return datetime.fromtimestamp(self.timestamp + 365 * 24 * 60 * 60).strftime('%Y-%m-%d')
-    
+        return datetime.fromtimestamp(self.timestamp + 365 * 24 * 60 * 60).strftime(
+            "%Y-%m-%d"
+        )
+
     @property
     def cost_basis_remaining(self) -> float:
         """Pro-rata cost basis for remaining ALPHA."""
         if self.alpha_rao == 0:
             return 0
         return (self.alpha_rao_remaining / self.alpha_rao) * self.usd_fmv
-    
+
     def _get_row_value(self, header: str) -> Any:
         """Get the value for a specific header column."""
         # Handle computed properties
@@ -478,7 +520,7 @@ class AlphaLot:
             return self.alpha_remaining
         elif header == "Long Term Date":
             return self.long_term_date
-        
+
         # Find the field spec
         for h, prop, _, _ in self.FIELD_MAP:
             if h == header and prop:
@@ -489,18 +531,18 @@ class AlphaLot:
                 # Handle None -> empty string
                 return val if val is not None else ""
         return ""
-    
+
     def to_sheet_row(self) -> List[Any]:
         """Convert to Google Sheets row using FIELD_MAP."""
         return [self._get_row_value(h) for h, _, _, _ in self.FIELD_MAP]
-    
+
     @classmethod
     def sheet_headers(cls) -> List[str]:
         """Get column headers from FIELD_MAP."""
         return [h for h, _, _, _ in cls.FIELD_MAP]
-    
+
     @classmethod
-    def from_record(cls, record: Dict[str, Any]) -> 'AlphaLot':
+    def from_record(cls, record: Dict[str, Any]) -> "AlphaLot":
         """Create instance from a sheet record (dict with header keys)."""
         kwargs = {}
         for header, prop, converter, default in cls.FIELD_MAP:
@@ -520,49 +562,72 @@ class AlphaLot:
 @dataclass
 class AlphaLotRow(AlphaLot):
     """AlphaLot with sheet row number attached for batch updates."""
+
     row: int = 0  # Sheet row number (1-indexed, where 1 is header)
 
 
 @dataclass
 class AlphaLotConsumption:
     """Records how much of a lot was consumed in a disposal."""
+
     lot_id: str
     alpha_consumed: float
     cost_basis_consumed: float
     acquisition_timestamp: int
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "lot_id": self.lot_id,
             "alpha": self.alpha_consumed,
             "basis": self.cost_basis_consumed,
-            "acquired": self.acquisition_timestamp
+            "acquired": self.acquisition_timestamp,
         }
-    
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "AlphaLotConsumption":
+        return cls(
+            lot_id=d["lot_id"],
+            alpha_consumed=float(d["alpha"]),
+            cost_basis_consumed=float(d["basis"]),
+            acquisition_timestamp=int(d["acquired"]),
+        )
+
+
 @dataclass
 class TaoLotConsumption:
     """Records how much of a lot was consumed in a disposal."""
+
     lot_id: str
     tao_consumed: float
     cost_basis_consumed: float
     acquisition_timestamp: int
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "lot_id": self.lot_id,
             "tao": self.tao_consumed,
             "basis": self.cost_basis_consumed,
-            "acquired": self.acquisition_timestamp
+            "acquired": self.acquisition_timestamp,
         }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "TaoLotConsumption":
+        return cls(
+            lot_id=d["lot_id"],
+            tao_consumed=float(d["tao"]),
+            cost_basis_consumed=float(d["basis"]),
+            acquisition_timestamp=int(d["acquired"]),
+        )
 
 
 @dataclass
 class TaoLot:
     """Represents a TAO lot created from ALPHA disposal.
-    
+
     Uses RAO (integer) for all TAO amounts internally to avoid floating-point precision errors.
     1 TAO = 1e9 RAO (1,000,000,000 RAO).
     """
+
     lot_id: str
     timestamp: int
     block_number: int
@@ -574,7 +639,7 @@ class TaoLot:
     extrinsic_id: Optional[str] = None
     status: LotStatus = LotStatus.OPEN
     notes: str = ""
-    
+
     FIELD_MAP: ClassVar[List[FieldSpec]] = [
         ("TAO Lot ID", "lot_id", str, None),
         ("Date", None, None, None),  # Computed
@@ -591,28 +656,28 @@ class TaoLot:
         ("Status", "status", LotStatus, LotStatus.OPEN),
         ("Notes", "notes", _identity, ""),
     ]
-    
+
     @property
     def tao(self) -> float:
         """Original TAO amount (converted from RAO)."""
         return self.rao / 1e9
-    
+
     @property
     def tao_remaining(self) -> float:
         """Remaining TAO amount (converted from RAO)."""
         return self.rao_remaining / 1e9
-    
+
     @property
     def date(self) -> str:
-        return datetime.fromtimestamp(self.timestamp).strftime('%Y-%m-%d %H:%M:%S')
-    
+        return datetime.fromtimestamp(self.timestamp).strftime("%Y-%m-%d %H:%M:%S")
+
     @property
     def basis_remaining(self) -> float:
         """Pro-rata basis for remaining TAO."""
         if self.rao == 0:
             return 0
         return (self.rao_remaining / self.rao) * self.usd_basis
-    
+
     def _get_row_value(self, header: str) -> Any:
         """Get the value for a specific header column."""
         if header == "Date":
@@ -621,7 +686,7 @@ class TaoLot:
             return self.tao
         elif header == "TAO Remaining":
             return self.tao_remaining
-        
+
         for h, prop, _, _ in self.FIELD_MAP:
             if h == header and prop:
                 val = getattr(self, prop)
@@ -629,18 +694,18 @@ class TaoLot:
                     return val.value
                 return val if val is not None else ""
         return ""
-    
+
     def to_sheet_row(self) -> List[Any]:
         """Convert to Google Sheets row using FIELD_MAP."""
         return [self._get_row_value(h) for h, _, _, _ in self.FIELD_MAP]
-    
+
     @classmethod
     def sheet_headers(cls) -> List[str]:
         """Get column headers from FIELD_MAP."""
         return [h for h, _, _, _ in cls.FIELD_MAP]
-    
+
     @classmethod
-    def from_record(cls, record: Dict[str, Any]) -> 'TaoLot':
+    def from_record(cls, record: Dict[str, Any]) -> "TaoLot":
         """Create instance from a sheet record (dict with header keys)."""
         kwargs = {}
         for header, prop, converter, default in cls.FIELD_MAP:
@@ -660,12 +725,14 @@ class TaoLot:
 @dataclass
 class TaoLotRow(TaoLot):
     """TaoLot with sheet row number attached for batch updates."""
+
     row: int = 0  # Sheet row number (1-indexed, where 1 is header)
 
 
-@dataclass 
+@dataclass
 class AlphaSale:
     """Represents an ALPHA → TAO disposal event."""
+
     sale_id: str
     timestamp: int
     block_number: int
@@ -686,7 +753,7 @@ class AlphaSale:
     network_fee_usd: float = 0.0
     extrinsic_id: Optional[str] = None
     notes: str = ""
-    
+
     FIELD_MAP: ClassVar[List[FieldSpec]] = [
         ("Sale ID", "sale_id", str, None),
         ("Date", None, None, None),  # Computed
@@ -710,26 +777,28 @@ class AlphaSale:
         ("Extrinsic ID", "extrinsic_id", _opt_str, ""),
         ("Notes", "notes", _identity, ""),
     ]
-    
+
     @property
     def date(self) -> str:
-        return datetime.fromtimestamp(self.timestamp).strftime('%Y-%m-%d %H:%M:%S')
-    
+        return datetime.fromtimestamp(self.timestamp).strftime("%Y-%m-%d %H:%M:%S")
+
     def consumed_lots_json(self) -> str:
         """JSON representation of consumed lots for sheet storage."""
         return json.dumps([c.to_dict() for c in self.consumed_lots])
-    
+
     def consumed_lots_summary(self) -> str:
         """Human-readable summary of consumed lots."""
-        return ", ".join([f"{c.lot_id}:{c.alpha_consumed:.4f}" for c in self.consumed_lots])
-    
+        return ", ".join(
+            [f"{c.lot_id}:{c.alpha_consumed:.4f}" for c in self.consumed_lots]
+        )
+
     def _get_row_value(self, header: str) -> Any:
         """Get the value for a specific header column."""
         if header == "Date":
             return self.date
         elif header == "Consumed Lots":
-            return self.consumed_lots_summary()
-        
+            return self.consumed_lots_json()
+
         for h, prop, _, _ in self.FIELD_MAP:
             if h == header and prop:
                 val = getattr(self, prop)
@@ -737,18 +806,32 @@ class AlphaSale:
                     return val.value
                 return val if val is not None else ""
         return ""
-    
+
     def to_sheet_row(self) -> List[Any]:
         """Convert to Google Sheets row using FIELD_MAP."""
         return [self._get_row_value(h) for h, _, _, _ in self.FIELD_MAP]
-    
+
     @classmethod
     def sheet_headers(cls) -> List[str]:
         """Get column headers from FIELD_MAP."""
         return [h for h, _, _, _ in cls.FIELD_MAP]
-    
+
     @classmethod
-    def from_record(cls, record: Dict[str, Any]) -> 'AlphaSale':
+    def _parse_consumed_lots(cls, raw: Any) -> List[AlphaLotConsumption]:
+        """Parse consumed lots from sheet column (JSON or legacy summary)."""
+        if not raw or raw == "":
+            return []
+        if isinstance(raw, str):
+            raw = raw.strip()
+            if raw.startswith("["):
+                try:
+                    return [AlphaLotConsumption.from_dict(d) for d in json.loads(raw)]
+                except (json.JSONDecodeError, KeyError):
+                    return []
+        return []
+
+    @classmethod
+    def from_record(cls, record: Dict[str, Any]) -> "AlphaSale":
         """Create instance from a sheet record (dict with header keys)."""
         kwargs = {}
         for header, prop, converter, default in cls.FIELD_MAP:
@@ -762,14 +845,14 @@ class AlphaSale:
             else:
                 value = converter(value)
             kwargs[prop] = value
-        # consumed_lots is not stored in sheet, initialize as empty
-        kwargs['consumed_lots'] = []
+        kwargs["consumed_lots"] = cls._parse_consumed_lots(record.get("Consumed Lots"))
         return cls(**kwargs)
 
 
 @dataclass
 class TaoTransfer:
     """Represents a TAO → Kraken transfer event."""
+
     transfer_id: str
     timestamp: int
     block_number: int
@@ -786,7 +869,7 @@ class TaoTransfer:
     total_outflow_tao: float = 0.0
     fee_tao: float = 0.0
     fee_cost_basis_usd: float = 0.0
-    
+
     FIELD_MAP: ClassVar[List[FieldSpec]] = [
         ("Transfer ID", "transfer_id", str, None),
         ("Date", None, None, None),  # Computed
@@ -806,21 +889,27 @@ class TaoTransfer:
         ("Fee TAO", "fee_tao", _float_or_zero, 0.0),
         ("Fee Cost Basis USD", "fee_cost_basis_usd", _float_or_zero, 0.0),
     ]
-    
+
     @property
     def date(self) -> str:
-        return datetime.fromtimestamp(self.timestamp).strftime('%Y-%m-%d %H:%M:%S')
-    
+        return datetime.fromtimestamp(self.timestamp).strftime("%Y-%m-%d %H:%M:%S")
+
+    def consumed_tao_lots_json(self) -> str:
+        """JSON representation of consumed TAO lots for sheet storage."""
+        return json.dumps([c.to_dict() for c in self.consumed_tao_lots])
+
     def consumed_lots_summary(self) -> str:
-        return ", ".join([f"{c.lot_id}:{c.tao_consumed:.4f}" for c in self.consumed_tao_lots])
-    
+        return ", ".join(
+            [f"{c.lot_id}:{c.tao_consumed:.4f}" for c in self.consumed_tao_lots]
+        )
+
     def _get_row_value(self, header: str) -> Any:
         """Get the value for a specific header column."""
         if header == "Date":
             return self.date
         elif header == "Consumed TAO Lots":
-            return self.consumed_lots_summary()
-        
+            return self.consumed_tao_lots_json()
+
         for h, prop, _, _ in self.FIELD_MAP:
             if h == header and prop:
                 val = getattr(self, prop)
@@ -828,18 +917,32 @@ class TaoTransfer:
                     return val.value
                 return val if val is not None else ""
         return ""
-    
+
     def to_sheet_row(self) -> List[Any]:
         """Convert to Google Sheets row using FIELD_MAP."""
         return [self._get_row_value(h) for h, _, _, _ in self.FIELD_MAP]
-    
+
     @classmethod
     def sheet_headers(cls) -> List[str]:
         """Get column headers from FIELD_MAP."""
         return [h for h, _, _, _ in cls.FIELD_MAP]
-    
+
     @classmethod
-    def from_record(cls, record: Dict[str, Any]) -> 'TaoTransfer':
+    def _parse_consumed_tao_lots(cls, raw: Any) -> List[TaoLotConsumption]:
+        """Parse consumed TAO lots from sheet column (JSON or legacy summary)."""
+        if not raw or raw == "":
+            return []
+        if isinstance(raw, str):
+            raw = raw.strip()
+            if raw.startswith("["):
+                try:
+                    return [TaoLotConsumption.from_dict(d) for d in json.loads(raw)]
+                except (json.JSONDecodeError, KeyError):
+                    return []
+        return []
+
+    @classmethod
+    def from_record(cls, record: Dict[str, Any]) -> "TaoTransfer":
         """Create instance from a sheet record (dict with header keys)."""
         kwargs = {}
         for header, prop, converter, default in cls.FIELD_MAP:
@@ -853,14 +956,16 @@ class TaoTransfer:
             else:
                 value = converter(value)
             kwargs[prop] = value
-        # consumed_tao_lots is not stored in sheet, initialize as empty
-        kwargs['consumed_tao_lots'] = []
+        kwargs["consumed_tao_lots"] = cls._parse_consumed_tao_lots(
+            record.get("Consumed TAO Lots")
+        )
         return cls(**kwargs)
 
 
 @dataclass
 class Expense:
     """Represents an ALPHA → TAO payment/expense event (transferred to another entity)."""
+
     expense_id: str
     timestamp: int
     block_number: int
@@ -874,7 +979,9 @@ class Expense:
     consumed_lots: List[AlphaLotConsumption]
     created_tao_lot_id: str  # Link to TAO lot created
     transfer_address: str  # Address the TAO was transferred to
-    category: str = ""  # User fills this in (e.g., "Payment to Entity", "Distribution", etc.)
+    category: str = (
+        ""  # User fills this in (e.g., "Payment to Entity", "Distribution", etc.)
+    )
     tao_expected: float = 0.0
     tao_slippage: float = 0.0
     slippage_usd: float = 0.0
@@ -883,7 +990,7 @@ class Expense:
     network_fee_usd: float = 0.0
     extrinsic_id: Optional[str] = None
     notes: str = ""
-    
+
     FIELD_MAP: ClassVar[List[FieldSpec]] = [
         ("Expense ID", "expense_id", str, None),
         ("Date", None, None, None),  # Computed
@@ -909,26 +1016,28 @@ class Expense:
         ("Extrinsic ID", "extrinsic_id", _opt_str, ""),
         ("Notes", "notes", _identity, ""),
     ]
-    
+
     @property
     def date(self) -> str:
-        return datetime.fromtimestamp(self.timestamp).strftime('%Y-%m-%d %H:%M:%S')
-    
+        return datetime.fromtimestamp(self.timestamp).strftime("%Y-%m-%d %H:%M:%S")
+
     def consumed_lots_json(self) -> str:
         """JSON representation of consumed lots for sheet storage."""
         return json.dumps([c.to_dict() for c in self.consumed_lots])
-    
+
     def consumed_lots_summary(self) -> str:
         """Human-readable summary of consumed lots."""
-        return ", ".join([f"{c.lot_id}:{c.alpha_consumed:.4f}" for c in self.consumed_lots])
-    
+        return ", ".join(
+            [f"{c.lot_id}:{c.alpha_consumed:.4f}" for c in self.consumed_lots]
+        )
+
     def _get_row_value(self, header: str) -> Any:
         """Get the value for a specific header column."""
         if header == "Date":
             return self.date
         elif header == "Consumed Lots":
-            return self.consumed_lots_summary()
-        
+            return self.consumed_lots_json()
+
         for h, prop, _, _ in self.FIELD_MAP:
             if h == header and prop:
                 val = getattr(self, prop)
@@ -936,18 +1045,32 @@ class Expense:
                     return val.value
                 return val if val is not None else ""
         return ""
-    
+
     def to_sheet_row(self) -> List[Any]:
         """Convert to Google Sheets row using FIELD_MAP."""
         return [self._get_row_value(h) for h, _, _, _ in self.FIELD_MAP]
-    
+
     @classmethod
     def sheet_headers(cls) -> List[str]:
         """Get column headers from FIELD_MAP."""
         return [h for h, _, _, _ in cls.FIELD_MAP]
-    
+
     @classmethod
-    def from_record(cls, record: Dict[str, Any]) -> 'Expense':
+    def _parse_consumed_lots(cls, raw: Any) -> List[AlphaLotConsumption]:
+        """Parse consumed lots from sheet column (JSON or legacy summary)."""
+        if not raw or raw == "":
+            return []
+        if isinstance(raw, str):
+            raw = raw.strip()
+            if raw.startswith("["):
+                try:
+                    return [AlphaLotConsumption.from_dict(d) for d in json.loads(raw)]
+                except (json.JSONDecodeError, KeyError):
+                    return []
+        return []
+
+    @classmethod
+    def from_record(cls, record: Dict[str, Any]) -> "Expense":
         """Create instance from a sheet record (dict with header keys)."""
         kwargs = {}
         for header, prop, converter, default in cls.FIELD_MAP:
@@ -961,14 +1084,14 @@ class Expense:
             else:
                 value = converter(value)
             kwargs[prop] = value
-        # consumed_lots is not stored in sheet, initialize as empty
-        kwargs['consumed_lots'] = []
+        kwargs["consumed_lots"] = cls._parse_consumed_lots(record.get("Consumed Lots"))
         return cls(**kwargs)
 
 
 @dataclass
 class TaoDeposit:
     """Represents an incoming TAO transfer (deposit) that creates a TAO lot."""
+
     deposit_id: str
     timestamp: int
     block_number: int
@@ -978,10 +1101,12 @@ class TaoDeposit:
     tao_price_usd: float
     usd_fmv: float  # Fair market value at time of receipt
     created_tao_lot_id: str  # Link to TAO lot created
-    category: str = ""  # User fills this in (e.g., "Gift", "Payment Received", "Refund", etc.)
+    category: str = (
+        ""  # User fills this in (e.g., "Gift", "Payment Received", "Refund", etc.)
+    )
     extrinsic_id: Optional[str] = None
     notes: str = ""
-    
+
     FIELD_MAP: ClassVar[List[FieldSpec]] = [
         ("Deposit ID", "deposit_id", str, None),
         ("Date", None, None, None),  # Computed
@@ -997,16 +1122,16 @@ class TaoDeposit:
         ("Extrinsic ID", "extrinsic_id", _opt_str, ""),
         ("Notes", "notes", _identity, ""),
     ]
-    
+
     @property
     def date(self) -> str:
-        return datetime.fromtimestamp(self.timestamp).strftime('%Y-%m-%d %H:%M:%S')
-    
+        return datetime.fromtimestamp(self.timestamp).strftime("%Y-%m-%d %H:%M:%S")
+
     def _get_row_value(self, header: str) -> Any:
         """Get the value for a specific header column."""
         if header == "Date":
             return self.date
-        
+
         for h, prop, _, _ in self.FIELD_MAP:
             if h == header and prop:
                 val = getattr(self, prop)
@@ -1014,18 +1139,18 @@ class TaoDeposit:
                     return val.value
                 return val if val is not None else ""
         return ""
-    
+
     def to_sheet_row(self) -> List[Any]:
         """Convert to Google Sheets row using FIELD_MAP."""
         return [self._get_row_value(h) for h, _, _, _ in self.FIELD_MAP]
-    
+
     @classmethod
     def sheet_headers(cls) -> List[str]:
         """Get column headers from FIELD_MAP."""
         return [h for h, _, _, _ in cls.FIELD_MAP]
-    
+
     @classmethod
-    def from_record(cls, record: Dict[str, Any]) -> 'TaoDeposit':
+    def from_record(cls, record: Dict[str, Any]) -> "TaoDeposit":
         """Create instance from a sheet record (dict with header keys)."""
         kwargs = {}
         for header, prop, converter, default in cls.FIELD_MAP:
@@ -1045,13 +1170,14 @@ class TaoDeposit:
 @dataclass
 class JournalEntry:
     """Represents a Wave journal entry row."""
+
     month: str  # YYYY-MM
     entry_type: str  # Income, Sale, Transfer
     account: str
     debit: float
     credit: float
     description: str
-    
+
     def to_sheet_row(self) -> List[Any]:
         return [
             self.month,
@@ -1059,9 +1185,9 @@ class JournalEntry:
             self.account,
             self.debit if self.debit > 0 else "",
             self.credit if self.credit > 0 else "",
-            self.description
+            self.description,
         ]
-    
+
     @classmethod
     def sheet_headers(cls) -> List[str]:
         return ["Month", "Entry Type", "Account", "Debit", "Credit", "Description"]

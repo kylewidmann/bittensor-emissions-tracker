@@ -46,6 +46,12 @@ Examples:
   # Generate journal entries for entire year
   track-payment --mode journal --year 2025
 
+  # Verify balances against on-chain data for a month
+  track-payment --mode verify --month 2025-11
+
+  # Verify balances for entire year
+  track-payment --mode verify --year 2025
+
   # Regenerate all data (clear and reprocess from date)
   track-payment --mode auto --start-date 2024-01-01 --regenerate
         """,
@@ -53,13 +59,14 @@ Examples:
 
     parser.add_argument(
         "--mode",
-        choices=["auto", "income", "transfers", "journal"],
+        choices=["auto", "income", "transfers", "journal", "verify"],
         default="auto",
         help="""Mode of operation:
             auto - Process all transaction types (default)
             income - Process only inbound TAO payments
             transfers - Process only TAO → brokerage transfers
             journal - Generate monthly Wave journal entries
+            verify - Verify lot balances against on-chain data
         """,
     )
 
@@ -100,6 +107,12 @@ Examples:
         help="Clear existing data before processing (forces full regeneration)",
     )
 
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Show detailed lot breakdown in verify mode (auto-enabled on mismatch)",
+    )
+
     args = parser.parse_args()
 
     start_time = parse_date(args.start_date) if args.start_date else None
@@ -126,9 +139,11 @@ Examples:
 
     print("Initializing Payment tracker...")
     tracker = PaymentTracker(
-        price_client=taostats_client, wallet_client=taostats_client
+        price_client=taostats_client,
+        wallet_client=taostats_client,
     )
 
+    # Handle regeneration if requested
     if args.regenerate:
         if not start_time:
             print("Error: --start-date is required when using --regenerate")
@@ -163,6 +178,19 @@ Examples:
                     month = f"{today.year}-{today.month - 1:02d}"
             print(f"\nGenerating journal entries for {month}...")
             tracker.generate_monthly_journal_entries(month)
+
+    elif args.mode == "verify":
+        if args.year:
+            tracker.verify_balances_yearly(
+                args.year, wallet_label="Payment", verbose=args.verbose
+            )
+        elif args.month:
+            tracker.verify_balances(
+                args.month, wallet_label="Payment", verbose=args.verbose
+            )
+        else:
+            print("Error: --year or --month is required for verify mode")
+            return 1
 
     print("\n✓ Done!")
 

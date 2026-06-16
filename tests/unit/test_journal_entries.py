@@ -19,6 +19,10 @@ def _collect_totals(entries):
     return totals, total_debits, total_credits
 
 
+TAO_ACCOUNT = "TAO Holdings - Contract"
+ALPHA_ACCOUNT = "Alpha Holdings - Contract"
+
+
 def test_aggregate_monthly_journal_entries_balances_double_entry():
     year_month = "2025-11"
     start_ts = 0
@@ -26,9 +30,24 @@ def test_aggregate_monthly_journal_entries_balances_double_entry():
     wave = WaveAccountSettings()
 
     income_records = [
-        {"Timestamp": 10, "Source Type": "Contract", "USD FMV": 100.0, "Lot ID": "ALPHA-1"},
-        {"Timestamp": 20, "Source Type": "Staking", "USD FMV": 50.0, "Lot ID": "ALPHA-2"},
-        {"Timestamp": 500, "Source Type": "Contract", "USD FMV": 999.0, "Lot ID": "OUTSIDE"},
+        {
+            "Timestamp": 10,
+            "Source Type": "Contract",
+            "USD FMV": 100.0,
+            "Lot ID": "ALPHA-1",
+        },
+        {
+            "Timestamp": 20,
+            "Source Type": "Staking",
+            "USD FMV": 50.0,
+            "Lot ID": "ALPHA-2",
+        },
+        {
+            "Timestamp": 500,
+            "Source Type": "Contract",
+            "USD FMV": 999.0,
+            "Lot ID": "OUTSIDE",
+        },
     ]
 
     sales_records = [
@@ -113,33 +132,105 @@ def test_aggregate_monthly_journal_entries_balances_double_entry():
         wave,
         start_ts,
         end_ts,
+        tao_asset_account=TAO_ACCOUNT,
+        alpha_asset_account=ALPHA_ACCOUNT,
     )
 
     totals, total_debits, total_credits = _collect_totals(entries)
     assert math.isclose(total_debits, total_credits, rel_tol=1e-9)
 
-    assert math.isclose(totals[wave.alpha_asset_account]["debit"], 150.0)
-    assert math.isclose(totals[wave.alpha_asset_account]["credit"], 280.0)
+    # ALPHA: debit=150, credit=280 → net credit $130
+    assert math.isclose(totals[ALPHA_ACCOUNT]["debit"], 0.0)
+    assert math.isclose(totals[ALPHA_ACCOUNT]["credit"], 130.0)
 
-    assert math.isclose(totals[wave.tao_asset_account]["debit"], 300.0)
-    assert math.isclose(totals[wave.tao_asset_account]["credit"], 450.0)  # Transfer cost basis (370) + fees (10) + Sale proceeds (70)
+    # TAO: debit=300, credit=450 → net credit $150
+    assert math.isclose(totals[TAO_ACCOUNT]["debit"], 0.0)
+    assert math.isclose(totals[TAO_ACCOUNT]["credit"], 150.0)
 
     assert math.isclose(totals[wave.transfer_proceeds_account]["debit"], 430.0)
     assert math.isclose(totals[wave.blockchain_fee_account]["debit"], 10.0)
 
-    assert math.isclose(totals[wave.short_term_gain_account]["credit"], 20.0)  # 50 (SALE-1) - 30 (SALE-2) + 20 (XFER-1) - 20 (XFER-2)
+    assert math.isclose(totals[wave.short_term_gain_account]["credit"], 20.0)
     assert math.isclose(totals[wave.long_term_loss_account]["debit"], 10.0)
-    assert math.isclose(totals.get(wave.short_term_loss_account, {"debit": 0.0}).get("debit", 0.0), 0.0)
-    assert math.isclose(totals.get(wave.long_term_gain_account, {"credit": 0.0}).get("credit", 0.0), 0.0)
+    assert math.isclose(
+        totals.get(wave.short_term_loss_account, {"debit": 0.0}).get("debit", 0.0), 0.0
+    )
+    assert math.isclose(
+        totals.get(wave.long_term_gain_account, {"credit": 0.0}).get("credit", 0.0), 0.0
+    )
+
+    for entry in entries:
+        assert "Aggregated journal" not in entry.description
+        assert year_month in entry.description
 
     assert summary["contract_income"] == 100.0
     assert summary["staking_income"] == 50.0
     assert summary["sales_proceeds"] == 300.0
-    assert summary["sales_gain"] == 20.0  # 50 - 30 = 20 (slippage reflected in proceeds, not subtracted again)
+    assert (
+        summary["sales_gain"] == 20.0
+    )  # 50 - 30 = 20 (slippage reflected in proceeds, not subtracted again)
     assert summary["sales_slippage"] == 5.0
     assert summary["sales_fees"] == 0.0
     assert summary["transfer_gain"] == -10.0
     assert summary["transfer_fees"] == 10.0
+
+
+def test_sale_network_fees_balance_tao_holdings():
+    """Sale network fees credit TAO Holdings so that over the lifetime of a lot
+    (creation via sale, consumption via transfer) TAO Holdings nets to zero."""
+    wave = WaveAccountSettings()
+    start_ts = 0
+    end_ts = 200
+
+    sales_records = [
+        {
+            "Timestamp": 50,
+            "Sale ID": "SALE-1",
+            "USD Proceeds": 500.0,
+            "Cost Basis": 400.0,
+            "Realized Gain/Loss": 100.0,
+            "Gain Type": "Short-term",
+            "Network Fee (USD)": 10.0,
+        },
+    ]
+
+    transfer_records = [
+        {
+            "Timestamp": 100,
+            "Transfer ID": "XFER-1",
+            "USD Proceeds": 510.0,
+            "Cost Basis": 490.0,
+            "Realized Gain/Loss": 20.0,
+            "Gain Type": "Short-term",
+        },
+    ]
+
+    entries, summary = aggregate_monthly_journal_entries(
+        "2025-11",
+        [],
+        sales_records,
+        [],
+        transfer_records,
+        [],
+        wave,
+        start_ts,
+        end_ts,
+        tao_asset_account=TAO_ACCOUNT,
+        alpha_asset_account=ALPHA_ACCOUNT,
+    )
+
+    totals, total_debits, total_credits = _collect_totals(entries)
+    assert math.isclose(total_debits, total_credits, rel_tol=1e-9)
+
+    # Sale debits TAO $500, credits TAO $10 (fee) → net debit $490
+    # Transfer credits TAO $490 (lot basis after fee adjustment)
+    # TAO Holdings nets to zero so no aggregated entry is emitted
+    tao_bucket = totals.get(TAO_ACCOUNT, {"debit": 0.0, "credit": 0.0})
+    assert math.isclose(tao_bucket["debit"], 0.0)
+    assert math.isclose(tao_bucket["credit"], 0.0)
+
+    assert summary["sales_fees"] == 10.0
+    assert math.isclose(totals[wave.blockchain_fee_account]["debit"], 10.0)
 
 
 def test_rounding_adjustment_balances_totals_with_combined_accounts():
@@ -148,7 +239,12 @@ def test_rounding_adjustment_balances_totals_with_combined_accounts():
     wave.short_term_loss_account = "Short-term Capital Gains"
 
     income_records = [
-        {"Timestamp": 10, "Source Type": "Contract", "USD FMV": 0.8444218515, "Lot ID": "ALPHA-1"},
+        {
+            "Timestamp": 10,
+            "Source Type": "Contract",
+            "USD FMV": 0.8444218515,
+            "Lot ID": "ALPHA-1",
+        },
     ]
     sales_records = [
         {
@@ -171,6 +267,8 @@ def test_rounding_adjustment_balances_totals_with_combined_accounts():
         wave,
         0,
         100,
+        tao_asset_account=TAO_ACCOUNT,
+        alpha_asset_account=ALPHA_ACCOUNT,
     )
 
     total_debits = round(sum(e.debit for e in entries), 2)

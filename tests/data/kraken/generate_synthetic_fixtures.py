@@ -12,7 +12,6 @@ from pathlib import Path
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 
-
 OUTPUT_DIR = Path(__file__).parent
 
 
@@ -51,7 +50,9 @@ def generate_synthetic_pdf():
     write_line("Total 0")
     write_line("")
     write_line("Activity")
-    write_line("Date (UTC) Type Instrument Wallet Amount Price (USD) Fee (USD) Value (USD)")
+    write_line(
+        "Date (UTC) Type Instrument Wallet Amount Price (USD) Fee (USD) Value (USD)"
+    )
     # Deposit
     write_line("2025-07-01 Deposit Bittensor")
     write_line("Spot / Main 10.00000000 350.00 0 3,500.0000")
@@ -69,7 +70,9 @@ def generate_synthetic_pdf():
     # Page 2: Trades
     y = height - 40
     write_line("Activity")
-    write_line("Date (UTC) Type Instrument Wallet Amount Price (USD) Fee (USD) Value (USD)")
+    write_line(
+        "Date (UTC) Type Instrument Wallet Amount Price (USD) Fee (USD) Value (USD)"
+    )
     # Trade 1: TAO → USD with USD fee (May-Aug style)
     write_line("2025-07-01 Trade Sell Bittensor")
     write_line("Earn / Liquid -5.00000000 350.00 0 -1,750.0000")
@@ -231,10 +234,19 @@ def generate_synthetic_csv():
     ]
 
     fieldnames = [
-        "Date", "Type", "Transaction ID",
-        "Received Quantity", "Received Currency", "Received Cost Basis (USD)",
-        "Received Wallet", "Sent Quantity", "Sent Currency",
-        "Sent Cost Basis (USD)", "Sent Wallet", "Fee Amount", "Fee Currency",
+        "Date",
+        "Type",
+        "Transaction ID",
+        "Received Quantity",
+        "Received Currency",
+        "Received Cost Basis (USD)",
+        "Received Wallet",
+        "Sent Quantity",
+        "Sent Currency",
+        "Sent Cost Basis (USD)",
+        "Sent Wallet",
+        "Fee Amount",
+        "Fee Currency",
     ]
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)

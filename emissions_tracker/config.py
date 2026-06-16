@@ -98,7 +98,7 @@ class WaveAccountSettings(BaseSettings):
 
     # Income accounts
     contract_income_account: str = Field(
-        "Contractor Income - Alpha",
+        "Smart Contract Income - Alpha",
         alias="WAVE_CONTRACT_INCOME_ACCOUNT",
         description="Wave account for smart contract income",
     )
@@ -113,21 +113,41 @@ class WaveAccountSettings(BaseSettings):
         description="Wave account for mining emissions income",
     )
     payment_income_account: str = Field(
-        "Payment Income - TAO",
+        "Consulting Income - TAO",
         alias="WAVE_PAYMENT_INCOME_ACCOUNT",
         description="Wave account for TAO payments received from third parties",
     )
 
     # Asset accounts
-    alpha_asset_account: str = Field(
-        "Alpha Holdings",
-        alias="WAVE_ALPHA_ASSET_ACCOUNT",
-        description="Wave account for ALPHA holdings",
+    contract_alpha_asset_account: str = Field(
+        "Alpha Holdings - Contract",
+        alias="WAVE_CONTRACT_ALPHA_ACCOUNT",
+        description="Wave account for ALPHA holdings in the contract/emissions wallet",
     )
-    tao_asset_account: str = Field(
-        "TAO Holdings",
-        alias="WAVE_TAO_ASSET_ACCOUNT",
-        description="Wave account for TAO holdings",
+    mining_alpha_asset_account: str = Field(
+        "Alpha Holdings - Mining",
+        alias="WAVE_MINING_ALPHA_ACCOUNT",
+        description="Wave account for ALPHA holdings in the mining wallet",
+    )
+    contract_tao_asset_account: str = Field(
+        "TAO Holdings - Contract",
+        alias="WAVE_CONTRACT_TAO_ACCOUNT",
+        description="Wave account for TAO holdings in the contract/emissions wallet",
+    )
+    mining_tao_asset_account: str = Field(
+        "TAO Holdings - Mining",
+        alias="WAVE_MINING_TAO_ACCOUNT",
+        description="Wave account for TAO holdings in the mining wallet",
+    )
+    payment_tao_asset_account: str = Field(
+        "TAO Holdings - Payment",
+        alias="WAVE_PAYMENT_TAO_ACCOUNT",
+        description="Wave account for TAO holdings in the payment wallet",
+    )
+    kraken_tao_asset_account: str = Field(
+        "TAO Holdings - Kraken",
+        alias="WAVE_KRAKEN_TAO_ACCOUNT",
+        description="Wave account for TAO holdings on the Kraken exchange",
     )
     transfer_proceeds_account: str = Field(
         "Exchange Clearing - Kraken",

@@ -36,7 +36,7 @@ def parse_date(date_str: str) -> int:
 
 def run():
     parser = argparse.ArgumentParser(
-        description='Bittensor Mining Emissions Tracker',
+        description="Bittensor Mining Emissions Tracker",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -61,129 +61,148 @@ Examples:
   # Generate journal entries for entire year
   track-mining --mode journal --year 2025
 
+  # Verify balances against on-chain data for a month
+  track-mining --mode verify --month 2025-11
+
+  # Verify balances for entire year
+  track-mining --mode verify --year 2025
+
   # Initial seeding - process from specific start date
   track-mining --mode auto --start-date 2024-11-01
   
   # Regenerate all data (clear and reprocess from date)
   track-mining --mode auto --start-date 2024-01-01 --regenerate
-        """
+        """,
     )
-    
+
     parser.add_argument(
-        '--mode',
-        choices=['auto', 'income', 'sales', 'transfers', 'journal'],
-        default='auto',
-        help='''Mode of operation:
+        "--mode",
+        choices=["auto", "income", "sales", "transfers", "journal", "verify"],
+        default="auto",
+        help="""Mode of operation:
             auto - Process all transaction types (default)
             income - Process only ALPHA mining emissions
             sales - Process only ALPHA → TAO conversions (undelegations)
             transfers - Process only TAO → Kraken transfers
             journal - Generate monthly Wave journal entries
-        '''
+            verify - Verify lot balances against on-chain data
+        """,
     )
-    
+
     parser.add_argument(
-        '--start-date',
+        "--start-date",
         type=str,
         default=None,
-        help=('Start date in YYYY-MM-DD format. When omitted, continues from the '
-              'last processed timestamp. Required for first-time runs.')
+        help=(
+            "Start date in YYYY-MM-DD format. When omitted, continues from the "
+            "last processed timestamp. Required for first-time runs."
+        ),
     )
-    
+
     parser.add_argument(
-        '--end-date',
+        "--end-date",
         type=str,
         default=None,
-        help='End date in YYYY-MM-DD format. Defaults to now if not specified.'
+        help="End date in YYYY-MM-DD format. Defaults to now if not specified.",
     )
-    
+
     parser.add_argument(
-        '--month',
+        "--month",
         type=str,
         default=None,
-        help='Month for journal entries in YYYY-MM format (default: last month)'
+        help="Month for journal entries in YYYY-MM format (default: last month)",
     )
-    
+
     parser.add_argument(
-        '--year',
+        "--year",
         type=int,
         default=None,
-        help='Year for journal entries (generates all 12 months)'
+        help="Year for journal entries (generates all 12 months)",
     )
-    
+
     parser.add_argument(
-        '--regenerate',
-        action='store_true',
-        help='Clear existing data before processing (forces full regeneration)'
+        "--regenerate",
+        action="store_true",
+        help="Clear existing data before processing (forces full regeneration)",
     )
-    
+
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Show detailed lot breakdown in verify mode (auto-enabled on mismatch)",
+    )
+
     args = parser.parse_args()
-    
+
     # Parse date arguments
     start_time = parse_date(args.start_date) if args.start_date else None
     end_time = parse_date(args.end_date) if args.end_date else None
-    
+
     # Load configuration
     config = TrackerSettings()
-    
+
     # Validate mining configuration
     if not config.miner_hotkey_ss58:
-        print("Error: MINER_HOTKEY_SS58 environment variable is required for mining tracker")
+        print(
+            "Error: MINER_HOTKEY_SS58 environment variable is required for mining tracker"
+        )
         print("Please set it in your .env file")
         return 1
-    
+
     if not config.mining_tracker_sheet_id:
-        print("Error: MINING_TRACKER_SHEET_ID environment variable is required for mining tracker")
+        print(
+            "Error: MINING_TRACKER_SHEET_ID environment variable is required for mining tracker"
+        )
         print("Please set it in your .env file")
         return 1
-    
+
     # Use miner coldkey if specified, otherwise fall back to payout_coldkey_ss58
     miner_coldkey = config.miner_coldkey_ss58 or config.payout_coldkey_ss58
-    
+
     if not miner_coldkey:
         print("Error: Either MINER_COLDKEY_SS58 or PAYOUT_COLDKEY_SS58 must be set")
         print("Please set one in your .env file")
         return 1
-    
+
     # Initialize clients
     print("Initializing TaoStats API client...")
     taostats_client = TaoStatsAPIClient()
-    
+
     # Initialize tracker for mining emissions
     print("Initializing Mining tracker...")
     tracker = MiningTracker(
         price_client=taostats_client,
-        wallet_client=taostats_client
+        wallet_client=taostats_client,
     )
-    
-    # Handle regeneration if requested (optional --end-date; when provided, lots past end are deleted)
+
+    # Handle regeneration if requested
     if args.regenerate:
         if not start_time:
             print("Error: --start-date is required when using --regenerate")
             return 1
         tracker.regenerate_from(start_time, end_time=end_time)
         tracker.create_opening_lots(start_time)
-    
+
     # Execute based on mode
-    if args.mode == 'auto':
+    if args.mode == "auto":
         tracker.run(start_time=start_time, end_time=end_time)
-        
-    elif args.mode == 'income':
+
+    elif args.mode == "income":
         window_desc = _describe_window(args.start_date, args.end_date)
         print(f"\nProcessing mining emissions for {window_desc}...")
         tracker.process_staking_emissions(start_time=start_time, end_time=end_time)
-        
-    elif args.mode == 'sales':
+
+    elif args.mode == "sales":
         window_desc = _describe_window(args.start_date, args.end_date)
         print(f"\nProcessing undelegations (ALPHA → TAO) for {window_desc}...")
         tracker.process_disposals(start_time=start_time, end_time=end_time)
-        
-    elif args.mode == 'transfers':
+
+    elif args.mode == "transfers":
         window_desc = _describe_window(args.start_date, args.end_date)
         print(f"\nProcessing transfers for {window_desc}...")
         tracker.process_disposals(start_time=start_time, end_time=end_time)
-        
-    elif args.mode == 'journal':
+
+    elif args.mode == "journal":
         if args.year:
             print(f"\nGenerating journal entries for all of {args.year}...")
             tracker.generate_yearly_journal_entries(args.year)
@@ -198,7 +217,20 @@ Examples:
                     month = f"{today.year}-{today.month - 1:02d}"
             print(f"\nGenerating journal entries for {month}...")
             tracker.generate_monthly_journal_entries(month)
-    
+
+    elif args.mode == "verify":
+        if args.year:
+            tracker.verify_balances_yearly(
+                args.year, wallet_label="Mining", verbose=args.verbose
+            )
+        elif args.month:
+            tracker.verify_balances(
+                args.month, wallet_label="Mining", verbose=args.verbose
+            )
+        else:
+            print("Error: --year or --month is required for verify mode")
+            return 1
+
     print("\n✓ Done!")
 
 

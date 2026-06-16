@@ -19,6 +19,7 @@ def test_explicit_start_takes_priority_over_last_timestamp():
 def test_end_time_defaults_to_now_when_not_provided():
     """When end_time is None, it defaults to current time."""
     import time
+
     before = int(time.time())
     start, end = BittensorTracker._resolve_time_window(
         "contract income",

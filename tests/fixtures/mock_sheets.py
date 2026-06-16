@@ -25,7 +25,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from emissions_tracker.models import AlphaLot, TaoLot
+from emissions_tracker.models import AlphaLot, SourceType, TaoLot
 from emissions_tracker.utils import initialize_sheets
 from tests.fixtures.mock_config import (
     TEST_PAYOUT_COLDKEY_SS58,
@@ -76,6 +76,7 @@ class MockWorksheet:
             spreadsheet: Parent MockSpreadsheet reference
         """
         self.name = name
+        self.title = name
         self.headers = []
         self.spreadsheet = spreadsheet
         self.rows: List[List[Any]] = []
@@ -267,6 +268,29 @@ class MockWorksheet:
             )
         )
 
+    def delete_rows(self, start_index: int, end_index: int = None):
+        """Delete row(s) by 1-based index (mirrors gspread API).
+
+        Args:
+            start_index: 1-based row index to delete.
+            end_index: If provided, delete rows from start_index to end_index (inclusive).
+                       If not provided, delete a single row.
+        """
+        if end_index is None:
+            end_index = start_index
+        # Convert to 0-based and delete in reverse to preserve indices
+        start_0 = start_index - 1
+        end_0 = end_index - 1
+        for idx in range(end_0, start_0 - 1, -1):
+            if 0 <= idx < len(self.rows):
+                self.rows.pop(idx)
+        self.operations.append(
+            WorksheetOperation(
+                operation_type="delete_rows",
+                data={"start": start_index, "end": end_index},
+            )
+        )
+
     def sort(self, *args, **kwargs):
         """Mock sort operation (no-op for testing but tracked)."""
         self.sort_calls += 1
@@ -369,7 +393,7 @@ class MockSpreadsheet:
             sheet_id: Spreadsheet ID
         """
         self.sheet_id = sheet_id
-        self.worksheets: Dict[str, MockWorksheet] = {}
+        self._worksheets: Dict[str, MockWorksheet] = {}
         self.batch_update_calls = 0
         self.values_batch_update_calls = 0
 
@@ -383,10 +407,10 @@ class MockSpreadsheet:
         Returns:
             MockWorksheet instance
         """
-        if name not in self.worksheets:
+        if name not in self._worksheets:
             worksheet = MockWorksheet(name, spreadsheet=self)
-            self.worksheets[name] = worksheet
-        return self.worksheets[name]
+            self._worksheets[name] = worksheet
+        return self._worksheets[name]
 
     def add_worksheet(
         self, title: str, rows: int = 100, cols: int = 20
@@ -402,10 +426,18 @@ class MockSpreadsheet:
         Returns:
             MockWorksheet instance
         """
-        if title not in self.worksheets:
+        if title not in self._worksheets:
             worksheet = MockWorksheet(title, spreadsheet=self)
-            self.worksheets[title] = worksheet
-        return self.worksheets[title]
+            self._worksheets[title] = worksheet
+        return self._worksheets[title]
+
+    def worksheets(self) -> List[MockWorksheet]:
+        """Return all worksheets as a list (mirrors gspread API)."""
+        return list(self._worksheets.values())
+
+    def del_worksheet(self, ws: MockWorksheet):
+        """Delete a worksheet by reference (mirrors gspread API)."""
+        self._worksheets.pop(ws.title, None)
 
     def values_batch_update(self, body: Dict[str, Any]):
         """
@@ -422,8 +454,8 @@ class MockSpreadsheet:
             # Parse "SheetName!A2:B2" format
             if "!" in range_str:
                 sheet_name, cell_range = range_str.split("!", 1)
-                if sheet_name in self.worksheets:
-                    self.worksheets[sheet_name].batch_update(
+                if sheet_name in self._worksheets:
+                    self._worksheets[sheet_name].batch_update(
                         [{"range": cell_range, "values": values}]
                     )
 
@@ -434,7 +466,7 @@ class MockSpreadsheet:
 
     def get_worksheet(self, name: str) -> Optional[MockWorksheet]:
         """Get worksheet by name without auto-creating."""
-        return self.worksheets.get(name)
+        return self._worksheets.get(name)
 
 
 class MockSheetsClient:
@@ -637,6 +669,7 @@ def seed_historical_lots(
         from emissions_tracker.trackers.contract_tracker import (
             INCOME_SHEET,
             TAO_LOTS_SHEET,
+            TRANSFERS_IN_SHEET,
         )
 
         with get_alpha_lot_id.context():
@@ -670,13 +703,16 @@ def seed_historical_lots(
             all_lots = [opening_alpha_lot] + income_lots + emission_lots
             all_lots.sort(key=lambda x: x.timestamp)
 
-            # Create and append all lots in chronological order
+            # Create and append lots to the correct sheet based on source type
             lot_counter = 1
             income_sheet = spreadsheet.get_worksheet(INCOME_SHEET)
+            transfers_in_sheet = spreadsheet.get_worksheet(TRANSFERS_IN_SHEET)
             for lot in all_lots:
-                # Overwrite alpha lot id so they are sequential
                 lot.lot_id = f"ALPHA-{lot_counter:04d}"
-                income_sheet.append_row(lot.to_sheet_row())
+                if lot.source_type == SourceType.TRANSFER_IN:
+                    transfers_in_sheet.append_row(lot.to_sheet_row())
+                else:
+                    income_sheet.append_row(lot.to_sheet_row())
                 lot_counter += 1
 
             # Seed TAO lots: opening lot + deposit lots

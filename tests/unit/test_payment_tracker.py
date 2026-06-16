@@ -180,13 +180,14 @@ class TestPaymentRun:
 class TestPaymentJournalAccounting:
     """Test that journal entries correctly credit Payment Income."""
 
-    def test_deposit_credits_payment_income_account(self, mock_wave_settings):
-        """When deposit_income_account is provided, deposits credit that account."""
+    def test_deposit_credits_category_account(self, mock_wave_settings):
+        """Deposits credit the account specified in their Category field."""
         deposit_records = [
             {
                 "Deposit ID": "DEP-0001",
                 "Timestamp": INBOUND_1_TS,
                 "USD FMV": 2500.00,
+                "Category": mock_wave_settings.payment_income_account,
             }
         ]
 
@@ -200,7 +201,7 @@ class TestPaymentJournalAccounting:
             wave_config=mock_wave_settings,
             start_ts=int(datetime(2025, 11, 1, tzinfo=timezone.utc).timestamp()),
             end_ts=int(datetime(2025, 12, 1, tzinfo=timezone.utc).timestamp()),
-            deposit_income_account=mock_wave_settings.payment_income_account,
+            tao_asset_account=mock_wave_settings.payment_tao_asset_account,
         )
 
         accounts = {e.account: e for e in entries}
@@ -210,13 +211,11 @@ class TestPaymentJournalAccounting:
         payment_entry = accounts[mock_wave_settings.payment_income_account]
         assert payment_entry.credit == pytest.approx(2500.00)
 
-        tao_entry = accounts[mock_wave_settings.tao_asset_account]
+        tao_entry = accounts[mock_wave_settings.payment_tao_asset_account]
         assert tao_entry.debit == pytest.approx(2500.00)
 
-    def test_deposit_without_override_credits_business_checking(
-        self, mock_wave_settings
-    ):
-        """Without deposit_income_account, deposits credit business checking."""
+    def test_deposit_without_category_is_skipped(self, mock_wave_settings):
+        """Deposits without a Category are skipped in journal generation."""
         deposit_records = [
             {
                 "Deposit ID": "DEP-0001",
@@ -235,11 +234,10 @@ class TestPaymentJournalAccounting:
             wave_config=mock_wave_settings,
             start_ts=int(datetime(2025, 11, 1, tzinfo=timezone.utc).timestamp()),
             end_ts=int(datetime(2025, 12, 1, tzinfo=timezone.utc).timestamp()),
+            tao_asset_account=mock_wave_settings.payment_tao_asset_account,
         )
 
-        accounts = {e.account: e for e in entries}
-        assert mock_wave_settings.business_checking_account in accounts
-        assert mock_wave_settings.payment_income_account not in accounts
+        assert len(entries) == 0
 
     def test_journal_debits_equal_credits(self, mock_wave_settings):
         """Journal entries must balance (debits == credits)."""
@@ -248,6 +246,7 @@ class TestPaymentJournalAccounting:
                 "Deposit ID": "DEP-0001",
                 "Timestamp": INBOUND_1_TS,
                 "USD FMV": 2500.00,
+                "Category": mock_wave_settings.payment_income_account,
             }
         ]
         transfer_records = [
@@ -272,7 +271,7 @@ class TestPaymentJournalAccounting:
             wave_config=mock_wave_settings,
             start_ts=int(datetime(2025, 11, 1, tzinfo=timezone.utc).timestamp()),
             end_ts=int(datetime(2025, 12, 1, tzinfo=timezone.utc).timestamp()),
-            deposit_income_account=mock_wave_settings.payment_income_account,
+            tao_asset_account=mock_wave_settings.payment_tao_asset_account,
         )
 
         total_debits = sum(e.debit for e in entries)
@@ -296,7 +295,7 @@ class TestPaymentSheetManagement:
             TEST_PAYMENT_TRACKER_SHEET_ID, "TAO Lots"
         )
         transfers_ws = mock_sheets.get_worksheet(
-            TEST_PAYMENT_TRACKER_SHEET_ID, "Transfers"
+            TEST_PAYMENT_TRACKER_SHEET_ID, "TAO Transfers"
         )
 
         # Rows = header + data rows

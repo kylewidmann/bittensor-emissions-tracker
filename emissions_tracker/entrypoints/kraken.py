@@ -27,6 +27,7 @@ from emissions_tracker.clients.kraken_statement import (
 )
 from emissions_tracker.config import TrackerSettings, WaveAccountSettings
 from emissions_tracker.models import TaoTransfer
+from emissions_tracker.sheet_names import TRANSFERS_SHEET
 
 WAVE_EXCHANGE_FEE_ACCOUNT = "Exchange Fees - Kraken"
 WAVE_STAKING_INCOME_KRAKEN = "Staking Income - Kraken"
@@ -40,7 +41,6 @@ class ReconciliationResult:
     subledger_proceeds: float
     gross_tao_to_usd: float
     cash_fees: float
-    tao_fees: float
     kraken_withdrawn_usd: float
     price_difference: float
     clearing_correction: float
@@ -80,7 +80,7 @@ def _read_subledger_transfers(
             continue
         try:
             sheet = client.open_by_key(sheet_id)
-            ws = sheet.worksheet("Transfers")
+            ws = sheet.worksheet(TRANSFERS_SHEET)
             records = ws.get_all_records()
             for record in records:
                 try:
@@ -121,17 +121,20 @@ def reconcile_month(
 ) -> ReconciliationResult:
     """Reconcile sub-ledger transfers against Kraken data for one month.
 
-    Each month is standalone. The correction formula uses only this month's
-    statement data: price_diff = subledger - gross_TAO_to_USD, and
-    clearing_correction = cash_fees + price_diff.
+    Each month is standalone. The statement tracks which side each fee was
+    on: sell-side fees consumed TAO (already reducing gross_tao_to_usd),
+    buy-side fees reduced USD cash. We adjust the gross upward by the exact
+    sell-side fee total so price_diff reflects only the true execution
+    price difference, avoiding double-counting.
     """
     subledger_proceeds = round(sum(round(t.usd_proceeds, 2) for t in transfers), 2)
 
     gross_tao_to_usd = kraken.gross_tao_to_usd
-    cash_fees = kraken.total_cash_fees_usd
-    tao_fees = kraken.total_tao_fees_usd
+    cash_fees = kraken.total_fees_usd
+    tao_side_fees = round(kraken.total_tao_side_fees_usd, 2)
 
-    price_diff = round(subledger_proceeds - gross_tao_to_usd, 2)
+    adjusted_gross = gross_tao_to_usd + tao_side_fees
+    price_diff = round(subledger_proceeds - adjusted_gross, 2)
     clearing_correction = round(cash_fees + price_diff, 2)
 
     result = ReconciliationResult(
@@ -139,7 +142,6 @@ def reconcile_month(
         subledger_proceeds=subledger_proceeds,
         gross_tao_to_usd=gross_tao_to_usd,
         cash_fees=cash_fees,
-        tao_fees=tao_fees,
         kraken_withdrawn_usd=kraken.total_withdrawn_usd,
         price_difference=price_diff,
         clearing_correction=clearing_correction,
@@ -163,27 +165,26 @@ def _generate_journal_entries(
 ) -> List[Dict]:
     """Generate correcting journal entries for the reconciliation gap.
 
-    Produces two balanced entry sets per month:
-      1. Exchange Clearing: cash fees + price diff (standalone correction)
-      2. TAO Holdings: TAO fees + staking rewards at FMV (cost basis)
+    All fees are a single entry (regardless of whether paid from USD or TAO).
+    The double-counting is resolved upstream in reconcile_month by adjusting
+    the gross for TAO consumed, so price_diff is clean.
+    Staking rewards flow through TAO Holdings / Staking Income at FMV.
     """
     clearing = wave_config.transfer_proceeds_account
-    tao_holdings = wave_config.tao_asset_account
     stcg = wave_config.short_term_gain_account
+    tao_holdings = wave_config.kraken_tao_asset_account
     month_str = r.year_month
     date = f"{month_str}-01"
 
     entries: List[Dict] = []
-
-    # --- Exchange Clearing entries ---
-    clearing_components: List[Dict] = []
+    components: List[Dict] = []
 
     if r.cash_fees > 0.005:
-        clearing_components.append(
+        components.append(
             {
                 "account": WAVE_EXCHANGE_FEE_ACCOUNT,
                 "amount": round(r.cash_fees, 2),
-                "description": f"Kraken cash trading fees for {month_str}",
+                "description": f"Kraken trading fees for {month_str}",
             }
         )
 
@@ -198,7 +199,7 @@ def _generate_journal_entries(
                 f"Brokerage price gain for {month_str}"
                 f" (Kraken execution higher than sub-ledger price)"
             )
-        clearing_components.append(
+        components.append(
             {
                 "account": stcg,
                 "amount": round(r.price_difference, 2),
@@ -206,9 +207,9 @@ def _generate_journal_entries(
             }
         )
 
-    if clearing_components:
+    if components:
         clearing_net = 0.0
-        for comp in clearing_components:
+        for comp in components:
             amt = comp["amount"]
             clearing_net -= amt
             entries.append(
@@ -246,54 +247,32 @@ def _generate_journal_entries(
             }
         )
 
-    # --- TAO Holdings entries ---
-    tao_components: List[Dict] = []
-
-    if r.tao_fees > 0.005:
-        tao_components.append(
-            {
-                "account": WAVE_EXCHANGE_FEE_ACCOUNT,
-                "amount": round(r.tao_fees, 2),
-                "description": f"Kraken TAO trading fees for {month_str}",
-            }
-        )
-
-    if r.rewards_value_usd > 0.005:
-        tao_components.append(
-            {
-                "account": WAVE_STAKING_INCOME_KRAKEN,
-                "amount": -round(r.rewards_value_usd, 2),
-                "description": (
-                    f"Kraken staking rewards for {month_str}" f" (cost basis at FMV)"
-                ),
-            }
-        )
-
-    if tao_components:
-        tao_net = 0.0
-        for comp in tao_components:
-            amt = comp["amount"]
-            tao_net -= amt
-            entries.append(
-                {
-                    "date": date,
-                    "account": comp["account"],
-                    "debit": amt if amt > 0 else 0.0,
-                    "credit": abs(amt) if amt < 0 else 0.0,
-                    "description": comp["description"],
-                    "section": "tao_holdings",
-                }
-            )
-
-        tao_net = round(tao_net, 2)
+    rewards_usd = round(r.rewards_value_usd, 2)
+    if rewards_usd > 0.005:
         entries.append(
             {
                 "date": date,
                 "account": tao_holdings,
-                "debit": tao_net if tao_net > 0 else 0.0,
-                "credit": abs(tao_net) if tao_net < 0 else 0.0,
-                "description": f"TAO Holdings adjustment for {month_str}",
-                "section": "tao_holdings",
+                "debit": rewards_usd,
+                "credit": 0.0,
+                "description": (
+                    f"Kraken staking rewards for {month_str}"
+                    f" ({r.rewards_tao:.8f} TAO at FMV)"
+                ),
+                "section": "staking",
+            }
+        )
+        entries.append(
+            {
+                "date": date,
+                "account": WAVE_STAKING_INCOME_KRAKEN,
+                "debit": 0.0,
+                "credit": rewards_usd,
+                "description": (
+                    f"Kraken staking income for {month_str}"
+                    f" ({r.rewards_tao:.8f} TAO at FMV)"
+                ),
+                "section": "staking",
             }
         )
 
@@ -306,8 +285,7 @@ def print_reconciliation_report(results: List[ReconciliationResult]) -> None:
     print("KRAKEN EXCHANGE CLEARING RECONCILIATION REPORT")
     print("=" * 80)
 
-    total_cash_fees = 0.0
-    total_tao_fees = 0.0
+    total_fees = 0.0
     total_price_diff = 0.0
     total_clearing_corr = 0.0
     all_entries: List[Dict] = []
@@ -318,8 +296,7 @@ def print_reconciliation_report(results: List[ReconciliationResult]) -> None:
         print(f"  TAO sold:                {r.tao_sold:>12.4f}")
         print(f"  Sub-ledger proceeds:     ${r.subledger_proceeds:>11,.2f}")
         print(f"  TAO->USD gross proceeds: ${r.gross_tao_to_usd:>11,.2f}")
-        print(f"  Cash fees (buy-side):    ${r.cash_fees:>11,.2f}")
-        print(f"  TAO fees (sell-side):    ${r.tao_fees:>11,.2f}")
+        print(f"  Trading fees (USD):      ${r.cash_fees:>11,.2f}")
         print(f"  USD withdrawn:           ${r.kraken_withdrawn_usd:>11,.2f}")
 
         price_sign = "loss" if r.price_difference > 0 else "gain"
@@ -339,30 +316,11 @@ def print_reconciliation_report(results: List[ReconciliationResult]) -> None:
             f" (${r.ending_tao_value_usd:,.4f})"
         )
 
-        clearing_entries = [
-            e for e in r.journal_entries if e.get("section") == "clearing"
-        ]
-        tao_entries = [
-            e for e in r.journal_entries if e.get("section") == "tao_holdings"
-        ]
-
-        if clearing_entries:
-            print(f"\n  Exchange Clearing Entries for {r.year_month}:")
+        if r.journal_entries:
+            print(f"\n  Journal Entries for {r.year_month}:")
             print(f"  {'Account':<35s} {'Debit':>10s} {'Credit':>10s}   Description")
             print(f"  {'-' * 90}")
-            for e in clearing_entries:
-                debit_str = f"${e['debit']:,.2f}" if e["debit"] else ""
-                credit_str = f"${e['credit']:,.2f}" if e["credit"] else ""
-                print(
-                    f"  {e['account']:<35s} {debit_str:>10s} {credit_str:>10s}"
-                    f"   {e['description']}"
-                )
-
-        if tao_entries:
-            print(f"\n  TAO Holdings Entries for {r.year_month}:")
-            print(f"  {'Account':<35s} {'Debit':>10s} {'Credit':>10s}   Description")
-            print(f"  {'-' * 90}")
-            for e in tao_entries:
+            for e in r.journal_entries:
                 debit_str = f"${e['debit']:,.2f}" if e["debit"] else ""
                 credit_str = f"${e['credit']:,.2f}" if e["credit"] else ""
                 print(
@@ -380,16 +338,13 @@ def print_reconciliation_report(results: List[ReconciliationResult]) -> None:
             )
 
         all_entries.extend(r.journal_entries)
-        total_cash_fees += r.cash_fees
-        total_tao_fees += r.tao_fees
+        total_fees += r.cash_fees
         total_price_diff += r.price_difference
         total_clearing_corr += r.clearing_correction
 
     print(f"\n{'=' * 80}")
     print("YEAR TOTALS")
-    print(f"  Total cash fees:         ${total_cash_fees:>11,.2f}")
-    print(f"  Total TAO fees:          ${total_tao_fees:>11,.2f}")
-    print(f"  Total trading fees:      ${total_cash_fees + total_tao_fees:>11,.2f}")
+    print(f"  Total trading fees:      ${total_fees:>11,.2f}")
     price_sign = "net loss" if total_price_diff > 0 else "net gain"
     print(f"  Total price difference:  ${total_price_diff:>11,.2f}  ({price_sign})")
     print(f"  Total clearing correct.: ${total_clearing_corr:>11,.2f}")
@@ -419,9 +374,7 @@ def print_reconciliation_report(results: List[ReconciliationResult]) -> None:
         total_d = sum(e["debit"] for e in all_entries)
         total_c = sum(e["credit"] for e in all_entries)
         print(f"  {'-' * 116}")
-        print(
-            f"  {'TOTAL':<12s} {'':<35s} ${total_d:>9,.2f} ${total_c:>9,.2f}"
-        )
+        print(f"  {'TOTAL':<12s} {'':<35s} ${total_d:>9,.2f} ${total_c:>9,.2f}")
 
     print(f"{'=' * 120}\n")
 

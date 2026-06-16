@@ -31,6 +31,7 @@ track-contract = "emissions_tracker.entrypoints.contract:run"
 track-mining = "emissions_tracker.entrypoints.mining:run"
 track-payment = "emissions_tracker.entrypoints.payment:run"
 track-kraken = "emissions_tracker.entrypoints.kraken:run"
+reconcile-summary = "emissions_tracker.entrypoints.reconcile_summary:run"
 
 [build-system]
 requires = ["poetry-core"]

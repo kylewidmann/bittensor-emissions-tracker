@@ -2,15 +2,15 @@
 
 Loads test data from tests/data/mining/ for mining tracker tests.
 """
+
 import json
+from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, List
+from typing import Callable, Dict
+
 import pytest
 
-from emissions_tracker.models import (
-    AlphaLot, TaoStatsStakeBalance
-)
-from datetime import datetime
+from emissions_tracker.models import AlphaLot, SourceType, TaoStatsStakeBalance
 
 # Mining test data directory
 MINING_TEST_DATA_DIR = Path(__file__).parent.parent / "data" / "mining"
@@ -34,9 +34,11 @@ def mining_stake_balances(mining_raw_stake_balance):
 
 
 @pytest.fixture
-def mining_daily_stake_balances(mining_stake_balances: list[TaoStatsStakeBalance]) -> Dict[str, TaoStatsStakeBalance]:
+def mining_daily_stake_balances(
+    mining_stake_balances: list[TaoStatsStakeBalance],
+) -> Dict[str, TaoStatsStakeBalance]:
     """Group stake balances by day, keeping only the last balance of each day.
-    
+
     Returns dict mapping day string to TaoStatsStakeBalance object.
     """
     balances_by_day: Dict[str, TaoStatsStakeBalance] = {}
@@ -46,7 +48,7 @@ def mining_daily_stake_balances(mining_stake_balances: list[TaoStatsStakeBalance
                 balances_by_day[b.day] = b
         else:
             balances_by_day[b.day] = b
-    
+
     return balances_by_day
 
 
@@ -57,24 +59,23 @@ def compute_expected_mining_staking_emission_lots(
     get_alpha_lot_id: Callable[[], str],
 ) -> Callable[[datetime, datetime], list[AlphaLot]]:
     """Compute expected staking emissions for mining tracker from raw data.
-    
+
     For mining, there are NO delegation/undelegation events to account for.
     Emissions are simply the balance increases from day to day.
-    
+
     Returns:
         Function that computes emission lots for a given date range
     """
 
     def _compute_expected_mining_staking_emissions(
-        start_date: datetime,
-        end_date: datetime
+        start_date: datetime, end_date: datetime
     ) -> list[AlphaLot]:
         """Compute expected staking emissions from mining balance history."""
         from tests.utils import compute_staking_emissions_from_balances
-        
+
         start_ts = int(start_date.timestamp())
         end_ts = int(end_date.timestamp())
-        
+
         # For mining, pass empty dict for daily_stake_events (no delegation/undelegation events)
         return compute_staking_emissions_from_balances(
             daily_stake_balances=mining_daily_stake_balances,
@@ -83,6 +84,7 @@ def compute_expected_mining_staking_emission_lots(
             end_ts=end_ts,
             get_tao_price_at_timestamp=historical_prices.get_price_for_timestamp,
             get_lot_id=get_alpha_lot_id,
+            source_type=SourceType.MINING,
         )
-    
+
     return _compute_expected_mining_staking_emissions

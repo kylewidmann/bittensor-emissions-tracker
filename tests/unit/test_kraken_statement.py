@@ -219,8 +219,7 @@ class TestKrakenMonthSummaryProperties:
                     date="2025-01-01",
                     tao_sold=1.0,
                     usd_received=100.0,
-                    fee_usd_cash=2.0,
-                    fee_usd_tao=0.0,
+                    fee_usd=2.0,
                 )
             ],
         )
@@ -228,7 +227,6 @@ class TestKrakenMonthSummaryProperties:
         assert s.total_usd_received == 100.0
         assert s.total_fees_usd == 2.0
         assert s.total_cash_fees_usd == 2.0
-        assert s.total_tao_fees_usd == 0.0
         assert s.gross_trade_proceeds == 100.0
         assert s.gross_tao_to_usd == 100.0
         assert s.net_trade_proceeds == 98.0

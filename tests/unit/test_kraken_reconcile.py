@@ -45,10 +45,10 @@ def _make_transfer(
 def _make_kraken_month(
     year_month: str = "2025-07",
     deposits_tao: float = 10.0,
-    trades_tao: float = 9.99,
+    trades_tao: float = 10.0,
     usd_received: float = 3481.01,
     cash_fees: float = 9.89,
-    tao_fees: float = 0.0,
+    tao_side_fee: float = 0.0,
     withdrawn_usd: float = 3300.0,
     rewards_tao: float = 0.01,
     rewards_value_usd: float = 0.03,
@@ -64,8 +64,8 @@ def _make_kraken_month(
                 date=f"{year_month}-01",
                 tao_sold=trades_tao,
                 usd_received=usd_received,
-                fee_usd_cash=cash_fees,
-                fee_usd_tao=tao_fees,
+                fee_usd=cash_fees,
+                tao_side_fee_usd=tao_side_fee,
             )
         ],
         withdrawals=(
@@ -183,18 +183,48 @@ class TestReconcileMonth:
         result = reconcile_month([t1, t2], kraken, wave_config)
         assert result.subledger_proceeds == pytest.approx(3520.0)
 
-    def test_split_fees(self, wave_config):
-        """Cash fees and TAO fees are tracked separately."""
+    def test_fees_flow_through_clearing(self, wave_config):
+        """All trading fees are USD and flow through clearing."""
         transfers = [_make_transfer("X-1", 1751396400, 10.0, 3520.0)]
-        kraken = _make_kraken_month(
-            usd_received=3481.01, cash_fees=2.12, tao_fees=55.64
-        )
+        kraken = _make_kraken_month(usd_received=3481.01, cash_fees=57.76)
 
         result = reconcile_month(transfers, kraken, wave_config)
 
-        assert result.cash_fees == pytest.approx(2.12)
-        assert result.tao_fees == pytest.approx(55.64)
-        assert result.clearing_correction == pytest.approx(2.12 + 38.99)
+        assert result.cash_fees == pytest.approx(57.76)
+
+    def test_tao_side_fee_adjusts_gross(self, wave_config):
+        """Sell-side fees (paid from TAO) adjust gross upward to avoid double-counting."""
+        transfers = [_make_transfer("X-1", 1751396400, 48.1, 15100.99)]
+        kraken = _make_kraken_month(
+            deposits_tao=48.1,
+            trades_tao=47.923,
+            usd_received=15073.34,
+            cash_fees=57.76,
+            tao_side_fee=55.64,
+            ending_tao=0.00001760,
+        )
+        result = reconcile_month(transfers, kraken, wave_config)
+
+        adjusted_gross = 15073.34 + 55.64
+        expected_price_diff = round(15100.99 - adjusted_gross, 2)
+        expected_clearing = round(57.76 + expected_price_diff, 2)
+
+        assert result.price_difference == pytest.approx(expected_price_diff)
+        assert result.clearing_correction == pytest.approx(expected_clearing)
+
+    def test_no_adjustment_when_tao_sold_ge_deposited(self, wave_config):
+        """When TAO sold >= deposited (pre-September), no gross adjustment."""
+        transfers = [_make_transfer("X-1", 1751396400, 10.0, 3520.0)]
+        kraken = _make_kraken_month(
+            deposits_tao=10.0,
+            trades_tao=10.0,
+            usd_received=3481.01,
+            cash_fees=9.89,
+        )
+        result = reconcile_month(transfers, kraken, wave_config)
+
+        assert result.price_difference == pytest.approx(3520.0 - 3481.01)
+        assert result.clearing_correction == pytest.approx(9.89 + 38.99)
 
     def test_usd_deposits_tracked(self, wave_config):
         """USD deposits are captured in the result."""
@@ -230,7 +260,6 @@ class TestGenerateJournalEntries:
             subledger_proceeds=3520.0,
             gross_tao_to_usd=3481.01,
             cash_fees=9.89,
-            tao_fees=0.0,
             kraken_withdrawn_usd=3300.0,
             price_difference=38.99,
             clearing_correction=48.88,
@@ -260,7 +289,6 @@ class TestGenerateJournalEntries:
             subledger_proceeds=3520.0,
             gross_tao_to_usd=3481.01,
             cash_fees=9.89,
-            tao_fees=0.0,
             kraken_withdrawn_usd=3300.0,
             price_difference=38.99,
             clearing_correction=48.88,
@@ -290,7 +318,6 @@ class TestGenerateJournalEntries:
             subledger_proceeds=3400.0,
             gross_tao_to_usd=3481.01,
             cash_fees=9.89,
-            tao_fees=0.0,
             kraken_withdrawn_usd=3300.0,
             price_difference=-81.01,
             clearing_correction=-71.12,
@@ -319,51 +346,13 @@ class TestGenerateJournalEntries:
         assert len(stcg_credits) == 1
         assert stcg_credits[0]["credit"] == pytest.approx(81.01)
 
-    def test_tao_fee_entries(self, wave_config):
-        """TAO fees generate TAO Holdings entries, not clearing entries."""
-        r = ReconciliationResult(
-            year_month="2025-09",
-            subledger_proceeds=15100.99,
-            gross_tao_to_usd=15073.34,
-            cash_fees=2.12,
-            tao_fees=55.64,
-            kraken_withdrawn_usd=15070.0,
-            price_difference=27.65,
-            clearing_correction=29.77,
-            rewards_tao=0.0,
-            rewards_value_usd=0.0,
-            ending_cash_usd=1.22,
-            ending_tao=0.0,
-            ending_tao_value_usd=0.0,
-            tao_deposited=50.0,
-            tao_sold=50.0,
-            usd_deposited=0.0,
-        )
-        entries = _generate_journal_entries(r, wave_config)
-
-        tao_fee_entries = [
-            e
-            for e in entries
-            if e["account"] == WAVE_EXCHANGE_FEE_ACCOUNT
-            and e.get("section") == "tao_holdings"
-        ]
-        assert len(tao_fee_entries) == 1
-        assert tao_fee_entries[0]["debit"] == pytest.approx(55.64)
-
-        tao_holding_entries = [
-            e for e in entries if e["account"] == wave_config.tao_asset_account
-        ]
-        assert len(tao_holding_entries) == 1
-        assert tao_holding_entries[0]["credit"] == pytest.approx(55.64)
-
-    def test_staking_to_tao_holdings(self, wave_config):
-        """Staking rewards go to TAO Holdings (cost basis at FMV), not clearing."""
+    def test_staking_generates_tao_holdings_entries(self, wave_config):
+        """Staking rewards create TAO Holdings debit and Staking Income credit."""
         r = ReconciliationResult(
             year_month="2025-07",
             subledger_proceeds=0.0,
             gross_tao_to_usd=0.0,
             cash_fees=0.0,
-            tao_fees=0.0,
             kraken_withdrawn_usd=0.0,
             price_difference=0.0,
             clearing_correction=0.0,
@@ -377,54 +366,44 @@ class TestGenerateJournalEntries:
             usd_deposited=0.0,
         )
         entries = _generate_journal_entries(r, wave_config)
+        assert len(entries) == 2
 
-        reward_entries = [
+        tao_entry = [
+            e for e in entries if e["account"] == wave_config.kraken_tao_asset_account
+        ]
+        assert len(tao_entry) == 1
+        assert tao_entry[0]["debit"] == pytest.approx(3.55)
+        assert tao_entry[0]["credit"] == 0.0
+        assert tao_entry[0]["section"] == "staking"
+
+        income_entry = [
             e for e in entries if e["account"] == WAVE_STAKING_INCOME_KRAKEN
         ]
-        assert len(reward_entries) == 1
-        assert reward_entries[0]["credit"] == pytest.approx(3.55)
+        assert len(income_entry) == 1
+        assert income_entry[0]["credit"] == pytest.approx(3.55)
+        assert income_entry[0]["debit"] == 0.0
 
-        tao_entries = [
-            e for e in entries if e["account"] == wave_config.tao_asset_account
-        ]
-        assert len(tao_entries) == 1
-        assert tao_entries[0]["debit"] == pytest.approx(3.55)
-
-        clearing_entries = [
-            e for e in entries if e["account"] == wave_config.transfer_proceeds_account
-        ]
-        assert len(clearing_entries) == 0
-
-    def test_mixed_tao_fees_and_staking(self, wave_config):
-        """TAO fees and staking rewards combine in TAO Holdings."""
+    def test_staking_below_threshold_generates_no_entries(self, wave_config):
+        """Staking rewards below $0.005 are skipped."""
         r = ReconciliationResult(
-            year_month="2025-09",
+            year_month="2025-07",
             subledger_proceeds=0.0,
             gross_tao_to_usd=0.0,
             cash_fees=0.0,
-            tao_fees=55.64,
             kraken_withdrawn_usd=0.0,
             price_difference=0.0,
             clearing_correction=0.0,
-            rewards_tao=0.01,
-            rewards_value_usd=3.55,
+            rewards_tao=0.000001,
+            rewards_value_usd=0.004,
             ending_cash_usd=0.0,
-            ending_tao=0.01,
-            ending_tao_value_usd=3.5,
+            ending_tao=0.0,
+            ending_tao_value_usd=0.0,
             tao_deposited=0.0,
             tao_sold=0.0,
             usd_deposited=0.0,
         )
         entries = _generate_journal_entries(r, wave_config)
-
-        tao_section = [e for e in entries if e.get("section") == "tao_holdings"]
-        assert len(tao_section) == 3
-
-        tao_holding = [
-            e for e in tao_section if e["account"] == wave_config.tao_asset_account
-        ]
-        assert len(tao_holding) == 1
-        assert tao_holding[0]["credit"] == pytest.approx(52.09)
+        assert len(entries) == 0
 
     def test_no_entries_for_zero_gap(self, wave_config):
         r = ReconciliationResult(
@@ -432,7 +411,6 @@ class TestGenerateJournalEntries:
             subledger_proceeds=0.0,
             gross_tao_to_usd=0.0,
             cash_fees=0.0,
-            tao_fees=0.0,
             kraken_withdrawn_usd=0.0,
             price_difference=0.0,
             clearing_correction=0.0,
@@ -455,7 +433,6 @@ class TestGenerateJournalEntries:
             subledger_proceeds=3520.0,
             gross_tao_to_usd=3481.01,
             cash_fees=9.89,
-            tao_fees=0.0,
             kraken_withdrawn_usd=3300.0,
             price_difference=38.99,
             clearing_correction=48.88,
@@ -475,33 +452,6 @@ class TestGenerateJournalEntries:
         total_credits = sum(e["credit"] for e in clearing)
         assert total_debits == pytest.approx(total_credits)
 
-    def test_tao_entries_are_balanced(self, wave_config):
-        """TAO Holdings entries should have equal total debits and credits."""
-        r = ReconciliationResult(
-            year_month="2025-09",
-            subledger_proceeds=0.0,
-            gross_tao_to_usd=0.0,
-            cash_fees=0.0,
-            tao_fees=55.64,
-            kraken_withdrawn_usd=0.0,
-            price_difference=0.0,
-            clearing_correction=0.0,
-            rewards_tao=0.01,
-            rewards_value_usd=3.55,
-            ending_cash_usd=0.0,
-            ending_tao=0.01,
-            ending_tao_value_usd=3.5,
-            tao_deposited=0.0,
-            tao_sold=0.0,
-            usd_deposited=0.0,
-        )
-        entries = _generate_journal_entries(r, wave_config)
-        tao = [e for e in entries if e.get("section") == "tao_holdings"]
-
-        total_debits = sum(e["debit"] for e in tao)
-        total_credits = sum(e["credit"] for e in tao)
-        assert total_debits == pytest.approx(total_credits)
-
     def test_all_entries_balanced(self, wave_config):
         """All journal entries combined should have equal total debits and credits."""
         r = ReconciliationResult(
@@ -509,7 +459,6 @@ class TestGenerateJournalEntries:
             subledger_proceeds=3520.0,
             gross_tao_to_usd=3481.01,
             cash_fees=9.89,
-            tao_fees=4.89,
             kraken_withdrawn_usd=3300.0,
             price_difference=38.99,
             clearing_correction=48.88,

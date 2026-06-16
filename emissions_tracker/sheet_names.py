@@ -1,0 +1,10 @@
+"""Shared sheet name constants used across all trackers."""
+
+INCOME_SHEET = "Income"
+TRANSFERS_IN_SHEET = "Transfers In"
+SALES_SHEET = "Sales"
+EXPENSES_SHEET = "Expenses"
+DEPOSITS_SHEET = "Deposits"
+TAO_LOTS_SHEET = "TAO Lots"
+TRANSFERS_SHEET = "TAO Transfers"
+JOURNAL_SHEET = "Journal Entries"

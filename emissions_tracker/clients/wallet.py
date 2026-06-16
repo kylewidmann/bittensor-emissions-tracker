@@ -1,18 +1,21 @@
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Optional
+from typing import List, Optional
 
-from emissions_tracker.models import TaoStatsDelegation, TaoStatsStakeBalance, TaoStatsTransfer
+from emissions_tracker.models import (
+    TaoStatsDelegation,
+    TaoStatsStakeBalance,
+    TaoStatsTransfer,
+)
 
 
 class WalletClientInterface(ABC):
     """Abstract interface for wallet/blockchain data clients."""
-    
+
     @property
     @abstractmethod
     def name(self) -> str:
         """Return the name of the client for logging purposes."""
-        pass
-    
+
     @abstractmethod
     def get_transfers(
         self,
@@ -20,23 +23,22 @@ class WalletClientInterface(ABC):
         start_time: int,
         end_time: int,
         sender: Optional[str] = None,
-        receiver: Optional[str] = None
+        receiver: Optional[str] = None,
     ) -> List[TaoStatsTransfer]:
         """
         Fetch TAO transfers for an account.
-        
+
         Args:
             account_address: SS58 address to query
             start_time: Unix timestamp start
             end_time: Unix timestamp end
             sender: Optional sender filter
             receiver: Optional receiver filter
-            
+
         Returns:
             List of TaoStatsTransfer objects
         """
-        pass
-    
+
     @abstractmethod
     def get_delegations(
         self,
@@ -46,11 +48,11 @@ class WalletClientInterface(ABC):
         start_time: int,
         end_time: int,
         is_transfer: Optional[bool] = None,
-        action: Optional[str] = None
+        action: Optional[str] = None,
     ) -> List[TaoStatsDelegation]:
         """
         Fetch delegation events (DELEGATE/UNDELEGATE).
-        
+
         Args:
             netuid: Subnet ID
             delegate: Validator hotkey SS58
@@ -61,7 +63,7 @@ class WalletClientInterface(ABC):
                         If False, only return events without transfers.
                         If None, return all events.
             action: Optional action filter ('DELEGATE', 'UNDELEGATE', or None for all)
-            
+
         Returns:
             List of delegation dicts with keys:
                 - timestamp: int
@@ -77,27 +79,21 @@ class WalletClientInterface(ABC):
                 - transfer_address: Optional[str] (SS58)
                 - fee: float
         """
-        pass
-    
+
     @abstractmethod
     def get_stake_balance_history(
-        self,
-        netuid: int,
-        hotkey: str,
-        coldkey: str,
-        start_time: int,
-        end_time: int
+        self, netuid: int, hotkey: str, coldkey: str, start_time: int, end_time: int
     ) -> List[TaoStatsStakeBalance]:
         """
         Fetch historical stake balance snapshots.
-        
+
         Args:
             netuid: Subnet ID
             hotkey: Validator hotkey SS58
             coldkey: Coldkey SS58
             start_time: Unix timestamp start
             end_time: Unix timestamp end
-            
+
         Returns:
             List of balance dicts with keys:
                 - timestamp: int
@@ -105,4 +101,3 @@ class WalletClientInterface(ABC):
                 - alpha_balance: int (in RAO, divide by 1e9)
                 - tao_equivalent: int (in RAO)
         """
-        pass

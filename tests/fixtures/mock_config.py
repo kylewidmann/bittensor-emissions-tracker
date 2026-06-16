@@ -40,8 +40,12 @@ TEST_CONTRACT_INCOME_ACCOUNT = "Test Contract Income - Alpha"
 TEST_STAKING_INCOME_ACCOUNT = "Test Staking Income - Alpha"
 TEST_MINING_INCOME_ACCOUNT = "Test Mining Income - Alpha"
 TEST_PAYMENT_INCOME_ACCOUNT = "Test Payment Income - TAO"
-TEST_ALPHA_ASSET_ACCOUNT = "Test Alpha Holdings"
-TEST_TAO_ASSET_ACCOUNT = "Test TAO Holdings"
+TEST_CONTRACT_ALPHA_ASSET_ACCOUNT = "Test Alpha Holdings - Contract"
+TEST_MINING_ALPHA_ASSET_ACCOUNT = "Test Alpha Holdings - Mining"
+TEST_CONTRACT_TAO_ASSET_ACCOUNT = "Test TAO Holdings - Contract"
+TEST_MINING_TAO_ASSET_ACCOUNT = "Test TAO Holdings - Mining"
+TEST_PAYMENT_TAO_ASSET_ACCOUNT = "Test TAO Holdings - Payment"
+TEST_KRAKEN_TAO_ASSET_ACCOUNT = "Test TAO Holdings - Kraken"
 TEST_TRANSFER_PROCEEDS_ACCOUNT = "Test Exchange Clearing - Kraken"
 TEST_BLOCKCHAIN_FEE_ACCOUNT = "Test Blockchain Fees"
 TEST_SHORT_TERM_GAIN_ACCOUNT = "Test Short-term Capital Gains"
@@ -95,7 +99,7 @@ def mock_wave_settings():
     Usage:
         def test_something(mock_wave_settings):
             # Use default values
-            assert mock_wave_settings.alpha_asset_account == TEST_ALPHA_ASSET_ACCOUNT
+            assert mock_wave_settings.contract_alpha_asset_account == TEST_CONTRACT_ALPHA_ASSET_ACCOUNT
 
             # Or modify for specific test
             mock_wave_settings.short_term_gain_account = "Custom Account"
@@ -108,8 +112,12 @@ def mock_wave_settings():
             "WAVE_STAKING_INCOME_ACCOUNT": TEST_STAKING_INCOME_ACCOUNT,
             "WAVE_MINING_INCOME_ACCOUNT": TEST_MINING_INCOME_ACCOUNT,
             "WAVE_PAYMENT_INCOME_ACCOUNT": TEST_PAYMENT_INCOME_ACCOUNT,
-            "WAVE_ALPHA_ASSET_ACCOUNT": TEST_ALPHA_ASSET_ACCOUNT,
-            "WAVE_TAO_ASSET_ACCOUNT": TEST_TAO_ASSET_ACCOUNT,
+            "WAVE_CONTRACT_ALPHA_ACCOUNT": TEST_CONTRACT_ALPHA_ASSET_ACCOUNT,
+            "WAVE_MINING_ALPHA_ACCOUNT": TEST_MINING_ALPHA_ASSET_ACCOUNT,
+            "WAVE_CONTRACT_TAO_ACCOUNT": TEST_CONTRACT_TAO_ASSET_ACCOUNT,
+            "WAVE_MINING_TAO_ACCOUNT": TEST_MINING_TAO_ASSET_ACCOUNT,
+            "WAVE_PAYMENT_TAO_ACCOUNT": TEST_PAYMENT_TAO_ASSET_ACCOUNT,
+            "WAVE_KRAKEN_TAO_ACCOUNT": TEST_KRAKEN_TAO_ASSET_ACCOUNT,
             "WAVE_TRANSFER_PROCEEDS_ACCOUNT": TEST_TRANSFER_PROCEEDS_ACCOUNT,
             "WAVE_BLOCKCHAIN_FEE_ACCOUNT": TEST_BLOCKCHAIN_FEE_ACCOUNT,
             "WAVE_SHORT_TERM_GAIN_ACCOUNT": TEST_SHORT_TERM_GAIN_ACCOUNT,
